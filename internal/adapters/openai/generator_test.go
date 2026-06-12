@@ -2,6 +2,7 @@ package openai_test
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -36,11 +37,11 @@ func TestGeneratorSynthesize(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		g, err := openai.NewGenerator(srv.URL, "k", "gpt-test", false, srv.Client())
+		g, err := openai.NewGenerator(srv.URL, "k", "gpt-test", openai.Capabilities{}, srv.Client())
 		if err != nil {
 			t.Fatal(err)
 		}
-		ans, err := g.Synthesize(ctx, "what color is the sky?", hits)
+		ans, err := g.Synthesize(ctx, "what color is the sky?", hits, nil)
 		if err != nil {
 			t.Fatalf("Synthesize: %v", err)
 		}
@@ -98,11 +99,11 @@ func TestGeneratorSynthesize(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		g, err := openai.NewGenerator(srv.URL, "k", "gpt-test", true, srv.Client())
+		g, err := openai.NewGenerator(srv.URL, "k", "gpt-test", openai.Capabilities{StructuredOutput: true}, srv.Client())
 		if err != nil {
 			t.Fatal(err)
 		}
-		ans, err := g.Synthesize(ctx, "what color is the sky?", hits)
+		ans, err := g.Synthesize(ctx, "what color is the sky?", hits, nil)
 		if err != nil {
 			t.Fatalf("Synthesize: %v", err)
 		}
@@ -131,9 +132,9 @@ func TestGeneratorSynthesize(t *testing.T) {
 			_, _ = io.WriteString(w, `{"choices":[]}`)
 		}))
 		defer srv.Close()
-		g, _ := openai.NewGenerator(srv.URL, "", "m", false, srv.Client())
+		g, _ := openai.NewGenerator(srv.URL, "", "m", openai.Capabilities{}, srv.Client())
 
-		if _, err := g.Synthesize(ctx, "q", hits); err == nil {
+		if _, err := g.Synthesize(ctx, "q", hits, nil); err == nil {
 			t.Error("want error when the API returns no choices")
 		}
 	})
@@ -143,19 +144,96 @@ func TestGeneratorSynthesize(t *testing.T) {
 			w.WriteHeader(http.StatusBadGateway)
 		}))
 		defer srv.Close()
-		g, _ := openai.NewGenerator(srv.URL, "", "m", false, srv.Client())
+		g, _ := openai.NewGenerator(srv.URL, "", "m", openai.Capabilities{}, srv.Client())
 
-		if _, err := g.Synthesize(ctx, "q", hits); err == nil {
+		if _, err := g.Synthesize(ctx, "q", hits, nil); err == nil {
 			t.Error("want error on HTTP 502")
 		}
 	})
 }
 
+func TestGeneratorAttachments(t *testing.T) {
+	ctx := context.Background()
+	chunk, err := domain.NewChunk(domain.DeriveDocumentID("docs", "file:///a.md"), 0, "context")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hits := []domain.ChunkHit{{Chunk: chunk, Score: 1}}
+	img, err := domain.NewAttachment("image/png", "c.png", []byte{0x89, 0x50, 0x4e, 0x47})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pdf, err := domain.NewAttachment("application/pdf", "d.pdf", []byte("%PDF-1.4 stub"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const answerBody = `{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`
+
+	t.Run("image encodes as image_url when capability is on", func(t *testing.T) {
+		var body string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			b, _ := io.ReadAll(r.Body)
+			body = string(b)
+			_, _ = io.WriteString(w, answerBody)
+		}))
+		defer srv.Close()
+
+		g, _ := openai.NewGenerator(srv.URL, "k", "m", openai.Capabilities{ImageInput: true}, srv.Client())
+		if _, err := g.Synthesize(ctx, "q", hits, []domain.Attachment{img}); err != nil {
+			t.Fatalf("Synthesize: %v", err)
+		}
+		wantURL := "data:image/png;base64," + base64.StdEncoding.EncodeToString(img.Data)
+		if !strings.Contains(body, `"type":"image_url"`) || !strings.Contains(body, wantURL) {
+			t.Errorf("request missing image_url part: %s", body)
+		}
+	})
+
+	t.Run("document encodes as a file part when capability is on", func(t *testing.T) {
+		var body string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			b, _ := io.ReadAll(r.Body)
+			body = string(b)
+			_, _ = io.WriteString(w, answerBody)
+		}))
+		defer srv.Close()
+
+		g, _ := openai.NewGenerator(srv.URL, "k", "m", openai.Capabilities{DocumentInput: true}, srv.Client())
+		if _, err := g.Synthesize(ctx, "q", hits, []domain.Attachment{pdf}); err != nil {
+			t.Fatalf("Synthesize: %v", err)
+		}
+		wantURL := "data:application/pdf;base64," + base64.StdEncoding.EncodeToString(pdf.Data)
+		if !strings.Contains(body, `"type":"file"`) || !strings.Contains(body, wantURL) || !strings.Contains(body, `"filename":"d.pdf"`) {
+			t.Errorf("request missing file part: %s", body)
+		}
+	})
+
+	t.Run("image without capability errors before any request", func(t *testing.T) {
+		called := false
+		srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true }))
+		defer srv.Close()
+
+		g, _ := openai.NewGenerator(srv.URL, "k", "m", openai.Capabilities{}, srv.Client())
+		if _, err := g.Synthesize(ctx, "q", hits, []domain.Attachment{img}); !errors.Is(err, domain.ErrInvalidArgument) {
+			t.Errorf("want ErrInvalidArgument, got %v", err)
+		}
+		if called {
+			t.Error("must not call the provider when the capability is off")
+		}
+	})
+
+	t.Run("document without capability errors", func(t *testing.T) {
+		g, _ := openai.NewGenerator("http://unused", "k", "m", openai.Capabilities{}, nil)
+		if _, err := g.Synthesize(ctx, "q", hits, []domain.Attachment{pdf}); !errors.Is(err, domain.ErrInvalidArgument) {
+			t.Errorf("want ErrInvalidArgument, got %v", err)
+		}
+	})
+}
+
 func TestNewGeneratorValidation(t *testing.T) {
-	if _, err := openai.NewGenerator("", "k", "m", false, nil); !errors.Is(err, domain.ErrInvalidArgument) {
+	if _, err := openai.NewGenerator("", "k", "m", openai.Capabilities{}, nil); !errors.Is(err, domain.ErrInvalidArgument) {
 		t.Errorf("empty base url: want ErrInvalidArgument, got %v", err)
 	}
-	if _, err := openai.NewGenerator("http://x", "k", "", false, nil); !errors.Is(err, domain.ErrInvalidArgument) {
+	if _, err := openai.NewGenerator("http://x", "k", "", openai.Capabilities{}, nil); !errors.Is(err, domain.ErrInvalidArgument) {
 		t.Errorf("empty model: want ErrInvalidArgument, got %v", err)
 	}
 }

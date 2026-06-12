@@ -28,7 +28,11 @@ func TestAsker(t *testing.T) {
 		gen := &fakeGenerator{answer: app.Answer{Text: "because", Citations: []domain.ChunkID{c0.ID}}}
 		a := newAsker(gen, emb, idx, docs)
 
-		ans, err := a.Ask(ctx, "docs", "why", 1)
+		att, err := domain.NewAttachment("image/png", "c.png", []byte{1, 2, 3})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ans, err := a.Ask(ctx, "docs", "why", 1, []domain.Attachment{att})
 		if err != nil {
 			t.Fatalf("Ask: %v", err)
 		}
@@ -41,6 +45,9 @@ func TestAsker(t *testing.T) {
 		if len(gen.gotHits) != 1 || gen.gotHits[0].Chunk.ID != c0.ID {
 			t.Errorf("generator got hits %+v", gen.gotHits)
 		}
+		if len(gen.gotAttachments) != 1 || gen.gotAttachments[0].Name != "c.png" {
+			t.Errorf("generator got attachments %+v", gen.gotAttachments)
+		}
 	})
 
 	t.Run("propagates retrieval errors without calling the generator", func(t *testing.T) {
@@ -48,7 +55,7 @@ func TestAsker(t *testing.T) {
 		q := app.NewQuerier(newFakeCollections(), &fakeIndex{}, &fakeDocs{}, &fakeEmbedder{space: space})
 		a := app.NewAsker(q, gen)
 
-		if _, err := a.Ask(ctx, "missing", "why", 1); !errors.Is(err, app.ErrNotFound) {
+		if _, err := a.Ask(ctx, "missing", "why", 1, nil); !errors.Is(err, app.ErrNotFound) {
 			t.Errorf("want ErrNotFound, got %v", err)
 		}
 		if gen.gotQuestion != "" {
@@ -64,7 +71,7 @@ func TestAsker(t *testing.T) {
 		gen := &fakeGenerator{err: llmDown}
 		a := newAsker(gen, emb, idx, docs)
 
-		if _, err := a.Ask(ctx, "docs", "why", 1); !errors.Is(err, llmDown) {
+		if _, err := a.Ask(ctx, "docs", "why", 1, nil); !errors.Is(err, llmDown) {
 			t.Errorf("want wrapped llm error, got %v", err)
 		}
 	})

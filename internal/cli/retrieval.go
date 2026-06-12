@@ -2,6 +2,9 @@ package cli
 
 import (
 	"fmt"
+	"mime"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -36,7 +39,10 @@ func newQueryCmd(deps Deps) *cobra.Command {
 }
 
 func newAskCmd(deps Deps) *cobra.Command {
-	var k int
+	var (
+		k      int
+		attach []string
+	)
 	cmd := &cobra.Command{
 		Use:   "ask <collection> <question>",
 		Short: "Answer a question grounded in the collection's chunks",
@@ -44,7 +50,11 @@ func newAskCmd(deps Deps) *cobra.Command {
 			if len(args) != 2 {
 				return fmt.Errorf("%w: ask takes <collection> and a question", domain.ErrInvalidArgument)
 			}
-			ans, err := deps.Ask.Ask(cmd.Context(), args[0], args[1], k)
+			attachments, err := loadAttachments(attach)
+			if err != nil {
+				return err
+			}
+			ans, err := deps.Ask.Ask(cmd.Context(), args[0], args[1], k, attachments)
 			if err != nil {
 				return err
 			}
@@ -59,6 +69,33 @@ func newAskCmd(deps Deps) *cobra.Command {
 			return render(cmd, answerView{Text: ans.Text, Citations: citations}, human)
 		},
 	}
-	cmd.Flags().IntVarP(&k, "top-k", "k", 8, "number of chunks to ground on")
+	cmd.Flags().IntVarP(&k, "top-k", "k", 8, "number of chunks to ground on (0 to ground on attachments only)")
+	cmd.Flags().StringArrayVar(&attach, "attach", nil, "file to send to the model as an attachment (repeatable)")
 	return cmd
+}
+
+// loadAttachments reads each path into an Attachment, detecting its media type
+// from the file extension. An undetectable extension is a usage error so the
+// caller learns the file won't be understood rather than silently dropping it.
+func loadAttachments(paths []string) ([]domain.Attachment, error) {
+	if len(paths) == 0 {
+		return nil, nil
+	}
+	attachments := make([]domain.Attachment, 0, len(paths))
+	for _, path := range paths {
+		mediaType, _, _ := strings.Cut(mime.TypeByExtension(filepath.Ext(path)), ";")
+		if mediaType == "" {
+			return nil, fmt.Errorf("%w: cannot determine media type of %q from its extension", domain.ErrInvalidArgument, path)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("read attachment %q: %w", path, err)
+		}
+		a, err := domain.NewAttachment(mediaType, filepath.Base(path), data)
+		if err != nil {
+			return nil, err
+		}
+		attachments = append(attachments, a)
+	}
+	return attachments, nil
 }

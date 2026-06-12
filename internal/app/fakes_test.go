@@ -251,12 +251,13 @@ type fakeGenerator struct {
 	answer app.Answer
 	err    error
 
-	gotQuestion string
-	gotHits     []domain.ChunkHit
+	gotQuestion    string
+	gotHits        []domain.ChunkHit
+	gotAttachments []domain.Attachment
 }
 
-func (f *fakeGenerator) Synthesize(_ context.Context, question string, hits []domain.ChunkHit) (app.Answer, error) {
-	f.gotQuestion, f.gotHits = question, hits
+func (f *fakeGenerator) Synthesize(_ context.Context, question string, hits []domain.ChunkHit, attachments []domain.Attachment) (app.Answer, error) {
+	f.gotQuestion, f.gotHits, f.gotAttachments = question, hits, attachments
 	return f.answer, f.err
 }
 

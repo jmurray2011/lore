@@ -101,6 +101,24 @@ func TestLoadStructuredOutputCapability(t *testing.T) {
 	}
 }
 
+func TestLoadAttachmentCapabilities(t *testing.T) {
+	d := config.Defaults().Provider
+	if d.ImageInput || d.DocumentInput {
+		t.Error("attachment capabilities must default to off")
+	}
+
+	cfg, err := config.Load("", env(map[string]string{
+		"LORE_IMAGE_INPUT":    "true",
+		"LORE_DOCUMENT_INPUT": "true",
+	}))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.Provider.ImageInput || !cfg.Provider.DocumentInput {
+		t.Errorf("env did not enable attachment capabilities: %+v", cfg.Provider)
+	}
+}
+
 func TestLoadStorageDefaults(t *testing.T) {
 	cfg, err := config.Load("", env(nil))
 	if err != nil {
