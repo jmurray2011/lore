@@ -29,6 +29,7 @@ func TestSourceWalk(t *testing.T) {
 	write("note.bin", "binary-ish")
 	write("doc.pdf", "%PDF-ish")
 	write("report.docx", "zip-ish")
+	write("poam.xlsx", "zip-ish")
 	write(".secret.txt", "shh")
 	write(".git/config", "[core]")
 	write("sub/c.md", "cee")
@@ -42,8 +43,8 @@ func TestSourceWalk(t *testing.T) {
 		t.Fatalf("Walk: %v", err)
 	}
 
-	if len(got) != 6 {
-		t.Fatalf("want 6 items, got %d: %v", len(got), got)
+	if len(got) != 7 {
+		t.Fatalf("want 7 items, got %d: %v", len(got), got)
 	}
 	if _, ok := got[".secret.txt"]; ok {
 		t.Error("hidden file should be skipped")
@@ -68,6 +69,9 @@ func TestSourceWalk(t *testing.T) {
 	}
 	if got["report.docx"].ContentType != "application/vnd.openxmlformats-officedocument.wordprocessingml.document" {
 		t.Errorf("report.docx type = %q", got["report.docx"].ContentType)
+	}
+	if got["poam.xlsx"].ContentType != "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" {
+		t.Errorf("poam.xlsx type = %q", got["poam.xlsx"].ContentType)
 	}
 	if !strings.HasPrefix(got["a.md"].URI, "file://") {
 		t.Errorf("URI = %q, want file:// scheme", got["a.md"].URI)

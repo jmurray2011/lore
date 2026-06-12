@@ -79,6 +79,8 @@ func contentType(path string) string {
 		// Literal rather than importing the docx adapter: fs must not depend on
 		// other adapters (only cmd/lore wires adapters together).
 		return "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+	case ".xlsx":
+		return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 	default:
 		if ct := mime.TypeByExtension(filepath.Ext(path)); ct != "" {
 			return ct

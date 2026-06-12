@@ -18,6 +18,7 @@ import (
 	"github.com/jmurray2011/lore/internal/adapters/openai"
 	"github.com/jmurray2011/lore/internal/adapters/pdf"
 	"github.com/jmurray2011/lore/internal/adapters/sqlite"
+	"github.com/jmurray2011/lore/internal/adapters/xlsx"
 	"github.com/jmurray2011/lore/internal/app"
 	"github.com/jmurray2011/lore/internal/cli"
 	"github.com/jmurray2011/lore/internal/config"
@@ -81,7 +82,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return fail(err)
 	}
 
-	extractor := extract.NewRouter(extract.New(), docx.New(), pdf.New())
+	extractor := extract.NewRouter(extract.New(), docx.New(), pdf.New(), xlsx.New())
 
 	querier := app.NewQuerier(store.collections, store.index, store.docs, embedder)
 	deps := cli.Deps{
