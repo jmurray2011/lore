@@ -211,14 +211,40 @@ func (f *fakeDocs) GetChunks(_ context.Context, ids []domain.ChunkID) ([]domain.
 	return out, nil
 }
 
-func (f *fakeDocs) Delete(_ context.Context, _ string, id domain.DocumentID) error {
+func (f *fakeDocs) Delete(_ context.Context, collection string, id domain.DocumentID) ([]domain.ChunkID, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if _, ok := f.docs[id]; !ok {
-		return app.ErrNotFound
+	d, ok := f.docs[id]
+	if !ok || d.Collection != collection {
+		return nil, app.ErrNotFound
+	}
+	return f.removeLocked(id), nil
+}
+
+func (f *fakeDocs) DeleteCollection(_ context.Context, collection string) ([]domain.ChunkID, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var removed []domain.ChunkID
+	for id, d := range f.docs {
+		if d.Collection == collection {
+			removed = append(removed, f.removeLocked(id)...)
+		}
+	}
+	return removed, nil
+}
+
+// removeLocked deletes a document and the chunks that belong to it (matched by
+// DocumentID), returning the removed chunk IDs. Callers must hold f.mu.
+func (f *fakeDocs) removeLocked(id domain.DocumentID) []domain.ChunkID {
+	var ids []domain.ChunkID
+	for cid, c := range f.chunks {
+		if c.DocumentID == id {
+			ids = append(ids, cid)
+			delete(f.chunks, cid)
+		}
 	}
 	delete(f.docs, id)
-	return nil
+	return ids
 }
 
 type fakeGenerator struct {

@@ -82,20 +82,43 @@ func (r *DocumentRepository) GetChunks(_ context.Context, ids []domain.ChunkID) 
 	return out, nil
 }
 
-// Delete removes the document and its chunks, or fails with ErrNotFound. Their
-// vectors live in the VectorIndex and are removed by the use case.
-func (r *DocumentRepository) Delete(_ context.Context, collection string, id domain.DocumentID) error {
+// Delete removes the document and its chunks, returning the removed chunk IDs,
+// or fails with ErrNotFound. Their vectors live in the VectorIndex and are
+// removed by the use case.
+func (r *DocumentRepository) Delete(_ context.Context, collection string, id domain.DocumentID) ([]domain.ChunkID, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	d, ok := r.docs[id]
 	if !ok || d.Collection != collection {
-		return fmt.Errorf("document %q in collection %q: %w", id, collection, app.ErrNotFound)
+		return nil, fmt.Errorf("document %q in collection %q: %w", id, collection, app.ErrNotFound)
 	}
-	for _, cid := range r.docChunks[id] {
+	return r.deleteLocked(id), nil
+}
+
+// DeleteCollection removes every document and its chunks in the collection,
+// returning all removed chunk IDs. An empty collection is a no-op.
+func (r *DocumentRepository) DeleteCollection(_ context.Context, collection string) ([]domain.ChunkID, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	var removed []domain.ChunkID
+	for id, d := range r.docs {
+		if d.Collection == collection {
+			removed = append(removed, r.deleteLocked(id)...)
+		}
+	}
+	return removed, nil
+}
+
+// deleteLocked removes a document and its chunks, returning the removed chunk
+// IDs. Callers must hold r.mu.
+func (r *DocumentRepository) deleteLocked(id domain.DocumentID) []domain.ChunkID {
+	ids := r.docChunks[id]
+	for _, cid := range ids {
 		delete(r.byChunkID, cid)
 	}
 	delete(r.docChunks, id)
 	delete(r.docs, id)
-	return nil
+	return ids
 }
