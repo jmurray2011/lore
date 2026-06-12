@@ -99,9 +99,13 @@ func TestEndToEnd(t *testing.T) {
 	if err := os.WriteFile(pdfPath, pdfBytes(t, "pdfsentinel alpha beta"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	xlsxPath := filepath.Join(dir, "sheet.xlsx")
+	if err := os.WriteFile(xlsxPath, xlsxBytes(t, "xlsxsentinel alpha beta"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	mustSucceed(t, "init", "docs")
-	mustSucceed(t, "add", "docs", txtPath, docxPath, pdfPath)
+	mustSucceed(t, "add", "docs", txtPath, docxPath, pdfPath, xlsxPath)
 
 	// Fresh process must see the collection written by a prior process.
 	if out := mustSucceed(t, "--json", "ls"); !strings.Contains(out, `"name": "docs"`) {
@@ -112,7 +116,7 @@ func TestEndToEnd(t *testing.T) {
 	}
 	// All three formats flowed through the router into the store.
 	out := mustSucceed(t, "--json", "query", "docs", "alpha")
-	for _, want := range []string{"alpha beta gamma", "docxsentinel", "pdfsentinel"} {
+	for _, want := range []string{"alpha beta gamma", "docxsentinel", "pdfsentinel", "xlsxsentinel"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("query missing %q (format not ingested?): %s", want, out)
 		}
@@ -216,6 +220,29 @@ func docxBytes(t *testing.T, text string) []byte {
 	if _, err := io.WriteString(w, doc); err != nil {
 		t.Fatal(err)
 	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+// xlsxBytes builds a minimal .xlsx (shared-string table + one worksheet cell).
+func xlsxBytes(t *testing.T, text string) []byte {
+	t.Helper()
+	const ns = `xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"`
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	write := func(name, content string) {
+		w, err := zw.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := io.WriteString(w, content); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("xl/sharedStrings.xml", `<?xml version="1.0"?><sst `+ns+`><si><t>`+text+`</t></si></sst>`)
+	write("xl/worksheets/sheet1.xml", `<?xml version="1.0"?><worksheet `+ns+`><sheetData><row><c t="s"><v>0</v></c></row></sheetData></worksheet>`)
 	if err := zw.Close(); err != nil {
 		t.Fatal(err)
 	}
