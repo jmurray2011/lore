@@ -40,10 +40,16 @@ type DocumentRepository interface {
 	// GetChunks hydrates chunks by ID, preserving input order. IDs with no
 	// stored chunk are skipped, so the result may be shorter than the input.
 	GetChunks(ctx context.Context, ids []domain.ChunkID) ([]domain.Chunk, error)
-	// Delete removes the document and its chunks, failing with ErrNotFound if
-	// no such document exists in the collection. The chunks' vectors live in
-	// the VectorIndex and are removed by the use case (invariant 3).
-	Delete(ctx context.Context, collection string, id domain.DocumentID) error
+	// Delete removes the document and its chunks, returning the removed chunk
+	// IDs so the use case can delete their vectors via the VectorIndex
+	// (invariant 3 — this port cannot reach it). Fails with ErrNotFound if no
+	// such document exists in the collection.
+	Delete(ctx context.Context, collection string, id domain.DocumentID) ([]domain.ChunkID, error)
+	// DeleteCollection removes every document and its chunks in the collection,
+	// returning all removed chunk IDs for the same cascade. A collection with no
+	// documents is a no-op (no IDs, no error); collection existence is the
+	// CollectionRepository's concern.
+	DeleteCollection(ctx context.Context, collection string) ([]domain.ChunkID, error)
 }
 
 // VectorEntry pairs a chunk identity with its vector for indexing.
@@ -81,9 +87,11 @@ type Answer struct {
 	Citations []domain.ChunkID
 }
 
-// Generator synthesizes an answer grounded in retrieved chunks.
+// Generator synthesizes an answer grounded in retrieved chunks, optionally with
+// raw attachments (images/documents) the model reads directly. Attachments are
+// ephemeral context, not part of the collection.
 type Generator interface {
-	Synthesize(ctx context.Context, question string, hits []domain.ChunkHit) (Answer, error)
+	Synthesize(ctx context.Context, question string, hits []domain.ChunkHit, attachments []domain.Attachment) (Answer, error)
 }
 
 // SourceItem is one raw document yielded by a Source.

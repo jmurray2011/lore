@@ -122,18 +122,20 @@ func RunDocumentRepositorySuite(t *testing.T, factory func(t *testing.T) app.Doc
 		}
 	})
 
-	t.Run("delete removes the document and cascades to its chunks", func(t *testing.T) {
+	t.Run("delete removes the document, cascades to chunks, and returns their IDs", func(t *testing.T) {
 		repo := factory(t)
 		doc, chunks := newDoc(t, "docs", "file:///a.md", "alpha", 3)
 		mustUpsert(t, repo, doc, chunks)
 
-		if err := repo.Delete(ctx, "docs", doc.ID); err != nil {
+		ids, err := repo.Delete(ctx, "docs", doc.ID)
+		if err != nil {
 			t.Fatalf("Delete: %v", err)
 		}
+		assertSameChunkIDs(t, ids, []domain.ChunkID{chunks[0].ID, chunks[1].ID, chunks[2].ID})
 		if _, err := repo.GetBySource(ctx, "docs", "file:///a.md"); !errors.Is(err, app.ErrNotFound) {
 			t.Errorf("after Delete, GetBySource: want ErrNotFound, got %v", err)
 		}
-		got, err := repo.GetChunks(ctx, []domain.ChunkID{chunks[0].ID, chunks[1].ID, chunks[2].ID})
+		got, err := repo.GetChunks(ctx, ids)
 		if err != nil {
 			t.Fatalf("GetChunks: %v", err)
 		}
@@ -142,11 +144,45 @@ func RunDocumentRepositorySuite(t *testing.T, factory func(t *testing.T) app.Doc
 		}
 	})
 
-	t.Run("delete unknown returns ErrNotFound", func(t *testing.T) {
+	t.Run("delete unknown returns ErrNotFound and no IDs", func(t *testing.T) {
 		repo := factory(t)
 		id := domain.DeriveDocumentID("docs", "file:///missing.md")
-		if err := repo.Delete(ctx, "docs", id); !errors.Is(err, app.ErrNotFound) {
+		ids, err := repo.Delete(ctx, "docs", id)
+		if !errors.Is(err, app.ErrNotFound) {
 			t.Errorf("want ErrNotFound, got %v", err)
+		}
+		if len(ids) != 0 {
+			t.Errorf("want no IDs on failure, got %v", ids)
+		}
+	})
+
+	t.Run("delete collection removes every document and returns all chunk IDs", func(t *testing.T) {
+		repo := factory(t)
+		docA, chunksA := newDoc(t, "docs", "file:///a.md", "alpha", 2)
+		docB, chunksB := newDoc(t, "docs", "file:///b.md", "beta", 3)
+		other, otherChunks := newDoc(t, "notes", "file:///c.md", "gamma", 1)
+		mustUpsert(t, repo, docA, chunksA)
+		mustUpsert(t, repo, docB, chunksB)
+		mustUpsert(t, repo, other, otherChunks)
+
+		ids, err := repo.DeleteCollection(ctx, "docs")
+		if err != nil {
+			t.Fatalf("DeleteCollection: %v", err)
+		}
+		assertSameChunkIDs(t, ids, []domain.ChunkID{chunksA[0].ID, chunksA[1].ID, chunksB[0].ID, chunksB[1].ID, chunksB[2].ID})
+		if _, err := repo.GetBySource(ctx, "docs", "file:///a.md"); !errors.Is(err, app.ErrNotFound) {
+			t.Errorf("document A should be gone, got %v", err)
+		}
+		if _, err := repo.GetBySource(ctx, "notes", "file:///c.md"); err != nil {
+			t.Errorf("delete collection must not touch another collection: %v", err)
+		}
+	})
+
+	t.Run("delete collection with no documents returns no IDs, no error", func(t *testing.T) {
+		repo := factory(t)
+		ids, err := repo.DeleteCollection(ctx, "empty")
+		if err != nil || len(ids) != 0 {
+			t.Errorf("want empty, nil; got %v, %v", ids, err)
 		}
 	})
 
@@ -172,4 +208,23 @@ func RunDocumentRepositorySuite(t *testing.T, factory func(t *testing.T) app.Doc
 			t.Errorf("repository must not alias the caller's slice; got %+v", got)
 		}
 	})
+}
+
+// assertSameChunkIDs checks got and want contain the same chunk IDs, regardless
+// of order.
+func assertSameChunkIDs(t *testing.T, got, want []domain.ChunkID) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Errorf("chunk IDs: got %d %v, want %d %v", len(got), got, len(want), want)
+		return
+	}
+	set := make(map[domain.ChunkID]bool, len(want))
+	for _, id := range want {
+		set[id] = true
+	}
+	for _, id := range got {
+		if !set[id] {
+			t.Errorf("unexpected chunk ID %s in %v", id, got)
+		}
+	}
 }
