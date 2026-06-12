@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
 
 	"github.com/jmurray2011/lore/internal/app"
@@ -16,7 +17,11 @@ import (
 var _ app.Generator = (*Generator)(nil)
 
 const systemPrompt = "You are a precise assistant. Answer the question using only the provided context chunks. " +
-	"If the context is insufficient, say so plainly. Reference the chunk IDs you relied on."
+	"If the context is insufficient, say so plainly. Cite the chunk IDs you relied on inline, in square brackets, e.g. [<id>]."
+
+// citationRE matches bracketed citations like [<chunkID>] in answer prose. The
+// captured group may hold several comma-separated IDs.
+var citationRE = regexp.MustCompile(`\[([^\[\]]+)\]`)
 
 // structuredInstruction is appended for providers that support JSON-schema
 // output: it asks for the answer and the exact chunk IDs used, as typed fields.
@@ -153,7 +158,36 @@ func (g *Generator) Synthesize(ctx context.Context, question string, hits []doma
 	if g.caps.StructuredOutput {
 		return parseStructured(content, hits)
 	}
-	return app.Answer{Text: strings.TrimSpace(content), Citations: groundingSet(hits)}, nil
+	text := strings.TrimSpace(content)
+	// Prefer the chunk IDs the model actually referenced in its prose; fall back
+	// to the whole grounding set when it cited nothing parseable.
+	citations := inlineCitations(text, hits)
+	if len(citations) == 0 {
+		citations = groundingSet(hits)
+	}
+	return app.Answer{Text: text, Citations: citations}, nil
+}
+
+// inlineCitations extracts the chunk IDs the model referenced in square brackets,
+// keeping only those in the grounding set (dropping hallucinations) in order of
+// first appearance. A bracket may hold several comma-separated IDs.
+func inlineCitations(text string, hits []domain.ChunkHit) []domain.Citation {
+	byID := make(map[domain.ChunkID]domain.ChunkHit, len(hits))
+	for _, h := range hits {
+		byID[h.Chunk.ID] = h
+	}
+	var citations []domain.Citation
+	seen := make(map[domain.ChunkID]bool)
+	for _, m := range citationRE.FindAllStringSubmatch(text, -1) {
+		for _, part := range strings.Split(m[1], ",") {
+			id := domain.ChunkID(strings.TrimSpace(part))
+			if h, ok := byID[id]; ok && !seen[id] {
+				citations = append(citations, citation(h))
+				seen[id] = true
+			}
+		}
+	}
+	return citations
 }
 
 // userContent builds the user message: a plain string when there are no

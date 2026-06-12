@@ -77,6 +77,52 @@ func TestGeneratorSynthesize(t *testing.T) {
 		}
 	})
 
+	t.Run("plain-text mode parses the model's own inline [chunkID] citations", func(t *testing.T) {
+		other, err := domain.NewChunk(domain.DeriveDocumentID("docs", "file:///b.md"), 0, "the grass is green")
+		if err != nil {
+			t.Fatal(err)
+		}
+		twoHits := []domain.ChunkHit{
+			{Chunk: chunk, Score: 0.9, Source: "file:///a.md"},
+			{Chunk: other, Score: 0.8, Source: "file:///b.md"},
+		}
+		// The model cites only the first chunk in its prose.
+		body := `{"choices":[{"message":{"role":"assistant","content":"The sky is blue [` + string(chunk.ID) + `]."}}]}`
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = io.WriteString(w, body)
+		}))
+		defer srv.Close()
+
+		g, err := openai.NewGenerator(srv.URL, "k", "m", openai.Capabilities{}, openai.AuthBearer, srv.Client())
+		if err != nil {
+			t.Fatal(err)
+		}
+		ans, err := g.Synthesize(ctx, "what color is the sky?", twoHits, nil)
+		if err != nil {
+			t.Fatalf("Synthesize: %v", err)
+		}
+		// Only the cited chunk survives — not the whole grounding set.
+		if len(ans.Citations) != 1 || ans.Citations[0].ChunkID != chunk.ID || ans.Citations[0].Source != "file:///a.md" {
+			t.Errorf("citations = %+v, want only %s (file:///a.md)", ans.Citations, chunk.ID)
+		}
+	})
+
+	t.Run("plain-text mode falls back to the grounding set when the model cites nothing", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"The sky is blue."}}]}`)
+		}))
+		defer srv.Close()
+		g, _ := openai.NewGenerator(srv.URL, "k", "m", openai.Capabilities{}, openai.AuthBearer, srv.Client())
+
+		ans, err := g.Synthesize(ctx, "q", hits, nil)
+		if err != nil {
+			t.Fatalf("Synthesize: %v", err)
+		}
+		if len(ans.Citations) != 1 || ans.Citations[0].ChunkID != chunk.ID {
+			t.Errorf("want fallback to the grounding set, got %+v", ans.Citations)
+		}
+	})
+
 	t.Run("structured mode requests json_schema and returns validated citations", func(t *testing.T) {
 		var gotReq struct {
 			ResponseFormat *struct {
