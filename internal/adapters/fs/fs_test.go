@@ -52,8 +52,14 @@ func TestSourceWalk(t *testing.T) {
 	if _, ok := got["config"]; ok {
 		t.Error("contents of a hidden directory should be skipped")
 	}
-	if got["a.md"].ContentType != "text/markdown" || string(got["a.md"].Content) != "# A" {
-		t.Errorf("a.md = %+v", got["a.md"])
+	if got["a.md"].ContentType != "text/markdown" {
+		t.Errorf("a.md type = %q", got["a.md"].ContentType)
+	}
+	if content, err := got["a.md"].Open(); err != nil || string(content) != "# A" {
+		t.Errorf("a.md Open() = %q, %v; want %q", content, err, "# A")
+	}
+	if got["a.md"].Fingerprint == "" {
+		t.Error("a.md should carry a fingerprint")
 	}
 	if got["b.txt"].ContentType != "text/plain" {
 		t.Errorf("b.txt type = %q", got["b.txt"].ContentType)
@@ -93,6 +99,38 @@ func TestSourceWalkSingleFile(t *testing.T) {
 	}
 	if n != 1 {
 		t.Errorf("want 1 item for single-file root, got %d", n)
+	}
+}
+
+func TestSourceFingerprint(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "f.txt")
+
+	fp := func(t *testing.T) string {
+		t.Helper()
+		var got string
+		if err := fs.NewSource().Walk(context.Background(), path, func(it app.SourceItem) error {
+			got = it.Fingerprint
+			return nil
+		}); err != nil {
+			t.Fatalf("Walk: %v", err)
+		}
+		return got
+	}
+
+	if err := os.WriteFile(path, []byte("original content"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	first := fp(t)
+	if first != fp(t) {
+		t.Error("fingerprint must be stable for unchanged content")
+	}
+
+	if err := os.WriteFile(path, []byte("different content!"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if changed := fp(t); changed == first {
+		t.Error("fingerprint must change when content changes")
 	}
 }
 

@@ -29,6 +29,10 @@ type CollectionRepository interface {
 	// (invariant 3) is orchestrated by the use case, which holds the
 	// DocumentRepository and VectorIndex; this port cannot reach them.
 	Delete(ctx context.Context, name string) error
+	// RecordSource adds source to the collection's remembered Sources,
+	// idempotently (recording an existing source is a no-op). It fails with
+	// ErrNotFound if no such collection exists. Get reflects recorded sources.
+	RecordSource(ctx context.Context, name, source string) error
 }
 
 // DocumentRepository persists Documents and their Chunks.
@@ -40,6 +44,14 @@ type DocumentRepository interface {
 	// GetChunks hydrates chunks by ID, preserving input order. IDs with no
 	// stored chunk are skipped, so the result may be shorter than the input.
 	GetChunks(ctx context.Context, ids []domain.ChunkID) ([]domain.Chunk, error)
+	// GetDocuments hydrates documents by ID, preserving input order. IDs with no
+	// stored document are skipped, so the result may be shorter than the input.
+	// Used to attach source provenance to retrieval results.
+	GetDocuments(ctx context.Context, ids []domain.DocumentID) ([]*domain.Document, error)
+	// ListDocuments returns every document in the collection. An unknown or empty
+	// collection yields no documents and no error; collection existence is the
+	// CollectionRepository's concern. Order is unspecified.
+	ListDocuments(ctx context.Context, collection string) ([]*domain.Document, error)
 	// Delete removes the document and its chunks, returning the removed chunk
 	// IDs so the use case can delete their vectors via the VectorIndex
 	// (invariant 3 — this port cannot reach it). Fails with ErrNotFound if no
@@ -81,10 +93,11 @@ type Embedder interface {
 	Embed(ctx context.Context, texts []string) ([][]float32, error)
 }
 
-// Answer is a grounded synthesis result with citations back to chunks.
+// Answer is a grounded synthesis result with citations back to chunks, each
+// carrying the source provenance needed to display it.
 type Answer struct {
 	Text      string
-	Citations []domain.ChunkID
+	Citations []domain.Citation
 }
 
 // Generator synthesizes an answer grounded in retrieved chunks, optionally with
@@ -94,11 +107,15 @@ type Generator interface {
 	Synthesize(ctx context.Context, question string, hits []domain.ChunkHit, attachments []domain.Attachment) (Answer, error)
 }
 
-// SourceItem is one raw document yielded by a Source.
+// SourceItem is one raw document yielded by a Source. Content is read lazily via
+// Open so a consumer can decide — from the cheap Fingerprint — not to read at
+// all. Fingerprint is a source-side signature (size + sampled-content hash) that
+// changes when the file changes; an empty Fingerprint disables fast-skip.
 type SourceItem struct {
 	URI         string
 	ContentType string
-	Content     []byte
+	Fingerprint string
+	Open        func() ([]byte, error)
 }
 
 // Source yields raw documents from somewhere (filesystem walk, stdin, URL).

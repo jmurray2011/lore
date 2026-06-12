@@ -18,6 +18,10 @@ type Document struct {
 	SourceURI  string
 	Hash       ContentHash
 	IngestedAt time.Time
+	// Fingerprint is a cheap source-side signature (e.g. size + sampled-content
+	// hash) used to skip re-reading unchanged files before extraction. Unlike
+	// Hash it is a heuristic, not an identity; empty means "unknown".
+	Fingerprint string
 }
 
 // NewDocument constructs a Document with its deterministic ID.

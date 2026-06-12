@@ -28,8 +28,8 @@ func newQueryCmd(deps Deps) *cobra.Command {
 			views := make([]hitView, len(hits))
 			var b strings.Builder
 			for i, h := range hits {
-				views[i] = hitView{ChunkID: string(h.Chunk.ID), Score: h.Score, Text: h.Chunk.Text}
-				fmt.Fprintf(&b, "%.4f  %s\n    %s\n", h.Score, h.Chunk.ID, h.Chunk.Text)
+				views[i] = hitView{ChunkID: string(h.Chunk.ID), Source: h.Source, Seq: h.Chunk.Seq, Score: h.Score, Text: h.Chunk.Text}
+				fmt.Fprintf(&b, "%.4f  %s\n    %s\n", h.Score, provLabel(h.Source, h.Chunk.Seq, h.Chunk.ID), h.Chunk.Text)
 			}
 			return render(cmd, views, strings.TrimRight(b.String(), "\n"))
 		},
@@ -58,13 +58,15 @@ func newAskCmd(deps Deps) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			citations := make([]string, len(ans.Citations))
+			citations := make([]citationView, len(ans.Citations))
+			labels := make([]string, len(ans.Citations))
 			for i, c := range ans.Citations {
-				citations[i] = string(c)
+				citations[i] = citationView{ChunkID: string(c.ChunkID), Source: c.Source, Seq: c.Seq}
+				labels[i] = provLabel(c.Source, c.Seq, c.ChunkID)
 			}
 			human := ans.Text
-			if len(citations) > 0 {
-				human += "\n\nsources: " + strings.Join(citations, ", ")
+			if len(labels) > 0 {
+				human += "\n\nsources: " + strings.Join(labels, ", ")
 			}
 			return render(cmd, answerView{Text: ans.Text, Citations: citations}, human)
 		},
@@ -72,6 +74,15 @@ func newAskCmd(deps Deps) *cobra.Command {
 	cmd.Flags().IntVarP(&k, "top-k", "k", 8, "number of chunks to ground on (0 to ground on attachments only)")
 	cmd.Flags().StringArrayVar(&attach, "attach", nil, "file to send to the model as an attachment (repeatable)")
 	return cmd
+}
+
+// provLabel renders provenance for human output: "source#seq" when the source
+// document is known, falling back to the opaque chunk ID otherwise.
+func provLabel(source string, seq int, chunkID domain.ChunkID) string {
+	if source == "" {
+		return string(chunkID)
+	}
+	return fmt.Sprintf("%s#%d", source, seq)
 }
 
 // loadAttachments reads each path into an Attachment, detecting its media type

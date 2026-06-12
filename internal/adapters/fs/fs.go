@@ -7,6 +7,10 @@ package fs
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
+	"fmt"
+	"io"
 	"io/fs"
 	"mime"
 	"os"
@@ -15,6 +19,9 @@ import (
 
 	"github.com/jmurray2011/lore/internal/app"
 )
+
+// fingerprintSample bounds the head/tail bytes hashed into a file's fingerprint.
+const fingerprintSample = 8192
 
 // Source walks the filesystem. Its zero value is ready to use.
 type Source struct{}
@@ -45,7 +52,11 @@ func (Source) Walk(ctx context.Context, root string, fn func(app.SourceItem) err
 			return nil
 		}
 
-		content, err := os.ReadFile(path)
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		fp, err := fingerprint(path, info.Size())
 		if err != nil {
 			return err
 		}
@@ -53,8 +64,56 @@ func (Source) Walk(ctx context.Context, root string, fn func(app.SourceItem) err
 		if err != nil {
 			return err
 		}
-		return fn(app.SourceItem{URI: uri, ContentType: contentType(path), Content: content})
+		return fn(app.SourceItem{
+			URI:         uri,
+			ContentType: contentType(path),
+			Fingerprint: fp,
+			Open:        func() ([]byte, error) { return os.ReadFile(path) },
+		})
 	})
+}
+
+// fingerprint is a cheap source-side signature: the file size plus a hash of its
+// head and tail. It changes whenever those change, letting the Ingestor skip
+// re-reading unchanged files. A file shorter than two samples is hashed whole
+// (so small files are effectively content-checked); the unsampled middle of a
+// large file is the only blind spot — the full content hash, computed when a
+// file is actually read, stays the idempotency source of truth.
+func fingerprint(path string, size int64) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = f.Close() }()
+
+	h := sha256.New()
+	var sz [8]byte
+	binary.LittleEndian.PutUint64(sz[:], uint64(size))
+	_, _ = h.Write(sz[:])
+
+	if err := hashSample(h, f, fingerprintSample); err != nil {
+		return "", err
+	}
+	if size > int64(2*fingerprintSample) {
+		if _, err := f.Seek(size-int64(fingerprintSample), io.SeekStart); err != nil {
+			return "", err
+		}
+		if err := hashSample(h, f, fingerprintSample); err != nil {
+			return "", err
+		}
+	}
+	return fmt.Sprintf("%d:%x", size, h.Sum(nil)), nil
+}
+
+// hashSample reads up to n bytes from r into h, tolerating a short final read.
+func hashSample(h io.Writer, r io.Reader, n int) error {
+	buf := make([]byte, n)
+	read, err := io.ReadFull(r, buf)
+	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+		return err
+	}
+	_, _ = h.Write(buf[:read])
+	return nil
 }
 
 func hidden(name string) bool { return len(name) > 1 && name[0] == '.' }

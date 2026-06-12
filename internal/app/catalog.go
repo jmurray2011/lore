@@ -9,18 +9,18 @@ import (
 )
 
 // Catalog is the collection-management use case: create, list, and inspect the
-// corpora lore knows about. (Removal, with its cross-port cascade, joins here
-// when the rm command lands.)
+// corpora lore knows about — including the documents ingested into a collection.
 type Catalog struct {
 	collections CollectionRepository
+	docs        DocumentRepository
 	embedder    Embedder
 	now         func() time.Time
 }
 
-// NewCatalog wires a Catalog over the collection repository and the embedder
-// whose space new collections are pinned to.
-func NewCatalog(collections CollectionRepository, embedder Embedder) *Catalog {
-	return &Catalog{collections: collections, embedder: embedder, now: time.Now}
+// NewCatalog wires a Catalog over the collection and document repositories and
+// the embedder whose space new collections are pinned to.
+func NewCatalog(collections CollectionRepository, docs DocumentRepository, embedder Embedder) *Catalog {
+	return &Catalog{collections: collections, docs: docs, embedder: embedder, now: time.Now}
 }
 
 // Init creates a collection pinned to the embedder's current EmbeddingSpace
@@ -49,4 +49,14 @@ func (c *Catalog) List(ctx context.Context) ([]*domain.Collection, error) {
 // Get returns the named collection, or ErrNotFound.
 func (c *Catalog) Get(ctx context.Context, name string) (*domain.Collection, error) {
 	return c.collections.Get(ctx, name)
+}
+
+// ListDocuments returns the documents ingested into the named collection. It
+// fails with ErrNotFound if the collection does not exist, so callers can
+// distinguish an empty collection from a missing one.
+func (c *Catalog) ListDocuments(ctx context.Context, collection string) ([]*domain.Document, error) {
+	if _, err := c.collections.Get(ctx, collection); err != nil {
+		return nil, err
+	}
+	return c.docs.ListDocuments(ctx, collection)
 }

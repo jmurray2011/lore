@@ -31,8 +31,16 @@ func chunker41(t *testing.T) domain.Chunker {
 	return c
 }
 
+// textItem builds a text SourceItem whose fingerprint tracks its content, so
+// re-yielding the same content fast-skips and changed content does not.
 func textItem(uri, content string) app.SourceItem {
-	return app.SourceItem{URI: uri, ContentType: "text/plain", Content: []byte(content)}
+	b := []byte(content)
+	return app.SourceItem{
+		URI:         uri,
+		ContentType: "text/plain",
+		Fingerprint: fmt.Sprintf("%d:%s", len(b), content),
+		Open:        func() ([]byte, error) { return b, nil },
+	}
 }
 
 func TestIngestor(t *testing.T) {
@@ -72,6 +80,29 @@ func TestIngestor(t *testing.T) {
 		}
 	})
 
+	t.Run("records the source root on the collection", func(t *testing.T) {
+		coll := mustCollection(t, "docs", space)
+		colls := newFakeCollections(coll)
+		src := &fakeSource{items: []app.SourceItem{textItem("file:///a.txt", words(10))}}
+		ing := app.NewIngestor(colls, &fakeDocs{}, &fakeIndex{}, &fakeEmbedder{space: space}, &fakeExtractor{}, src, chunker41(t))
+
+		if _, err := ing.Ingest(ctx, "docs", "/root"); err != nil {
+			t.Fatalf("Ingest: %v", err)
+		}
+		// Re-ingesting the same root must not duplicate it.
+		if _, err := ing.Ingest(ctx, "docs", "/root"); err != nil {
+			t.Fatalf("second Ingest: %v", err)
+		}
+
+		got, err := colls.Get(ctx, "docs")
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		if len(got.Sources) != 1 || got.Sources[0] != "/root" {
+			t.Errorf("want source root /root recorded once, got %v", got.Sources)
+		}
+	})
+
 	t.Run("is idempotent: unchanged content skips and does not re-embed", func(t *testing.T) {
 		coll := mustCollection(t, "docs", space)
 		src := &fakeSource{items: []app.SourceItem{textItem("file:///a.txt", words(10))}}
@@ -95,6 +126,68 @@ func TestIngestor(t *testing.T) {
 		}
 		if emb.embedCalls.Load() != afterFirst {
 			t.Errorf("re-ingest must not embed again: calls %d -> %d", afterFirst, emb.embedCalls.Load())
+		}
+	})
+
+	t.Run("fast-skips a matching fingerprint without reading the file", func(t *testing.T) {
+		coll := mustCollection(t, "docs", space)
+		var opens int
+		mkItem := func(fp string) app.SourceItem {
+			return app.SourceItem{URI: "file:///a.txt", ContentType: "text/plain", Fingerprint: fp,
+				Open: func() ([]byte, error) { opens++; return []byte(words(10)), nil }}
+		}
+		src := &fakeSource{items: []app.SourceItem{mkItem("fp-1")}}
+		ing := app.NewIngestor(newFakeCollections(coll), &fakeDocs{}, &fakeIndex{}, &fakeEmbedder{space: space}, &fakeExtractor{}, src, chunker41(t))
+
+		if _, err := ing.Ingest(ctx, "docs", "/root"); err != nil {
+			t.Fatalf("first Ingest: %v", err)
+		}
+		if opens != 1 {
+			t.Fatalf("first ingest should read once, opened %d", opens)
+		}
+
+		sum, err := ing.Ingest(ctx, "docs", "/root")
+		if err != nil {
+			t.Fatalf("second Ingest: %v", err)
+		}
+		if sum.Added != 0 || sum.Skipped != 1 {
+			t.Errorf("want fast-skip (Added 0 Skipped 1), got %+v", sum)
+		}
+		if opens != 1 {
+			t.Errorf("a matching fingerprint must not re-open the file; opened %d", opens)
+		}
+	})
+
+	t.Run("refreshes a drifted fingerprint on unchanged content, then fast-skips", func(t *testing.T) {
+		coll := mustCollection(t, "docs", space)
+		content := words(10)
+		var opens int
+		mkItem := func(fp string) app.SourceItem {
+			return app.SourceItem{URI: "file:///a.txt", ContentType: "text/plain", Fingerprint: fp,
+				Open: func() ([]byte, error) { opens++; return []byte(content), nil }}
+		}
+		src := &fakeSource{items: []app.SourceItem{mkItem("fp-1")}}
+		ing := app.NewIngestor(newFakeCollections(coll), &fakeDocs{}, &fakeIndex{}, &fakeEmbedder{space: space}, &fakeExtractor{}, src, chunker41(t))
+
+		if _, err := ing.Ingest(ctx, "docs", "/root"); err != nil { // stores fp-1, opens=1
+			t.Fatalf("first Ingest: %v", err)
+		}
+
+		// Fingerprint drifts but content is identical: read once to verify, refresh.
+		src.items[0] = mkItem("fp-2")
+		if _, err := ing.Ingest(ctx, "docs", "/root"); err != nil {
+			t.Fatalf("second Ingest: %v", err)
+		}
+		if opens != 2 {
+			t.Fatalf("a drifted fingerprint should re-read once, opened %d", opens)
+		}
+
+		// The refreshed fingerprint now matches, so the next run reads nothing.
+		if _, err := ing.Ingest(ctx, "docs", "/root"); err != nil {
+			t.Fatalf("third Ingest: %v", err)
+		}
+		if opens != 2 {
+			t.Errorf("after refresh, matching fingerprint must fast-skip; opened %d", opens)
 		}
 	})
 
@@ -154,7 +247,7 @@ func TestIngestor(t *testing.T) {
 	t.Run("skips unsupported content types", func(t *testing.T) {
 		coll := mustCollection(t, "docs", space)
 		src := &fakeSource{items: []app.SourceItem{
-			{URI: "file:///img.png", ContentType: "image/png", Content: []byte{0x89}},
+			{URI: "file:///img.png", ContentType: "image/png", Open: func() ([]byte, error) { return []byte{0x89}, nil }},
 			textItem("file:///a.txt", words(10)),
 		}}
 		ext := &fakeExtractor{unsupported: map[string]bool{"image/png": true}}

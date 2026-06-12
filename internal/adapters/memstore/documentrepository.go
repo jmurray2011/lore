@@ -82,6 +82,38 @@ func (r *DocumentRepository) GetChunks(_ context.Context, ids []domain.ChunkID) 
 	return out, nil
 }
 
+// GetDocuments hydrates documents by ID, preserving input order and skipping IDs
+// with no stored document (the result may be shorter than the input).
+func (r *DocumentRepository) GetDocuments(_ context.Context, ids []domain.DocumentID) ([]*domain.Document, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	out := make([]*domain.Document, 0, len(ids))
+	for _, id := range ids {
+		if d, ok := r.docs[id]; ok {
+			doc := d
+			out = append(out, &doc)
+		}
+	}
+	return out, nil
+}
+
+// ListDocuments returns every document in the collection (order unspecified). An
+// unknown or empty collection yields no documents and no error.
+func (r *DocumentRepository) ListDocuments(_ context.Context, collection string) ([]*domain.Document, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	var out []*domain.Document
+	for _, d := range r.docs {
+		if d.Collection == collection {
+			doc := d
+			out = append(out, &doc)
+		}
+	}
+	return out, nil
+}
+
 // Delete removes the document and its chunks, returning the removed chunk IDs,
 // or fails with ErrNotFound. Their vectors live in the VectorIndex and are
 // removed by the use case.
