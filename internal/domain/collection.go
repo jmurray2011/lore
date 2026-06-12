@@ -16,6 +16,9 @@ type Collection struct {
 	Name      string
 	Space     EmbeddingSpace
 	CreatedAt time.Time
+	// Sources are the paths ingested into this collection, recorded by add and
+	// sync so `lore sync` can replay them without a path argument.
+	Sources []string
 }
 
 // NewCollection validates identity and space and constructs a Collection.

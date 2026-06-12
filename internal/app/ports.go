@@ -29,6 +29,10 @@ type CollectionRepository interface {
 	// (invariant 3) is orchestrated by the use case, which holds the
 	// DocumentRepository and VectorIndex; this port cannot reach them.
 	Delete(ctx context.Context, name string) error
+	// RecordSource adds source to the collection's remembered Sources,
+	// idempotently (recording an existing source is a no-op). It fails with
+	// ErrNotFound if no such collection exists. Get reflects recorded sources.
+	RecordSource(ctx context.Context, name, source string) error
 }
 
 // DocumentRepository persists Documents and their Chunks.

@@ -118,6 +118,11 @@ func (i *Ingestor) Ingest(ctx context.Context, collection, root string) (IngestS
 		return IngestSummary{}, fmt.Errorf("walk %q: %w", root, walkErr)
 	}
 
+	// Remember the root so `lore sync` can replay it without a path argument.
+	if err := i.collections.RecordSource(ctx, collection, root); err != nil {
+		return IngestSummary{}, fmt.Errorf("record source %q: %w", root, err)
+	}
+
 	return IngestSummary{
 		Added:   int(added.Load()),
 		Skipped: int(skipped.Load()),

@@ -23,6 +23,11 @@ var schemaStmts = []string{
 		dimensions INTEGER NOT NULL,
 		created_at TEXT NOT NULL
 	)`,
+	`CREATE TABLE IF NOT EXISTS collection_sources (
+		collection TEXT NOT NULL,
+		source TEXT NOT NULL,
+		PRIMARY KEY (collection, source)
+	)`,
 	`CREATE TABLE IF NOT EXISTS documents (
 		id TEXT PRIMARY KEY,
 		collection TEXT NOT NULL,

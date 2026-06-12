@@ -15,6 +15,13 @@ type ingestView struct {
 	Chunks  int `json:"chunks"`
 }
 
+type syncView struct {
+	Added   int `json:"added"`
+	Skipped int `json:"skipped"`
+	Chunks  int `json:"chunks"`
+	Pruned  int `json:"pruned"`
+}
+
 func newAddCmd(deps Deps) *cobra.Command {
 	return &cobra.Command{
 		Use:   "add <collection> <path>...",
@@ -41,4 +48,29 @@ func newAddCmd(deps Deps) *cobra.Command {
 			return render(cmd, view, human)
 		},
 	}
+}
+
+func newSyncCmd(deps Deps) *cobra.Command {
+	var prune bool
+	cmd := &cobra.Command{
+		Use:   "sync <collection> [path]...",
+		Short: "Re-ingest a collection's sources, optionally pruning deleted documents",
+		Long: "Re-ingest the collection's sources (idempotent), re-embedding changed " +
+			"documents. With no path, the sources remembered from prior add/sync runs are " +
+			"replayed. With --prune, documents whose source files no longer exist are removed.",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) < 1 {
+				return fmt.Errorf("%w: sync takes a collection and optional paths", domain.ErrInvalidArgument)
+			}
+			sum, err := deps.Sync.Sync(cmd.Context(), args[0], args[1:], prune)
+			if err != nil {
+				return err
+			}
+			view := syncView{Added: sum.Added, Skipped: sum.Skipped, Chunks: sum.Chunks, Pruned: sum.Pruned}
+			human := fmt.Sprintf("added %d, skipped %d, pruned %d (%d chunks)", sum.Added, sum.Skipped, sum.Pruned, sum.Chunks)
+			return render(cmd, view, human)
+		},
+	}
+	cmd.Flags().BoolVar(&prune, "prune", false, "remove documents whose source file no longer exists")
+	return cmd
 }

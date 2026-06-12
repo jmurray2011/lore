@@ -22,6 +22,7 @@ import (
 type Deps struct {
 	Catalog *app.Catalog
 	Ingest  *app.Ingestor
+	Sync    *app.Syncer
 	Query   *app.Querier
 	Ask     *app.Asker
 	Remove  *app.Remover
@@ -46,6 +47,7 @@ func NewRootCommand(deps Deps, version string, out, errOut io.Writer) *cobra.Com
 	root.AddCommand(
 		newInitCmd(deps),
 		newAddCmd(deps),
+		newSyncCmd(deps),
 		newLsCmd(deps),
 		newStatusCmd(deps),
 		newDocsCmd(deps),

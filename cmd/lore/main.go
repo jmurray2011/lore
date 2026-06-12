@@ -83,14 +83,19 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	}
 
 	extractor := extract.NewRouter(extract.New(), docx.New(), pdf.New(), xlsx.New())
+	source := fs.NewSource()
 
+	catalog := app.NewCatalog(store.collections, store.docs, embedder)
+	ingestor := app.NewIngestor(store.collections, store.docs, store.index, embedder, extractor, source, chunker, app.WithConcurrency(cfg.Ingest.Concurrency))
 	querier := app.NewQuerier(store.collections, store.index, store.docs, embedder)
+	remover := app.NewRemover(store.collections, store.docs, store.index)
 	deps := cli.Deps{
-		Catalog: app.NewCatalog(store.collections, store.docs, embedder),
-		Ingest:  app.NewIngestor(store.collections, store.docs, store.index, embedder, extractor, fs.NewSource(), chunker, app.WithConcurrency(cfg.Ingest.Concurrency)),
+		Catalog: catalog,
+		Ingest:  ingestor,
+		Sync:    app.NewSyncer(catalog, ingestor, remover, source),
 		Query:   querier,
 		Ask:     app.NewAsker(querier, generator),
-		Remove:  app.NewRemover(store.collections, store.docs, store.index),
+		Remove:  remover,
 	}
 
 	root := cli.NewRootCommand(deps, fmt.Sprintf("%s (commit %s, built %s)", version, commit, date), stdout, stderr)

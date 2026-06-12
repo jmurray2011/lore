@@ -59,12 +59,17 @@ func newDeps(emb app.Embedder, gen app.Generator) (cli.Deps, *memstore.Collectio
 	index := memstore.NewVectorIndex()
 	q := app.NewQuerier(colls, index, docs, emb)
 	chunker, _ := domain.NewChunker(domain.DefaultChunkSize, domain.DefaultChunkOverlap)
+	source := fs.NewSource()
+	catalog := app.NewCatalog(colls, docs, emb)
+	ingestor := app.NewIngestor(colls, docs, index, emb, extract.New(), source, chunker)
+	remover := app.NewRemover(colls, docs, index)
 	deps := cli.Deps{
-		Catalog: app.NewCatalog(colls, docs, emb),
-		Ingest:  app.NewIngestor(colls, docs, index, emb, extract.New(), fs.NewSource(), chunker),
+		Catalog: catalog,
+		Ingest:  ingestor,
+		Sync:    app.NewSyncer(catalog, ingestor, remover, source),
 		Query:   q,
 		Ask:     app.NewAsker(q, gen),
-		Remove:  app.NewRemover(colls, docs, index),
+		Remove:  remover,
 	}
 	return deps, colls, docs, index
 }
@@ -163,6 +168,72 @@ func TestCLIDocs(t *testing.T) {
 			t.Errorf("want exit 3, got %d", code)
 		}
 	})
+}
+
+func TestCLISync(t *testing.T) {
+	deps, _, _, _ := newDeps(stubEmbedder{space: testSpace(), vec: []float32{1, 0, 0}}, stubGenerator{})
+	if _, code := exec(deps, "init", "notes"); code != 0 {
+		t.Fatal("init failed")
+	}
+
+	dir := t.TempDir()
+	b := filepath.Join(dir, "b.txt")
+	for name, body := range map[string]string{"a.txt": "alpha content here", "b.txt": "beta content here"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if _, code := exec(deps, "add", "notes", dir); code != 0 {
+		t.Fatalf("add exit %d", code)
+	}
+	if n := docCount(t, deps, "notes"); n != 2 {
+		t.Fatalf("after add: want 2 docs, got %d", n)
+	}
+
+	// Delete one source file, then sync with no path: the remembered root is
+	// replayed, and --prune removes the document whose file is gone.
+	if err := os.Remove(b); err != nil {
+		t.Fatal(err)
+	}
+	out, code := exec(deps, "sync", "notes", "--prune", "--json")
+	if code != 0 {
+		t.Fatalf("sync exit %d, out %q", code, out)
+	}
+	var sv syncViewJSON
+	if err := json.Unmarshal([]byte(out), &sv); err != nil {
+		t.Fatalf("bad JSON %q: %v", out, err)
+	}
+	if sv.Pruned != 1 {
+		t.Errorf("want Pruned 1, got %+v", sv)
+	}
+	if n := docCount(t, deps, "notes"); n != 1 {
+		t.Errorf("after prune: want 1 doc, got %d", n)
+	}
+
+	t.Run("no path and no remembered source exits 2", func(t *testing.T) {
+		deps, _, _, _ := newDeps(stubEmbedder{space: testSpace(), vec: []float32{1, 0, 0}}, stubGenerator{})
+		if _, code := exec(deps, "init", "fresh"); code != 0 {
+			t.Fatal("init failed")
+		}
+		if _, code := exec(deps, "sync", "fresh"); code != 2 {
+			t.Errorf("want exit 2 (usage), got %d", code)
+		}
+	})
+}
+
+// docCount returns how many documents `docs <collection> --json` reports.
+func docCount(t *testing.T, deps cli.Deps, collection string) int {
+	t.Helper()
+	out, code := exec(deps, "docs", collection, "--json")
+	if code != 0 {
+		t.Fatalf("docs exit %d, out %q", code, out)
+	}
+	var list []docViewJSON
+	if err := json.Unmarshal([]byte(out), &list); err != nil {
+		t.Fatalf("bad docs JSON %q: %v", out, err)
+	}
+	return len(list)
 }
 
 func TestCLIUsageErrors(t *testing.T) {
@@ -435,6 +506,13 @@ type docViewJSON struct {
 	Source     string `json:"source"`
 	Hash       string `json:"hash"`
 	IngestedAt string `json:"ingested_at"`
+}
+
+type syncViewJSON struct {
+	Added   int `json:"added"`
+	Skipped int `json:"skipped"`
+	Chunks  int `json:"chunks"`
+	Pruned  int `json:"pruned"`
 }
 
 type hitViewJSON struct {

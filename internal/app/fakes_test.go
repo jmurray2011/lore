@@ -68,6 +68,20 @@ func (f *fakeCollections) Delete(_ context.Context, name string) error {
 	return nil
 }
 
+func (f *fakeCollections) RecordSource(_ context.Context, name, source string) error {
+	c, ok := f.byName[name]
+	if !ok {
+		return app.ErrNotFound
+	}
+	for _, s := range c.Sources {
+		if s == source {
+			return nil
+		}
+	}
+	c.Sources = append(c.Sources, source)
+	return nil
+}
+
 type fakeEmbedder struct {
 	space      domain.EmbeddingSpace
 	byText     map[string][]float32

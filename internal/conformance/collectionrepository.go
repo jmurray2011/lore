@@ -123,6 +123,55 @@ func RunCollectionRepositorySuite(t *testing.T, factory func(t *testing.T) app.C
 		}
 	})
 
+	t.Run("record source appends to Get, idempotently", func(t *testing.T) {
+		repo := factory(t)
+		if err := repo.Create(ctx, newCollection(t, "docs")); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		if err := repo.RecordSource(ctx, "docs", "/a"); err != nil {
+			t.Fatalf("RecordSource /a: %v", err)
+		}
+		if err := repo.RecordSource(ctx, "docs", "/b"); err != nil {
+			t.Fatalf("RecordSource /b: %v", err)
+		}
+		if err := repo.RecordSource(ctx, "docs", "/a"); err != nil { // duplicate
+			t.Fatalf("RecordSource /a again: %v", err)
+		}
+
+		got, err := repo.Get(ctx, "docs")
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		set := make(map[string]int, len(got.Sources))
+		for _, s := range got.Sources {
+			set[s]++
+		}
+		if len(got.Sources) != 2 || set["/a"] != 1 || set["/b"] != 1 {
+			t.Errorf("want sources {/a,/b} without duplicates, got %v", got.Sources)
+		}
+	})
+
+	t.Run("record source on unknown collection is ErrNotFound", func(t *testing.T) {
+		repo := factory(t)
+		if err := repo.RecordSource(ctx, "nope", "/a"); !errors.Is(err, app.ErrNotFound) {
+			t.Errorf("want ErrNotFound, got %v", err)
+		}
+	})
+
+	t.Run("a fresh collection has no sources", func(t *testing.T) {
+		repo := factory(t)
+		if err := repo.Create(ctx, newCollection(t, "docs")); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		got, err := repo.Get(ctx, "docs")
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		if len(got.Sources) != 0 {
+			t.Errorf("want no sources, got %v", got.Sources)
+		}
+	})
+
 	t.Run("stored collection is independent of the caller's struct", func(t *testing.T) {
 		repo := factory(t)
 		c := newCollection(t, "docs")

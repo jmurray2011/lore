@@ -72,6 +72,29 @@ func TestIngestor(t *testing.T) {
 		}
 	})
 
+	t.Run("records the source root on the collection", func(t *testing.T) {
+		coll := mustCollection(t, "docs", space)
+		colls := newFakeCollections(coll)
+		src := &fakeSource{items: []app.SourceItem{textItem("file:///a.txt", words(10))}}
+		ing := app.NewIngestor(colls, &fakeDocs{}, &fakeIndex{}, &fakeEmbedder{space: space}, &fakeExtractor{}, src, chunker41(t))
+
+		if _, err := ing.Ingest(ctx, "docs", "/root"); err != nil {
+			t.Fatalf("Ingest: %v", err)
+		}
+		// Re-ingesting the same root must not duplicate it.
+		if _, err := ing.Ingest(ctx, "docs", "/root"); err != nil {
+			t.Fatalf("second Ingest: %v", err)
+		}
+
+		got, err := colls.Get(ctx, "docs")
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		if len(got.Sources) != 1 || got.Sources[0] != "/root" {
+			t.Errorf("want source root /root recorded once, got %v", got.Sources)
+		}
+	})
+
 	t.Run("is idempotent: unchanged content skips and does not re-embed", func(t *testing.T) {
 		coll := mustCollection(t, "docs", space)
 		src := &fakeSource{items: []app.SourceItem{textItem("file:///a.txt", words(10))}}
