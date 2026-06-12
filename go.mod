@@ -6,6 +6,7 @@ require golang.org/x/sync v0.19.0
 
 require (
 	github.com/BurntSushi/toml v1.6.0
+	github.com/ledongthuc/pdf v0.0.0-20250511090121-5959a4027728
 	github.com/spf13/cobra v1.10.2
 	modernc.org/sqlite v1.46.2
 )
