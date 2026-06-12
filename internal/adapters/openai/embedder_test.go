@@ -14,7 +14,7 @@ import (
 )
 
 func TestEmbedderSpace(t *testing.T) {
-	e, err := openai.NewEmbedder("http://x", "k", "text-embedding-3-small", 1536, nil)
+	e, err := openai.NewEmbedder("http://x", "k", "text-embedding-3-small", 1536, openai.AuthBearer, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,7 +46,7 @@ func TestEmbedderEmbed(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		e, err := openai.NewEmbedder(srv.URL, "secret", "m", 2, srv.Client())
+		e, err := openai.NewEmbedder(srv.URL, "secret", "m", 2, openai.AuthBearer, srv.Client())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -71,11 +71,35 @@ func TestEmbedderEmbed(t *testing.T) {
 		}
 	})
 
+	t.Run("api-key auth sends the api-key header, not Authorization", func(t *testing.T) {
+		var gotAuth, gotAPIKey string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			gotAuth = r.Header.Get("Authorization")
+			gotAPIKey = r.Header.Get("api-key")
+			_, _ = io.WriteString(w, `{"data":[{"index":0,"embedding":[1,0]}]}`)
+		}))
+		defer srv.Close()
+
+		e, err := openai.NewEmbedder(srv.URL, "secret", "m", 2, openai.AuthAPIKey, srv.Client())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := e.Embed(ctx, []string{"a"}); err != nil {
+			t.Fatalf("Embed: %v", err)
+		}
+		if gotAPIKey != "secret" {
+			t.Errorf("api-key header = %q, want secret", gotAPIKey)
+		}
+		if gotAuth != "" {
+			t.Errorf("Authorization must be empty in api-key mode, got %q", gotAuth)
+		}
+	})
+
 	t.Run("empty input makes no request", func(t *testing.T) {
 		called := false
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { called = true }))
 		defer srv.Close()
-		e, _ := openai.NewEmbedder(srv.URL, "", "m", 2, srv.Client())
+		e, _ := openai.NewEmbedder(srv.URL, "", "m", 2, openai.AuthBearer, srv.Client())
 
 		got, err := e.Embed(ctx, nil)
 		if err != nil || len(got) != 0 {
@@ -91,7 +115,7 @@ func TestEmbedderEmbed(t *testing.T) {
 			_, _ = io.WriteString(w, `{"data":[{"index":0,"embedding":[0.1,0.2,0.3]}]}`)
 		}))
 		defer srv.Close()
-		e, _ := openai.NewEmbedder(srv.URL, "", "m", 2, srv.Client()) // expects 2 dims, gets 3
+		e, _ := openai.NewEmbedder(srv.URL, "", "m", 2, openai.AuthBearer, srv.Client()) // expects 2 dims, gets 3
 
 		if _, err := e.Embed(ctx, []string{"a"}); err == nil {
 			t.Error("want dimension-mismatch error")
@@ -104,7 +128,7 @@ func TestEmbedderEmbed(t *testing.T) {
 			_, _ = io.WriteString(w, `{"error":"boom"}`)
 		}))
 		defer srv.Close()
-		e, _ := openai.NewEmbedder(srv.URL, "", "m", 2, srv.Client())
+		e, _ := openai.NewEmbedder(srv.URL, "", "m", 2, openai.AuthBearer, srv.Client())
 
 		if _, err := e.Embed(ctx, []string{"a"}); err == nil {
 			t.Error("want error on HTTP 500")
@@ -122,7 +146,7 @@ func TestNewEmbedderValidation(t *testing.T) {
 		{"non-positive dims", "http://x", "m", 0},
 	}
 	for _, c := range cases {
-		if _, err := openai.NewEmbedder(c.baseURL, "k", c.model, c.dims, nil); !errors.Is(err, domain.ErrInvalidArgument) {
+		if _, err := openai.NewEmbedder(c.baseURL, "k", c.model, c.dims, openai.AuthBearer, nil); !errors.Is(err, domain.ErrInvalidArgument) {
 			t.Errorf("%s: want ErrInvalidArgument, got %v", c.name, err)
 		}
 	}

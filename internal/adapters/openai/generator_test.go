@@ -37,7 +37,7 @@ func TestGeneratorSynthesize(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		g, err := openai.NewGenerator(srv.URL, "k", "gpt-test", openai.Capabilities{}, srv.Client())
+		g, err := openai.NewGenerator(srv.URL, "k", "gpt-test", openai.Capabilities{}, openai.AuthBearer, srv.Client())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -99,7 +99,7 @@ func TestGeneratorSynthesize(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		g, err := openai.NewGenerator(srv.URL, "k", "gpt-test", openai.Capabilities{StructuredOutput: true}, srv.Client())
+		g, err := openai.NewGenerator(srv.URL, "k", "gpt-test", openai.Capabilities{StructuredOutput: true}, openai.AuthBearer, srv.Client())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -132,7 +132,7 @@ func TestGeneratorSynthesize(t *testing.T) {
 			_, _ = io.WriteString(w, `{"choices":[]}`)
 		}))
 		defer srv.Close()
-		g, _ := openai.NewGenerator(srv.URL, "", "m", openai.Capabilities{}, srv.Client())
+		g, _ := openai.NewGenerator(srv.URL, "", "m", openai.Capabilities{}, openai.AuthBearer, srv.Client())
 
 		if _, err := g.Synthesize(ctx, "q", hits, nil); err == nil {
 			t.Error("want error when the API returns no choices")
@@ -144,7 +144,7 @@ func TestGeneratorSynthesize(t *testing.T) {
 			w.WriteHeader(http.StatusBadGateway)
 		}))
 		defer srv.Close()
-		g, _ := openai.NewGenerator(srv.URL, "", "m", openai.Capabilities{}, srv.Client())
+		g, _ := openai.NewGenerator(srv.URL, "", "m", openai.Capabilities{}, openai.AuthBearer, srv.Client())
 
 		if _, err := g.Synthesize(ctx, "q", hits, nil); err == nil {
 			t.Error("want error on HTTP 502")
@@ -178,7 +178,7 @@ func TestGeneratorAttachments(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		g, _ := openai.NewGenerator(srv.URL, "k", "m", openai.Capabilities{ImageInput: true}, srv.Client())
+		g, _ := openai.NewGenerator(srv.URL, "k", "m", openai.Capabilities{ImageInput: true}, openai.AuthBearer, srv.Client())
 		if _, err := g.Synthesize(ctx, "q", hits, []domain.Attachment{img}); err != nil {
 			t.Fatalf("Synthesize: %v", err)
 		}
@@ -197,7 +197,7 @@ func TestGeneratorAttachments(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		g, _ := openai.NewGenerator(srv.URL, "k", "m", openai.Capabilities{DocumentInput: true}, srv.Client())
+		g, _ := openai.NewGenerator(srv.URL, "k", "m", openai.Capabilities{DocumentInput: true}, openai.AuthBearer, srv.Client())
 		if _, err := g.Synthesize(ctx, "q", hits, []domain.Attachment{pdf}); err != nil {
 			t.Fatalf("Synthesize: %v", err)
 		}
@@ -212,7 +212,7 @@ func TestGeneratorAttachments(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true }))
 		defer srv.Close()
 
-		g, _ := openai.NewGenerator(srv.URL, "k", "m", openai.Capabilities{}, srv.Client())
+		g, _ := openai.NewGenerator(srv.URL, "k", "m", openai.Capabilities{}, openai.AuthBearer, srv.Client())
 		if _, err := g.Synthesize(ctx, "q", hits, []domain.Attachment{img}); !errors.Is(err, domain.ErrInvalidArgument) {
 			t.Errorf("want ErrInvalidArgument, got %v", err)
 		}
@@ -222,7 +222,7 @@ func TestGeneratorAttachments(t *testing.T) {
 	})
 
 	t.Run("document without capability errors", func(t *testing.T) {
-		g, _ := openai.NewGenerator("http://unused", "k", "m", openai.Capabilities{}, nil)
+		g, _ := openai.NewGenerator("http://unused", "k", "m", openai.Capabilities{}, openai.AuthBearer, nil)
 		if _, err := g.Synthesize(ctx, "q", hits, []domain.Attachment{pdf}); !errors.Is(err, domain.ErrInvalidArgument) {
 			t.Errorf("want ErrInvalidArgument, got %v", err)
 		}
@@ -230,10 +230,10 @@ func TestGeneratorAttachments(t *testing.T) {
 }
 
 func TestNewGeneratorValidation(t *testing.T) {
-	if _, err := openai.NewGenerator("", "k", "m", openai.Capabilities{}, nil); !errors.Is(err, domain.ErrInvalidArgument) {
+	if _, err := openai.NewGenerator("", "k", "m", openai.Capabilities{}, openai.AuthBearer, nil); !errors.Is(err, domain.ErrInvalidArgument) {
 		t.Errorf("empty base url: want ErrInvalidArgument, got %v", err)
 	}
-	if _, err := openai.NewGenerator("http://x", "k", "", openai.Capabilities{}, nil); !errors.Is(err, domain.ErrInvalidArgument) {
+	if _, err := openai.NewGenerator("http://x", "k", "", openai.Capabilities{}, openai.AuthBearer, nil); !errors.Is(err, domain.ErrInvalidArgument) {
 		t.Errorf("empty model: want ErrInvalidArgument, got %v", err)
 	}
 }

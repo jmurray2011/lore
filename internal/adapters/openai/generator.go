@@ -56,15 +56,16 @@ type Generator struct {
 }
 
 // NewGenerator constructs a Generator. caps must reflect only what the provider
-// actually supports (decision 19). A nil httpClient uses http.DefaultClient.
-func NewGenerator(baseURL, apiKey, model string, caps Capabilities, httpClient *http.Client) (*Generator, error) {
+// actually supports (decision 19). auth selects the API-key scheme (AuthBearer
+// for OpenAI, AuthAPIKey for Azure). A nil httpClient uses http.DefaultClient.
+func NewGenerator(baseURL, apiKey, model string, caps Capabilities, auth AuthStyle, httpClient *http.Client) (*Generator, error) {
 	if strings.TrimSpace(baseURL) == "" {
 		return nil, fmt.Errorf("openai generator: %w: base URL is required", domain.ErrInvalidArgument)
 	}
 	if strings.TrimSpace(model) == "" {
 		return nil, fmt.Errorf("openai generator: %w: model is required", domain.ErrInvalidArgument)
 	}
-	return &Generator{client: newClient(baseURL, apiKey, httpClient), model: model, caps: caps}, nil
+	return &Generator{client: newClient(baseURL, apiKey, auth, httpClient), model: model, caps: caps}, nil
 }
 
 // chatMessage is a request message. Content is a string for plain text, or a

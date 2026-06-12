@@ -41,6 +41,9 @@ type Provider struct {
 	EmbedModel string
 	Dimensions int
 	ChatModel  string
+	// Auth selects how the API key is sent: "bearer" (OpenAI default) or
+	// "api-key" (Azure OpenAI's header, decision 21).
+	Auth string
 	// StructuredOutput declares that the provider supports JSON-schema
 	// (response_format) output. Off by default so lore works against any
 	// OpenAI-compatible endpoint; enable it for providers that support it
@@ -69,6 +72,7 @@ func Defaults() Config {
 			EmbedModel: "text-embedding-3-small",
 			Dimensions: 1536,
 			ChatModel:  "gpt-4o-mini",
+			Auth:       "bearer",
 		},
 		Storage: Storage{Backend: "sqlite"},
 		Log:     Log{Level: slog.LevelInfo, Format: "text"},
@@ -111,6 +115,7 @@ type fileConfig struct {
 		EmbedModel       string `toml:"embed_model"`
 		Dimensions       int    `toml:"dimensions"`
 		ChatModel        string `toml:"chat_model"`
+		Auth             string `toml:"auth"`
 		StructuredOutput bool   `toml:"structured_output"`
 		ImageInput       bool   `toml:"image_input"`
 		DocumentInput    bool   `toml:"document_input"`
@@ -130,6 +135,7 @@ func applyFile(cfg *Config, fc fileConfig) error {
 	setString(&cfg.Provider.APIKey, fc.Provider.APIKey)
 	setString(&cfg.Provider.EmbedModel, fc.Provider.EmbedModel)
 	setString(&cfg.Provider.ChatModel, fc.Provider.ChatModel)
+	setString(&cfg.Provider.Auth, fc.Provider.Auth)
 	setString(&cfg.Storage.Backend, fc.Storage.Backend)
 	setString(&cfg.Storage.Path, fc.Storage.Path)
 	setString(&cfg.Log.Format, fc.Log.Format)
@@ -160,6 +166,7 @@ func applyEnv(cfg *Config, getenv func(string) string) error {
 	setString(&cfg.Provider.APIKey, getenv("LORE_API_KEY"))
 	setString(&cfg.Provider.EmbedModel, getenv("LORE_EMBED_MODEL"))
 	setString(&cfg.Provider.ChatModel, getenv("LORE_CHAT_MODEL"))
+	setString(&cfg.Provider.Auth, getenv("LORE_AUTH"))
 	setString(&cfg.Storage.Backend, getenv("LORE_STORAGE_BACKEND"))
 	setString(&cfg.Storage.Path, getenv("LORE_DB_PATH"))
 	setString(&cfg.Log.Format, getenv("LORE_LOG_FORMAT"))
@@ -231,6 +238,9 @@ func validate(cfg Config) error {
 	}
 	if cfg.Provider.Dimensions <= 0 {
 		return fmt.Errorf("config: %w: provider dimensions must be positive, got %d", domain.ErrInvalidArgument, cfg.Provider.Dimensions)
+	}
+	if cfg.Provider.Auth != "bearer" && cfg.Provider.Auth != "api-key" {
+		return fmt.Errorf("config: %w: provider auth %q (want \"bearer\" or \"api-key\")", domain.ErrInvalidArgument, cfg.Provider.Auth)
 	}
 	if cfg.Storage.Backend != "sqlite" && cfg.Storage.Backend != "memory" {
 		return fmt.Errorf("config: %w: storage backend %q (want \"sqlite\" or \"memory\")", domain.ErrInvalidArgument, cfg.Storage.Backend)

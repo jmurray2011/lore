@@ -14,20 +14,32 @@ import (
 	"strings"
 )
 
+// AuthStyle selects how the API key is presented. Bearer
+// (Authorization: Bearer <key>) is the OpenAI default; APIKey (api-key: <key>)
+// is Azure OpenAI's scheme (decision 21).
+type AuthStyle int
+
+const (
+	AuthBearer AuthStyle = iota
+	AuthAPIKey
+)
+
 // client is the shared HTTP plumbing for the OpenAI-compatible endpoints.
 type client struct {
 	baseURL string
 	apiKey  string
+	auth    AuthStyle
 	http    *http.Client
 }
 
-func newClient(baseURL, apiKey string, httpClient *http.Client) client {
+func newClient(baseURL, apiKey string, auth AuthStyle, httpClient *http.Client) client {
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
 	return client{
 		baseURL: strings.TrimRight(baseURL, "/"),
 		apiKey:  apiKey,
+		auth:    auth,
 		http:    httpClient,
 	}
 }
@@ -46,7 +58,12 @@ func (c client) post(ctx context.Context, path string, in, out any) error {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if c.apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+		switch c.auth {
+		case AuthAPIKey:
+			req.Header.Set("api-key", c.apiKey)
+		default:
+			req.Header.Set("Authorization", "Bearer "+c.apiKey)
+		}
 	}
 
 	resp, err := c.http.Do(req)

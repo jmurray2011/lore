@@ -23,9 +23,10 @@ type Embedder struct {
 }
 
 // NewEmbedder constructs an Embedder. dimensions pins the space the operator
-// expects; Embed verifies the API returns vectors of that size. A nil
+// expects; Embed verifies the API returns vectors of that size. auth selects
+// the API-key scheme (AuthBearer for OpenAI, AuthAPIKey for Azure). A nil
 // httpClient uses http.DefaultClient.
-func NewEmbedder(baseURL, apiKey, model string, dimensions int, httpClient *http.Client) (*Embedder, error) {
+func NewEmbedder(baseURL, apiKey, model string, dimensions int, auth AuthStyle, httpClient *http.Client) (*Embedder, error) {
 	if strings.TrimSpace(baseURL) == "" {
 		return nil, fmt.Errorf("openai embedder: %w: base URL is required", domain.ErrInvalidArgument)
 	}
@@ -34,7 +35,7 @@ func NewEmbedder(baseURL, apiKey, model string, dimensions int, httpClient *http
 		return nil, err
 	}
 	return &Embedder{
-		client: newClient(baseURL, apiKey, httpClient),
+		client: newClient(baseURL, apiKey, auth, httpClient),
 		model:  model,
 		space:  space,
 	}, nil
