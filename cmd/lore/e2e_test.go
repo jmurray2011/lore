@@ -1,9 +1,11 @@
 package main
 
 import (
+	"archive/zip"
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -16,12 +18,13 @@ import (
 	"testing"
 )
 
-// TestEndToEndSQLitePersistence builds the real binary and drives
-// init→add→ls→status→query→ask→rm across separate process invocations sharing
-// one SQLite file. It exercises the composition root, the openai adapter's real
-// HTTP path (against a stub provider), and persistence across processes — which
-// only holds once sqlite is wired in (memstore is per-process).
-func TestEndToEndSQLitePersistence(t *testing.T) {
+// TestEndToEnd builds the real binary and drives init→add→ls→status→query→ask→rm
+// across separate process invocations sharing one SQLite file. It exercises the
+// composition root, the openai adapter's real HTTP path (against a stub
+// provider), persistence across processes (which only holds with sqlite wired
+// in — memstore is per-process), and ingestion of all wired document formats
+// (text, docx, pdf) through the extractor router.
+func TestEndToEnd(t *testing.T) {
 	if testing.Short() {
 		t.Skip("e2e: builds the binary and runs it as subprocesses")
 	}
@@ -82,13 +85,21 @@ func TestEndToEndSQLitePersistence(t *testing.T) {
 		return out
 	}
 
-	docPath := filepath.Join(dir, "alpha.txt")
-	if err := os.WriteFile(docPath, []byte("alpha beta gamma delta epsilon"), 0o600); err != nil {
+	txtPath := filepath.Join(dir, "alpha.txt")
+	if err := os.WriteFile(txtPath, []byte("alpha beta gamma delta epsilon"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	docxPath := filepath.Join(dir, "report.docx")
+	if err := os.WriteFile(docxPath, docxBytes(t, "docxsentinel alpha beta"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pdfPath := filepath.Join(dir, "paper.pdf")
+	if err := os.WriteFile(pdfPath, pdfBytes(t, "pdfsentinel alpha beta"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
 	mustSucceed(t, "init", "docs")
-	mustSucceed(t, "add", "docs", docPath)
+	mustSucceed(t, "add", "docs", txtPath, docxPath, pdfPath)
 
 	// Fresh process must see the collection written by a prior process.
 	if out := mustSucceed(t, "--json", "ls"); !strings.Contains(out, `"name": "docs"`) {
@@ -97,8 +108,12 @@ func TestEndToEndSQLitePersistence(t *testing.T) {
 	if out := mustSucceed(t, "--json", "status", "docs"); !strings.Contains(out, "stub-embed") {
 		t.Fatalf("status missing pinned model: %s", out)
 	}
-	if out := mustSucceed(t, "--json", "query", "docs", "alpha"); !strings.Contains(out, "alpha beta gamma") {
-		t.Fatalf("query did not return the ingested chunk: %s", out)
+	// All three formats flowed through the router into the store.
+	out := mustSucceed(t, "--json", "query", "docs", "alpha")
+	for _, want := range []string{"alpha beta gamma", "docxsentinel", "pdfsentinel"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("query missing %q (format not ingested?): %s", want, out)
+		}
 	}
 	if out := mustSucceed(t, "--json", "ask", "docs", "what is alpha?"); !strings.Contains(out, "stub answer") {
 		t.Fatalf("ask did not return the synthesized answer: %s", out)
@@ -149,4 +164,53 @@ func stubProvider(t *testing.T, dims int) *httptest.Server {
 	})
 
 	return httptest.NewServer(mux)
+}
+
+// docxBytes builds a minimal .docx (zip with word/document.xml) carrying text.
+func docxBytes(t *testing.T, text string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	w, err := zw.Create("word/document.xml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := `<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">` +
+		`<w:body><w:p><w:r><w:t>` + text + `</w:t></w:r></w:p></w:body></w:document>`
+	if _, err := io.WriteString(w, doc); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+// pdfBytes builds a minimal single-page PDF showing text, with correct xref
+// offsets so the fixture is valid.
+func pdfBytes(t *testing.T, text string) []byte {
+	t.Helper()
+	content := "BT /F1 24 Tf 72 720 Td (" + text + ") Tj ET"
+	objs := []string{
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>",
+		fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(content), content),
+		"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+	}
+	var buf bytes.Buffer
+	buf.WriteString("%PDF-1.4\n")
+	offsets := make([]int, len(objs)+1)
+	for i, body := range objs {
+		offsets[i+1] = buf.Len()
+		fmt.Fprintf(&buf, "%d 0 obj\n%s\nendobj\n", i+1, body)
+	}
+	xrefOff := buf.Len()
+	fmt.Fprintf(&buf, "xref\n0 %d\n", len(objs)+1)
+	buf.WriteString("0000000000 65535 f \n")
+	for i := 1; i <= len(objs); i++ {
+		fmt.Fprintf(&buf, "%010d 00000 n \n", offsets[i])
+	}
+	fmt.Fprintf(&buf, "trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF", len(objs)+1, xrefOff)
+	return buf.Bytes()
 }

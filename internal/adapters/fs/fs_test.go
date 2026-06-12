@@ -27,6 +27,8 @@ func TestSourceWalk(t *testing.T) {
 	write("a.md", "# A")
 	write("b.txt", "bee")
 	write("note.bin", "binary-ish")
+	write("doc.pdf", "%PDF-ish")
+	write("report.docx", "zip-ish")
 	write(".secret.txt", "shh")
 	write(".git/config", "[core]")
 	write("sub/c.md", "cee")
@@ -40,8 +42,8 @@ func TestSourceWalk(t *testing.T) {
 		t.Fatalf("Walk: %v", err)
 	}
 
-	if len(got) != 4 {
-		t.Fatalf("want 4 items, got %d: %v", len(got), got)
+	if len(got) != 6 {
+		t.Fatalf("want 6 items, got %d: %v", len(got), got)
 	}
 	if _, ok := got[".secret.txt"]; ok {
 		t.Error("hidden file should be skipped")
@@ -60,6 +62,12 @@ func TestSourceWalk(t *testing.T) {
 	}
 	if got["note.bin"].ContentType != "application/octet-stream" {
 		t.Errorf("note.bin type = %q (fs yields it; the extractor decides support)", got["note.bin"].ContentType)
+	}
+	if got["doc.pdf"].ContentType != "application/pdf" {
+		t.Errorf("doc.pdf type = %q", got["doc.pdf"].ContentType)
+	}
+	if got["report.docx"].ContentType != "application/vnd.openxmlformats-officedocument.wordprocessingml.document" {
+		t.Errorf("report.docx type = %q", got["report.docx"].ContentType)
 	}
 	if !strings.HasPrefix(got["a.md"].URI, "file://") {
 		t.Errorf("URI = %q, want file:// scheme", got["a.md"].URI)

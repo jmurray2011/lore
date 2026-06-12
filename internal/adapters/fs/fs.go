@@ -73,6 +73,12 @@ func contentType(path string) string {
 		return "text/markdown"
 	case ".txt", ".text":
 		return "text/plain"
+	case ".pdf":
+		return "application/pdf"
+	case ".docx":
+		// Literal rather than importing the docx adapter: fs must not depend on
+		// other adapters (only cmd/lore wires adapters together).
+		return "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 	default:
 		if ct := mime.TypeByExtension(filepath.Ext(path)); ct != "" {
 			return ct
