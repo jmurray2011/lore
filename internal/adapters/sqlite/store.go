@@ -23,12 +23,18 @@ var schemaStmts = []string{
 		dimensions INTEGER NOT NULL,
 		created_at TEXT NOT NULL
 	)`,
+	`CREATE TABLE IF NOT EXISTS collection_sources (
+		collection TEXT NOT NULL,
+		source TEXT NOT NULL,
+		PRIMARY KEY (collection, source)
+	)`,
 	`CREATE TABLE IF NOT EXISTS documents (
 		id TEXT PRIMARY KEY,
 		collection TEXT NOT NULL,
 		source_uri TEXT NOT NULL,
 		hash TEXT NOT NULL,
-		ingested_at TEXT NOT NULL
+		ingested_at TEXT NOT NULL,
+		fingerprint TEXT NOT NULL DEFAULT ''
 	)`,
 	`CREATE INDEX IF NOT EXISTS documents_by_collection ON documents(collection)`,
 	`CREATE TABLE IF NOT EXISTS chunks (
@@ -66,7 +72,46 @@ func Open(path string) (*Store, error) {
 			return nil, fmt.Errorf("sqlite: apply schema: %w", err)
 		}
 	}
+	// Migrate databases created before a column was added (CREATE TABLE IF NOT
+	// EXISTS leaves an existing table untouched).
+	if err := ensureColumn(db, "documents", "fingerprint", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	return &Store{db: db}, nil
+}
+
+// ensureColumn adds column to table with the given definition if it is not
+// already present, so an older database is migrated forward in place.
+func ensureColumn(db *sql.DB, table, column, definition string) error {
+	rows, err := db.Query("PRAGMA table_info(" + table + ")")
+	if err != nil {
+		return fmt.Errorf("sqlite: inspect %s: %w", table, err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var (
+			cid, notnull, pk int
+			name, ctype      string
+			dflt             sql.NullString
+		)
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return fmt.Errorf("sqlite: inspect %s: %w", table, err)
+		}
+		if name == column {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if _, err := db.Exec("ALTER TABLE " + table + " ADD COLUMN " + column + " " + definition); err != nil {
+		return fmt.Errorf("sqlite: add %s.%s: %w", table, column, err)
+	}
+	return nil
 }
 
 // Close releases the database handle.

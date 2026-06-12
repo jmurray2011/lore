@@ -46,9 +46,9 @@ func (s stubGenerator) Synthesize(_ context.Context, _ string, hits []domain.Chu
 	if s.rec != nil {
 		*s.rec = attachments
 	}
-	cites := make([]domain.ChunkID, len(hits))
+	cites := make([]domain.Citation, len(hits))
 	for i, h := range hits {
-		cites[i] = h.Chunk.ID
+		cites[i] = domain.Citation{ChunkID: h.Chunk.ID, Source: h.Source, Seq: h.Chunk.Seq}
 	}
 	return app.Answer{Text: s.text, Citations: cites}, nil
 }
@@ -59,12 +59,17 @@ func newDeps(emb app.Embedder, gen app.Generator) (cli.Deps, *memstore.Collectio
 	index := memstore.NewVectorIndex()
 	q := app.NewQuerier(colls, index, docs, emb)
 	chunker, _ := domain.NewChunker(domain.DefaultChunkSize, domain.DefaultChunkOverlap)
+	source := fs.NewSource()
+	catalog := app.NewCatalog(colls, docs, emb)
+	ingestor := app.NewIngestor(colls, docs, index, emb, extract.New(), source, chunker)
+	remover := app.NewRemover(colls, docs, index)
 	deps := cli.Deps{
-		Catalog: app.NewCatalog(colls, emb),
-		Ingest:  app.NewIngestor(colls, docs, index, emb, extract.New(), fs.NewSource(), chunker),
+		Catalog: catalog,
+		Ingest:  ingestor,
+		Sync:    app.NewSyncer(catalog, ingestor, remover, source),
 		Query:   q,
 		Ask:     app.NewAsker(q, gen),
-		Remove:  app.NewRemover(colls, docs, index),
+		Remove:  remover,
 	}
 	return deps, colls, docs, index
 }
@@ -121,6 +126,116 @@ func TestCLICollectionLifecycle(t *testing.T) {
 	})
 }
 
+func TestCLIDocs(t *testing.T) {
+	deps, _, docs, _ := newDeps(stubEmbedder{space: testSpace()}, stubGenerator{})
+	if _, code := exec(deps, "init", "docs"); code != 0 {
+		t.Fatal("init failed")
+	}
+
+	ctx := context.Background()
+	for _, uri := range []string{"file:///b.md", "file:///a.md"} { // unsorted on purpose
+		doc, err := domain.NewDocument("docs", uri, domain.HashContent([]byte(uri)), time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := docs.Upsert(ctx, doc, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("lists a collection's documents sorted by source, as JSON", func(t *testing.T) {
+		out, code := exec(deps, "docs", "docs", "--json")
+		if code != 0 {
+			t.Fatalf("exit %d, out %q", code, out)
+		}
+		var list []docViewJSON
+		if err := json.Unmarshal([]byte(out), &list); err != nil {
+			t.Fatalf("bad JSON %q: %v", out, err)
+		}
+		if len(list) != 2 {
+			t.Fatalf("want 2 docs, got %d", len(list))
+		}
+		if list[0].Source != "file:///a.md" || list[1].Source != "file:///b.md" {
+			t.Errorf("not sorted by source: %+v", list)
+		}
+		if list[0].Hash == "" || list[0].IngestedAt == "" {
+			t.Errorf("missing hash/ingested_at: %+v", list[0])
+		}
+	})
+
+	t.Run("unknown collection exits 3", func(t *testing.T) {
+		if _, code := exec(deps, "docs", "ghost"); code != 3 {
+			t.Errorf("want exit 3, got %d", code)
+		}
+	})
+}
+
+func TestCLISync(t *testing.T) {
+	deps, _, _, _ := newDeps(stubEmbedder{space: testSpace(), vec: []float32{1, 0, 0}}, stubGenerator{})
+	if _, code := exec(deps, "init", "notes"); code != 0 {
+		t.Fatal("init failed")
+	}
+
+	dir := t.TempDir()
+	b := filepath.Join(dir, "b.txt")
+	for name, body := range map[string]string{"a.txt": "alpha content here", "b.txt": "beta content here"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if _, code := exec(deps, "add", "notes", dir); code != 0 {
+		t.Fatalf("add exit %d", code)
+	}
+	if n := docCount(t, deps, "notes"); n != 2 {
+		t.Fatalf("after add: want 2 docs, got %d", n)
+	}
+
+	// Delete one source file, then sync with no path: the remembered root is
+	// replayed, and --prune removes the document whose file is gone.
+	if err := os.Remove(b); err != nil {
+		t.Fatal(err)
+	}
+	out, code := exec(deps, "sync", "notes", "--prune", "--json")
+	if code != 0 {
+		t.Fatalf("sync exit %d, out %q", code, out)
+	}
+	var sv syncViewJSON
+	if err := json.Unmarshal([]byte(out), &sv); err != nil {
+		t.Fatalf("bad JSON %q: %v", out, err)
+	}
+	if sv.Pruned != 1 {
+		t.Errorf("want Pruned 1, got %+v", sv)
+	}
+	if n := docCount(t, deps, "notes"); n != 1 {
+		t.Errorf("after prune: want 1 doc, got %d", n)
+	}
+
+	t.Run("no path and no remembered source exits 2", func(t *testing.T) {
+		deps, _, _, _ := newDeps(stubEmbedder{space: testSpace(), vec: []float32{1, 0, 0}}, stubGenerator{})
+		if _, code := exec(deps, "init", "fresh"); code != 0 {
+			t.Fatal("init failed")
+		}
+		if _, code := exec(deps, "sync", "fresh"); code != 2 {
+			t.Errorf("want exit 2 (usage), got %d", code)
+		}
+	})
+}
+
+// docCount returns how many documents `docs <collection> --json` reports.
+func docCount(t *testing.T, deps cli.Deps, collection string) int {
+	t.Helper()
+	out, code := exec(deps, "docs", collection, "--json")
+	if code != 0 {
+		t.Fatalf("docs exit %d, out %q", code, out)
+	}
+	var list []docViewJSON
+	if err := json.Unmarshal([]byte(out), &list); err != nil {
+		t.Fatalf("bad docs JSON %q: %v", out, err)
+	}
+	return len(list)
+}
+
 func TestCLIUsageErrors(t *testing.T) {
 	deps, _, _, _ := newDeps(stubEmbedder{space: testSpace()}, stubGenerator{})
 	cases := [][]string{
@@ -174,6 +289,9 @@ func TestCLIQuery(t *testing.T) {
 		if len(hits) != 1 || hits[0].ChunkID != string(chunk.ID) || hits[0].Score < 0.99 {
 			t.Errorf("hits = %+v", hits)
 		}
+		if hits[0].Source != "file:///a.md" || hits[0].Seq != 0 {
+			t.Errorf("hit provenance = %q#%d, want file:///a.md#0", hits[0].Source, hits[0].Seq)
+		}
 	})
 
 	t.Run("unknown collection exits 3", func(t *testing.T) {
@@ -201,10 +319,29 @@ func TestCLISpaceMismatchExits4(t *testing.T) {
 }
 
 func TestCLIAsk(t *testing.T) {
-	deps, _, _, _ := newDeps(stubEmbedder{space: testSpace(), vec: []float32{1, 0, 0}}, stubGenerator{text: "the answer"})
+	qvec := []float32{1, 0, 0}
+	deps, _, docs, index := newDeps(stubEmbedder{space: testSpace(), vec: qvec}, stubGenerator{text: "the answer"})
 	if _, code := exec(deps, "init", "docs"); code != 0 {
 		t.Fatal("init failed")
 	}
+
+	// Seed one chunk + matching vector so the answer carries a citation.
+	ctx := context.Background()
+	doc, err := domain.NewDocument("docs", "file:///a.md", domain.HashContent([]byte("x")), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	chunk, err := domain.NewChunk(doc.ID, 0, "the grounded answer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := docs.Upsert(ctx, doc, []domain.Chunk{chunk}); err != nil {
+		t.Fatal(err)
+	}
+	if err := index.Upsert(ctx, "docs", []app.VectorEntry{{ChunkID: chunk.ID, Vector: qvec}}); err != nil {
+		t.Fatal(err)
+	}
+
 	out, code := exec(deps, "ask", "docs", "why?", "--json")
 	if code != 0 {
 		t.Fatalf("exit %d, out %q", code, out)
@@ -215,6 +352,9 @@ func TestCLIAsk(t *testing.T) {
 	}
 	if ans.Text != "the answer" {
 		t.Errorf("answer = %+v", ans)
+	}
+	if len(ans.Citations) != 1 || ans.Citations[0].Source != "file:///a.md" || ans.Citations[0].Seq != 0 {
+		t.Errorf("citation provenance = %+v, want one file:///a.md#0", ans.Citations)
 	}
 }
 
@@ -362,15 +502,34 @@ type collectionViewJSON struct {
 	CreatedAt  string `json:"created_at"`
 }
 
+type docViewJSON struct {
+	Source     string `json:"source"`
+	Hash       string `json:"hash"`
+	IngestedAt string `json:"ingested_at"`
+}
+
+type syncViewJSON struct {
+	Added   int `json:"added"`
+	Skipped int `json:"skipped"`
+	Chunks  int `json:"chunks"`
+	Pruned  int `json:"pruned"`
+}
+
 type hitViewJSON struct {
 	ChunkID string  `json:"chunk_id"`
+	Source  string  `json:"source"`
+	Seq     int     `json:"seq"`
 	Score   float64 `json:"score"`
 	Text    string  `json:"text"`
 }
 
 type answerViewJSON struct {
-	Text      string   `json:"text"`
-	Citations []string `json:"citations"`
+	Text      string `json:"text"`
+	Citations []struct {
+		ChunkID string `json:"chunk_id"`
+		Source  string `json:"source"`
+		Seq     int    `json:"seq"`
+	} `json:"citations"`
 }
 
 type ingestViewJSON struct {

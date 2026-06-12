@@ -41,8 +41,19 @@ type VectorMatch struct {
 	Score   float64
 }
 
-// ChunkHit is a hydrated retrieval result: the chunk itself plus its score.
+// ChunkHit is a hydrated retrieval result: the chunk itself, its score, and the
+// URI of the source document it came from (provenance for display and citation).
 type ChunkHit struct {
-	Chunk Chunk
-	Score float64
+	Chunk  Chunk
+	Score  float64
+	Source string // source URI of the chunk's document
+}
+
+// Citation references a chunk an answer was grounded in, carrying the provenance
+// needed to display it: the source document's URI and the chunk's position
+// within it.
+type Citation struct {
+	ChunkID ChunkID
+	Source  string // source URI of the chunk's document
+	Seq     int    // the chunk's position within that document
 }

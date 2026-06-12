@@ -22,6 +22,7 @@ import (
 type Deps struct {
 	Catalog *app.Catalog
 	Ingest  *app.Ingestor
+	Sync    *app.Syncer
 	Query   *app.Querier
 	Ask     *app.Asker
 	Remove  *app.Remover
@@ -46,8 +47,10 @@ func NewRootCommand(deps Deps, version string, out, errOut io.Writer) *cobra.Com
 	root.AddCommand(
 		newInitCmd(deps),
 		newAddCmd(deps),
+		newSyncCmd(deps),
 		newLsCmd(deps),
 		newStatusCmd(deps),
+		newDocsCmd(deps),
 		newQueryCmd(deps),
 		newAskCmd(deps),
 		newRmCmd(deps),
@@ -107,13 +110,27 @@ func viewCollection(c *domain.Collection) collectionView {
 
 type hitView struct {
 	ChunkID string  `json:"chunk_id"`
+	Source  string  `json:"source"`
+	Seq     int     `json:"seq"`
 	Score   float64 `json:"score"`
 	Text    string  `json:"text"`
 }
 
+type citationView struct {
+	ChunkID string `json:"chunk_id"`
+	Source  string `json:"source"`
+	Seq     int    `json:"seq"`
+}
+
 type answerView struct {
-	Text      string   `json:"text"`
-	Citations []string `json:"citations"`
+	Text      string         `json:"text"`
+	Citations []citationView `json:"citations"`
+}
+
+type docView struct {
+	Source     string `json:"source"`
+	Hash       string `json:"hash"`
+	IngestedAt string `json:"ingested_at"`
 }
 
 type rmView struct {

@@ -114,6 +114,16 @@ func TestEndToEnd(t *testing.T) {
 	if out := mustSucceed(t, "--json", "status", "docs"); !strings.Contains(out, "stub-embed") {
 		t.Fatalf("status missing pinned model: %s", out)
 	}
+	// docs lists every ingested source (persisted via sqlite ListDocuments).
+	if out := mustSucceed(t, "--json", "docs", "docs"); !strings.Contains(out, "alpha.txt") ||
+		!strings.Contains(out, "report.docx") || !strings.Contains(out, "paper.pdf") || !strings.Contains(out, "sheet.xlsx") {
+		t.Fatalf("docs did not list all ingested sources: %s", out)
+	}
+	// sync with no path replays the source roots remembered (in sqlite) by add,
+	// across processes; everything is unchanged so nothing is re-added.
+	if out := mustSucceed(t, "--json", "sync", "docs"); !strings.Contains(out, `"added": 0`) {
+		t.Fatalf("sync should replay remembered sources and re-add nothing: %s", out)
+	}
 	// All three formats flowed through the router into the store.
 	out := mustSucceed(t, "--json", "query", "docs", "alpha")
 	for _, want := range []string{"alpha beta gamma", "docxsentinel", "pdfsentinel", "xlsxsentinel"} {

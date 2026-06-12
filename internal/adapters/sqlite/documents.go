@@ -22,11 +22,11 @@ var _ app.DocumentRepository = (*DocumentRepository)(nil)
 func (r *DocumentRepository) Upsert(ctx context.Context, doc *domain.Document, chunks []domain.Chunk) error {
 	return r.tx(ctx, func(tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO documents(id, collection, source_uri, hash, ingested_at) VALUES(?,?,?,?,?)
+			`INSERT INTO documents(id, collection, source_uri, hash, ingested_at, fingerprint) VALUES(?,?,?,?,?,?)
 			 ON CONFLICT(id) DO UPDATE SET
 			   collection=excluded.collection, source_uri=excluded.source_uri,
-			   hash=excluded.hash, ingested_at=excluded.ingested_at`,
-			doc.ID, doc.Collection, doc.SourceURI, doc.Hash, doc.IngestedAt.UTC().Format(time.RFC3339Nano)); err != nil {
+			   hash=excluded.hash, ingested_at=excluded.ingested_at, fingerprint=excluded.fingerprint`,
+			doc.ID, doc.Collection, doc.SourceURI, doc.Hash, doc.IngestedAt.UTC().Format(time.RFC3339Nano), doc.Fingerprint); err != nil {
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM chunks WHERE document_id=?`, doc.ID); err != nil {
@@ -47,24 +47,15 @@ func (r *DocumentRepository) Upsert(ctx context.Context, doc *domain.Document, c
 func (r *DocumentRepository) GetBySource(ctx context.Context, collection, sourceURI string) (*domain.Document, error) {
 	id := domain.DeriveDocumentID(collection, sourceURI)
 	row := r.db.QueryRowContext(ctx,
-		`SELECT id, collection, source_uri, hash, ingested_at FROM documents WHERE id=? AND collection=?`, id, collection)
-
-	var (
-		d          domain.Document
-		ingestedAt string
-	)
-	switch err := row.Scan(&d.ID, &d.Collection, &d.SourceURI, &d.Hash, &ingestedAt); {
+		`SELECT `+docColumns+` FROM documents WHERE id=? AND collection=?`, id, collection)
+	d, err := scanDoc(row)
+	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return nil, fmt.Errorf("document %q in collection %q: %w", sourceURI, collection, app.ErrNotFound)
 	case err != nil:
 		return nil, fmt.Errorf("sqlite: get document: %w", err)
 	}
-	t, err := time.Parse(time.RFC3339Nano, ingestedAt)
-	if err != nil {
-		return nil, fmt.Errorf("sqlite: parse ingested_at: %w", err)
-	}
-	d.IngestedAt = t
-	return &d, nil
+	return d, nil
 }
 
 // GetChunks hydrates chunks by ID, preserving input order and skipping IDs with
@@ -103,6 +94,87 @@ func (r *DocumentRepository) GetChunks(ctx context.Context, ids []domain.ChunkID
 		}
 	}
 	return out, nil
+}
+
+// GetDocuments hydrates documents by ID, preserving input order and skipping IDs
+// with no stored document.
+func (r *DocumentRepository) GetDocuments(ctx context.Context, ids []domain.DocumentID) ([]*domain.Document, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		args[i] = id
+	}
+	query := `SELECT ` + docColumns + ` FROM documents WHERE id IN (?` + strings.Repeat(",?", len(ids)-1) + `)`
+	rows, err := r.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: get documents: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	byID := make(map[domain.DocumentID]*domain.Document, len(ids))
+	for rows.Next() {
+		d, err := scanDoc(rows)
+		if err != nil {
+			return nil, fmt.Errorf("sqlite: scan document: %w", err)
+		}
+		byID[d.ID] = d
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	out := make([]*domain.Document, 0, len(ids))
+	for _, id := range ids {
+		if d, ok := byID[id]; ok {
+			out = append(out, d)
+		}
+	}
+	return out, nil
+}
+
+// ListDocuments returns every document in the collection, ordered by source URI.
+// An unknown or empty collection yields no documents and no error.
+func (r *DocumentRepository) ListDocuments(ctx context.Context, collection string) ([]*domain.Document, error) {
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT `+docColumns+` FROM documents WHERE collection=? ORDER BY source_uri`, collection)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: list documents: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []*domain.Document
+	for rows.Next() {
+		d, err := scanDoc(rows)
+		if err != nil {
+			return nil, fmt.Errorf("sqlite: scan document: %w", err)
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+// docColumns is the document column list, in the order scanDoc expects.
+const docColumns = "id, collection, source_uri, hash, ingested_at, fingerprint"
+
+// scanDoc reads one document row (docColumns order), parsing the stored
+// RFC3339Nano timestamp. It returns the raw Scan error (e.g. sql.ErrNoRows)
+// unwrapped so callers can match it.
+func scanDoc(s interface{ Scan(...any) error }) (*domain.Document, error) {
+	var (
+		d          domain.Document
+		ingestedAt string
+	)
+	if err := s.Scan(&d.ID, &d.Collection, &d.SourceURI, &d.Hash, &ingestedAt, &d.Fingerprint); err != nil {
+		return nil, err
+	}
+	t, err := time.Parse(time.RFC3339Nano, ingestedAt)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: parse ingested_at: %w", err)
+	}
+	d.IngestedAt = t
+	return &d, nil
 }
 
 // Delete removes the document and its chunks, returning the removed chunk IDs,

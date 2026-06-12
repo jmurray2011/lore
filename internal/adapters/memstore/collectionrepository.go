@@ -33,7 +33,7 @@ func (r *CollectionRepository) Create(_ context.Context, c *domain.Collection) e
 	if _, ok := r.collections[c.Name]; ok {
 		return fmt.Errorf("collection %q: %w", c.Name, app.ErrAlreadyExists)
 	}
-	r.collections[c.Name] = *c
+	r.collections[c.Name] = clone(*c)
 	return nil
 }
 
@@ -46,7 +46,8 @@ func (r *CollectionRepository) Get(_ context.Context, name string) (*domain.Coll
 	if !ok {
 		return nil, fmt.Errorf("collection %q: %w", name, app.ErrNotFound)
 	}
-	return &c, nil
+	cp := clone(c)
+	return &cp, nil
 }
 
 // List returns copies of every collection, in unspecified order.
@@ -56,10 +57,37 @@ func (r *CollectionRepository) List(_ context.Context) ([]*domain.Collection, er
 
 	out := make([]*domain.Collection, 0, len(r.collections))
 	for _, c := range r.collections {
-		cp := c
+		cp := clone(c)
 		out = append(out, &cp)
 	}
 	return out, nil
+}
+
+// RecordSource appends source to the collection's Sources, idempotently, or
+// fails with ErrNotFound.
+func (r *CollectionRepository) RecordSource(_ context.Context, name, source string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	c, ok := r.collections[name]
+	if !ok {
+		return fmt.Errorf("collection %q: %w", name, app.ErrNotFound)
+	}
+	for _, s := range c.Sources {
+		if s == source {
+			return nil
+		}
+	}
+	c.Sources = append(append([]string(nil), c.Sources...), source)
+	r.collections[name] = c
+	return nil
+}
+
+// clone returns a deep copy of c so the store never aliases a caller's Sources
+// slice (and vice versa).
+func clone(c domain.Collection) domain.Collection {
+	c.Sources = append([]string(nil), c.Sources...)
+	return c
 }
 
 // Delete removes the named collection, or fails with ErrNotFound. The

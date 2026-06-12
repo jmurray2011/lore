@@ -118,6 +118,11 @@ func (i *Ingestor) Ingest(ctx context.Context, collection, root string) (IngestS
 		return IngestSummary{}, fmt.Errorf("walk %q: %w", root, walkErr)
 	}
 
+	// Remember the root so `lore sync` can replay it without a path argument.
+	if err := i.collections.RecordSource(ctx, collection, root); err != nil {
+		return IngestSummary{}, fmt.Errorf("record source %q: %w", root, err)
+	}
+
 	return IngestSummary{
 		Added:   int(added.Load()),
 		Skipped: int(skipped.Load()),
@@ -130,7 +135,7 @@ type ingestOutcome struct {
 	skipped bool
 }
 
-// ingestItem processes a single source item: extract, idempotency check, chunk,
+// ingestItem processes a single source item: idempotency check, extract, chunk,
 // embed, then store. Vectors are upserted before the document record so the
 // stored document acts as the commit marker — a failure before it leaves the
 // document absent (a re-run reprocesses), and any vectors written without a
@@ -140,41 +145,63 @@ func (i *Ingestor) ingestItem(ctx context.Context, coll *domain.Collection, item
 	if !i.extractor.Supports(item.ContentType) {
 		return ingestOutcome{skipped: true}, nil
 	}
-	text, err := i.extractor.Extract(item.ContentType, item.Content)
-	if err != nil {
-		return ingestOutcome{}, fmt.Errorf("extract %q: %w", item.URI, err)
-	}
-	hash := domain.HashContent([]byte(text))
 
-	var prior *domain.Document
-	switch existing, err := i.docs.GetBySource(ctx, coll.Name, item.URI); {
+	var existing *domain.Document
+	switch d, err := i.docs.GetBySource(ctx, coll.Name, item.URI); {
 	case err == nil:
-		if existing.Unchanged(hash) {
+		existing = d
+		// Fast path: a matching fingerprint means the source is unchanged, so we
+		// skip without reading, extracting, or embedding.
+		if item.Fingerprint != "" && existing.Fingerprint == item.Fingerprint {
 			return ingestOutcome{skipped: true}, nil
 		}
-		prior = existing // changed: its old chunks/vectors are replaced below
 	case errors.Is(err, ErrNotFound):
 		// new document
 	default:
 		return ingestOutcome{}, fmt.Errorf("lookup %q: %w", item.URI, err)
 	}
 
+	raw, err := item.Open()
+	if err != nil {
+		return ingestOutcome{}, fmt.Errorf("read %q: %w", item.URI, err)
+	}
+	text, err := i.extractor.Extract(item.ContentType, raw)
+	if err != nil {
+		return ingestOutcome{}, fmt.Errorf("extract %q: %w", item.URI, err)
+	}
+	hash := domain.HashContent([]byte(text))
 	texts := i.chunker.Split(text)
+
+	if existing != nil && existing.Unchanged(hash) {
+		// Content is unchanged but the fingerprint drifted (or was never recorded,
+		// e.g. a document ingested before fingerprints). Refresh it so the next
+		// sync fast-skips. The deterministic chunker yields the same chunks, so
+		// re-storing leaves the vectors valid and avoids re-embedding.
+		if item.Fingerprint != "" && existing.Fingerprint != item.Fingerprint && len(texts) > 0 {
+			if err := i.refreshFingerprint(ctx, coll, existing, item.Fingerprint, texts); err != nil {
+				return ingestOutcome{}, err
+			}
+		}
+		return ingestOutcome{skipped: true}, nil
+	}
+
 	if len(texts) == 0 {
 		return ingestOutcome{skipped: true}, nil
+	}
+
+	var prior *domain.Document
+	if existing != nil {
+		prior = existing // changed: its old chunks/vectors are replaced below
 	}
 
 	doc, err := domain.NewDocument(coll.Name, item.URI, hash, i.now())
 	if err != nil {
 		return ingestOutcome{}, fmt.Errorf("document %q: %w", item.URI, err)
 	}
-	chunks := make([]domain.Chunk, len(texts))
-	for seq, t := range texts {
-		ch, err := domain.NewChunk(doc.ID, seq, t)
-		if err != nil {
-			return ingestOutcome{}, fmt.Errorf("chunk %d of %q: %w", seq, item.URI, err)
-		}
-		chunks[seq] = ch
+	doc.Fingerprint = item.Fingerprint
+	chunks, err := chunksFor(doc.ID, texts, item.URI)
+	if err != nil {
+		return ingestOutcome{}, err
 	}
 
 	vectors, err := i.embedder.Embed(ctx, texts)
@@ -212,4 +239,37 @@ func (i *Ingestor) ingestItem(ctx context.Context, coll *domain.Collection, item
 	}
 
 	return ingestOutcome{chunks: len(chunks)}, nil
+}
+
+// refreshFingerprint re-stores an unchanged document with a new fingerprint,
+// preserving its hash, ingestion time, and (deterministically re-derived)
+// chunks, so the next sync can fast-skip it. Vectors are untouched: identical
+// text yields identical chunk IDs.
+func (i *Ingestor) refreshFingerprint(ctx context.Context, coll *domain.Collection, existing *domain.Document, fingerprint string, texts []string) error {
+	doc, err := domain.NewDocument(coll.Name, existing.SourceURI, existing.Hash, existing.IngestedAt)
+	if err != nil {
+		return fmt.Errorf("refresh %q: %w", existing.SourceURI, err)
+	}
+	doc.Fingerprint = fingerprint
+	chunks, err := chunksFor(doc.ID, texts, existing.SourceURI)
+	if err != nil {
+		return err
+	}
+	if err := i.docs.Upsert(ctx, doc, chunks); err != nil {
+		return fmt.Errorf("refresh %q: %w", existing.SourceURI, err)
+	}
+	return nil
+}
+
+// chunksFor builds the domain Chunks for a document's chunk texts.
+func chunksFor(docID domain.DocumentID, texts []string, uri string) ([]domain.Chunk, error) {
+	chunks := make([]domain.Chunk, len(texts))
+	for seq, t := range texts {
+		ch, err := domain.NewChunk(docID, seq, t)
+		if err != nil {
+			return nil, fmt.Errorf("chunk %d of %q: %w", seq, uri, err)
+		}
+		chunks[seq] = ch
+	}
+	return chunks, nil
 }

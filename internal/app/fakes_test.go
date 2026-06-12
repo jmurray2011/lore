@@ -68,6 +68,20 @@ func (f *fakeCollections) Delete(_ context.Context, name string) error {
 	return nil
 }
 
+func (f *fakeCollections) RecordSource(_ context.Context, name, source string) error {
+	c, ok := f.byName[name]
+	if !ok {
+		return app.ErrNotFound
+	}
+	for _, s := range c.Sources {
+		if s == source {
+			return nil
+		}
+	}
+	c.Sources = append(c.Sources, source)
+	return nil
+}
+
 type fakeEmbedder struct {
 	space      domain.EmbeddingSpace
 	byText     map[string][]float32
@@ -210,6 +224,32 @@ func (f *fakeDocs) GetChunks(_ context.Context, ids []domain.ChunkID) ([]domain.
 	for _, id := range ids {
 		if c, ok := f.chunks[id]; ok {
 			out = append(out, c)
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeDocs) GetDocuments(_ context.Context, ids []domain.DocumentID) ([]*domain.Document, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]*domain.Document, 0, len(ids))
+	for _, id := range ids {
+		if d, ok := f.docs[id]; ok {
+			doc := d
+			out = append(out, &doc)
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeDocs) ListDocuments(_ context.Context, collection string) ([]*domain.Document, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []*domain.Document
+	for _, d := range f.docs {
+		if d.Collection == collection {
+			doc := d
+			out = append(out, &doc)
 		}
 	}
 	return out, nil
