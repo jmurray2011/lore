@@ -98,6 +98,34 @@ func TestIngestor(t *testing.T) {
 		}
 	})
 
+	t.Run("re-ingesting a shrunk document removes its stale tail vectors", func(t *testing.T) {
+		coll := mustCollection(t, "docs", space)
+		src := &fakeSource{items: []app.SourceItem{textItem("file:///a.txt", words(10))}} // several chunks
+		idx := &fakeIndex{}
+		ing := newIngestor(coll, src, &fakeExtractor{}, &fakeEmbedder{space: space}, &fakeDocs{}, idx)
+
+		first, err := ing.Ingest(ctx, "docs", "/root")
+		if err != nil {
+			t.Fatalf("first Ingest: %v", err)
+		}
+		if first.Chunks < 2 || idx.count("docs") != first.Chunks {
+			t.Fatalf("setup: want several vectors == %d chunks, got %d", first.Chunks, idx.count("docs"))
+		}
+
+		// Shrink the document to a single chunk and re-ingest.
+		src.items[0] = textItem("file:///a.txt", "single chunk x")
+		second, err := ing.Ingest(ctx, "docs", "/root")
+		if err != nil {
+			t.Fatalf("second Ingest: %v", err)
+		}
+		if second.Added != 1 {
+			t.Errorf("changed doc should be re-added: %+v", second)
+		}
+		if got := idx.count("docs"); got != second.Chunks {
+			t.Errorf("stale tail vectors remain: index has %d, doc now has %d chunks", got, second.Chunks)
+		}
+	})
+
 	t.Run("re-ingests changed content", func(t *testing.T) {
 		coll := mustCollection(t, "docs", space)
 		src := &fakeSource{items: []app.SourceItem{textItem("file:///a.txt", words(10))}}

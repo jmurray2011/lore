@@ -146,11 +146,13 @@ func (i *Ingestor) ingestItem(ctx context.Context, coll *domain.Collection, item
 	}
 	hash := domain.HashContent([]byte(text))
 
+	var prior *domain.Document
 	switch existing, err := i.docs.GetBySource(ctx, coll.Name, item.URI); {
 	case err == nil:
 		if existing.Unchanged(hash) {
 			return ingestOutcome{skipped: true}, nil
 		}
+		prior = existing // changed: its old chunks/vectors are replaced below
 	case errors.Is(err, ErrNotFound):
 		// new document
 	default:
@@ -185,6 +187,21 @@ func (i *Ingestor) ingestItem(ctx context.Context, coll *domain.Collection, item
 	entries := make([]VectorEntry, len(chunks))
 	for j, ch := range chunks {
 		entries[j] = VectorEntry{ChunkID: ch.ID, Vector: vectors[j]}
+	}
+
+	// For a changed document, drop the prior version's chunks and vectors before
+	// writing the new ones — otherwise a shrunk document leaves orphaned tail
+	// vectors in the index (invariant 3). Embedding happened first, so a failure
+	// there leaves the prior version intact; deleting here means a failure before
+	// the document is re-stored just reprocesses on the next run.
+	if prior != nil {
+		stale, err := i.docs.Delete(ctx, coll.Name, prior.ID)
+		if err != nil {
+			return ingestOutcome{}, fmt.Errorf("replace %q: %w", item.URI, err)
+		}
+		if err := i.index.Delete(ctx, coll.Name, stale); err != nil {
+			return ingestOutcome{}, fmt.Errorf("replace %q: %w", item.URI, err)
+		}
 	}
 
 	if err := i.index.Upsert(ctx, coll.Name, entries); err != nil {
