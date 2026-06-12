@@ -87,6 +87,20 @@ format = "json"
 	}
 }
 
+func TestLoadStructuredOutputCapability(t *testing.T) {
+	if config.Defaults().Provider.StructuredOutput {
+		t.Error("structured output must default to off (works against any OpenAI-compatible endpoint)")
+	}
+
+	cfg, err := config.Load("", env(map[string]string{"LORE_STRUCTURED_OUTPUT": "true"}))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.Provider.StructuredOutput {
+		t.Error("LORE_STRUCTURED_OUTPUT=true did not enable the capability")
+	}
+}
+
 func TestLoadStorageDefaults(t *testing.T) {
 	cfg, err := config.Load("", env(nil))
 	if err != nil {

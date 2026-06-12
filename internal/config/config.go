@@ -41,6 +41,11 @@ type Provider struct {
 	EmbedModel string
 	Dimensions int
 	ChatModel  string
+	// StructuredOutput declares that the provider supports JSON-schema
+	// (response_format) output. Off by default so lore works against any
+	// OpenAI-compatible endpoint; enable it for providers that support it
+	// (decision 19).
+	StructuredOutput bool
 }
 
 // Log configures the slog logger.
@@ -96,11 +101,12 @@ func Load(path string, getenv func(string) string) (Config, error) {
 
 type fileConfig struct {
 	Provider struct {
-		BaseURL    string `toml:"base_url"`
-		APIKey     string `toml:"api_key"`
-		EmbedModel string `toml:"embed_model"`
-		Dimensions int    `toml:"dimensions"`
-		ChatModel  string `toml:"chat_model"`
+		BaseURL          string `toml:"base_url"`
+		APIKey           string `toml:"api_key"`
+		EmbedModel       string `toml:"embed_model"`
+		Dimensions       int    `toml:"dimensions"`
+		ChatModel        string `toml:"chat_model"`
+		StructuredOutput bool   `toml:"structured_output"`
 	} `toml:"provider"`
 	Storage struct {
 		Backend string `toml:"backend"`
@@ -122,6 +128,9 @@ func applyFile(cfg *Config, fc fileConfig) error {
 	setString(&cfg.Log.Format, fc.Log.Format)
 	if fc.Provider.Dimensions != 0 {
 		cfg.Provider.Dimensions = fc.Provider.Dimensions
+	}
+	if fc.Provider.StructuredOutput {
+		cfg.Provider.StructuredOutput = true
 	}
 	if fc.Log.Level != "" {
 		lvl, err := parseLevel(fc.Log.Level)
@@ -148,6 +157,13 @@ func applyEnv(cfg *Config, getenv func(string) string) error {
 			return fmt.Errorf("config: %w: LORE_DIMENSIONS %q is not an integer", domain.ErrInvalidArgument, v)
 		}
 		cfg.Provider.Dimensions = d
+	}
+	if v := getenv("LORE_STRUCTURED_OUTPUT"); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return fmt.Errorf("config: %w: LORE_STRUCTURED_OUTPUT %q is not a boolean", domain.ErrInvalidArgument, v)
+		}
+		cfg.Provider.StructuredOutput = b
 	}
 	if v := getenv("LORE_LOG_LEVEL"); v != "" {
 		lvl, err := parseLevel(v)

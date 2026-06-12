@@ -25,8 +25,9 @@ func TestGeneratorSynthesize(t *testing.T) {
 	t.Run("builds a grounded request and returns an answer with citations", func(t *testing.T) {
 		var gotPath string
 		var gotReq struct {
-			Model    string
-			Messages []struct{ Role, Content string }
+			Model          string
+			Messages       []struct{ Role, Content string }
+			ResponseFormat *json.RawMessage `json:"response_format"`
 		}
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			gotPath = r.URL.Path
@@ -35,7 +36,7 @@ func TestGeneratorSynthesize(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		g, err := openai.NewGenerator(srv.URL, "k", "gpt-test", srv.Client())
+		g, err := openai.NewGenerator(srv.URL, "k", "gpt-test", false, srv.Client())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -67,6 +68,62 @@ func TestGeneratorSynthesize(t *testing.T) {
 		if !strings.Contains(user, string(chunk.ID)) {
 			t.Errorf("user prompt missing citation id %s: %q", chunk.ID, user)
 		}
+		if gotReq.ResponseFormat != nil {
+			t.Errorf("plain-text mode must not send response_format, got %s", *gotReq.ResponseFormat)
+		}
+	})
+
+	t.Run("structured mode requests json_schema and returns validated citations", func(t *testing.T) {
+		var gotReq struct {
+			ResponseFormat *struct {
+				Type       string `json:"type"`
+				JSONSchema *struct {
+					Name   string         `json:"name"`
+					Strict bool           `json:"strict"`
+					Schema map[string]any `json:"schema"`
+				} `json:"json_schema"`
+			} `json:"response_format"`
+		}
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_ = json.NewDecoder(r.Body).Decode(&gotReq)
+			// The model returns one valid chunk ID and one bogus one.
+			inner, _ := json.Marshal(map[string]any{
+				"answer":    "Blue.",
+				"citations": []string{string(chunk.ID), "no-such-chunk"},
+			})
+			resp, _ := json.Marshal(map[string]any{
+				"choices": []map[string]any{{"message": map[string]any{"role": "assistant", "content": string(inner)}}},
+			})
+			_, _ = w.Write(resp)
+		}))
+		defer srv.Close()
+
+		g, err := openai.NewGenerator(srv.URL, "k", "gpt-test", true, srv.Client())
+		if err != nil {
+			t.Fatal(err)
+		}
+		ans, err := g.Synthesize(ctx, "what color is the sky?", hits)
+		if err != nil {
+			t.Fatalf("Synthesize: %v", err)
+		}
+
+		if gotReq.ResponseFormat == nil || gotReq.ResponseFormat.Type != "json_schema" {
+			t.Fatalf("want response_format type json_schema, got %+v", gotReq.ResponseFormat)
+		}
+		js := gotReq.ResponseFormat.JSONSchema
+		if js == nil || !js.Strict || js.Name == "" {
+			t.Fatalf("want a named strict json_schema, got %+v", js)
+		}
+		if _, ok := js.Schema["properties"]; !ok {
+			t.Errorf("schema missing properties: %+v", js.Schema)
+		}
+		if ans.Text != "Blue." {
+			t.Errorf("answer text = %q", ans.Text)
+		}
+		// Bogus citation filtered out; only the real chunk ID survives.
+		if len(ans.Citations) != 1 || ans.Citations[0] != chunk.ID {
+			t.Errorf("citations = %v, want [%s]", ans.Citations, chunk.ID)
+		}
 	})
 
 	t.Run("no choices is an error", func(t *testing.T) {
@@ -74,7 +131,7 @@ func TestGeneratorSynthesize(t *testing.T) {
 			_, _ = io.WriteString(w, `{"choices":[]}`)
 		}))
 		defer srv.Close()
-		g, _ := openai.NewGenerator(srv.URL, "", "m", srv.Client())
+		g, _ := openai.NewGenerator(srv.URL, "", "m", false, srv.Client())
 
 		if _, err := g.Synthesize(ctx, "q", hits); err == nil {
 			t.Error("want error when the API returns no choices")
@@ -86,7 +143,7 @@ func TestGeneratorSynthesize(t *testing.T) {
 			w.WriteHeader(http.StatusBadGateway)
 		}))
 		defer srv.Close()
-		g, _ := openai.NewGenerator(srv.URL, "", "m", srv.Client())
+		g, _ := openai.NewGenerator(srv.URL, "", "m", false, srv.Client())
 
 		if _, err := g.Synthesize(ctx, "q", hits); err == nil {
 			t.Error("want error on HTTP 502")
@@ -95,10 +152,10 @@ func TestGeneratorSynthesize(t *testing.T) {
 }
 
 func TestNewGeneratorValidation(t *testing.T) {
-	if _, err := openai.NewGenerator("", "k", "m", nil); !errors.Is(err, domain.ErrInvalidArgument) {
+	if _, err := openai.NewGenerator("", "k", "m", false, nil); !errors.Is(err, domain.ErrInvalidArgument) {
 		t.Errorf("empty base url: want ErrInvalidArgument, got %v", err)
 	}
-	if _, err := openai.NewGenerator("http://x", "k", "", nil); !errors.Is(err, domain.ErrInvalidArgument) {
+	if _, err := openai.NewGenerator("http://x", "k", "", false, nil); !errors.Is(err, domain.ErrInvalidArgument) {
 		t.Errorf("empty model: want ErrInvalidArgument, got %v", err)
 	}
 }
