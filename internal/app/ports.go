@@ -107,11 +107,15 @@ type Generator interface {
 	Synthesize(ctx context.Context, question string, hits []domain.ChunkHit, attachments []domain.Attachment) (Answer, error)
 }
 
-// SourceItem is one raw document yielded by a Source.
+// SourceItem is one raw document yielded by a Source. Content is read lazily via
+// Open so a consumer can decide — from the cheap Fingerprint — not to read at
+// all. Fingerprint is a source-side signature (size + sampled-content hash) that
+// changes when the file changes; an empty Fingerprint disables fast-skip.
 type SourceItem struct {
 	URI         string
 	ContentType string
-	Content     []byte
+	Fingerprint string
+	Open        func() ([]byte, error)
 }
 
 // Source yields raw documents from somewhere (filesystem walk, stdin, URL).

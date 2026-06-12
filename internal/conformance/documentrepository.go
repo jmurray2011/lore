@@ -60,6 +60,21 @@ func RunDocumentRepositorySuite(t *testing.T, factory func(t *testing.T) app.Doc
 		}
 	})
 
+	t.Run("upsert preserves the document fingerprint", func(t *testing.T) {
+		repo := factory(t)
+		doc, chunks := newDoc(t, "docs", "file:///a.md", "alpha", 1)
+		doc.Fingerprint = "1234:deadbeef"
+		mustUpsert(t, repo, doc, chunks)
+
+		got, err := repo.GetBySource(ctx, "docs", "file:///a.md")
+		if err != nil {
+			t.Fatalf("GetBySource: %v", err)
+		}
+		if got.Fingerprint != "1234:deadbeef" {
+			t.Errorf("fingerprint not persisted: got %q, want %q", got.Fingerprint, "1234:deadbeef")
+		}
+	})
+
 	t.Run("get by source unknown returns ErrNotFound", func(t *testing.T) {
 		repo := factory(t)
 		if _, err := repo.GetBySource(ctx, "docs", "file:///missing.md"); !errors.Is(err, app.ErrNotFound) {
