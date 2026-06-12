@@ -7,11 +7,60 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 
 	"github.com/jmurray2011/lore/internal/adapters/openai"
 	"github.com/jmurray2011/lore/internal/domain"
 )
+
+func TestClientRetriesOnRateLimit(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("retries after 429 honoring Retry-After, then succeeds", func(t *testing.T) {
+		var calls int32
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			if atomic.AddInt32(&calls, 1) == 1 {
+				w.Header().Set("Retry-After", "0")
+				w.WriteHeader(http.StatusTooManyRequests)
+				_, _ = io.WriteString(w, `{"error":"rate limited"}`)
+				return
+			}
+			_, _ = io.WriteString(w, `{"data":[{"index":0,"embedding":[1,0]}]}`)
+		}))
+		defer srv.Close()
+
+		e, _ := openai.NewEmbedder(srv.URL, "k", "m", 2, openai.AuthBearer, srv.Client())
+		got, err := e.Embed(ctx, []string{"a"})
+		if err != nil {
+			t.Fatalf("Embed should succeed after retry: %v", err)
+		}
+		if len(got) != 1 {
+			t.Fatalf("got %d vectors, want 1", len(got))
+		}
+		if n := atomic.LoadInt32(&calls); n != 2 {
+			t.Errorf("want 2 calls (429 then 200), got %d", n)
+		}
+	})
+
+	t.Run("gives up after persistent 429 and returns an error", func(t *testing.T) {
+		var calls int32
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			atomic.AddInt32(&calls, 1)
+			w.Header().Set("Retry-After", "0")
+			w.WriteHeader(http.StatusTooManyRequests)
+		}))
+		defer srv.Close()
+
+		e, _ := openai.NewEmbedder(srv.URL, "k", "m", 2, openai.AuthBearer, srv.Client())
+		if _, err := e.Embed(ctx, []string{"a"}); err == nil {
+			t.Error("want error after exhausting retries")
+		}
+		if n := atomic.LoadInt32(&calls); n < 2 {
+			t.Errorf("want multiple attempts, got %d", n)
+		}
+	})
+}
 
 func TestEmbedderSpace(t *testing.T) {
 	e, err := openai.NewEmbedder("http://x", "k", "text-embedding-3-small", 1536, openai.AuthBearer, nil)
