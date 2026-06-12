@@ -1,0 +1,221 @@
+package cli_test
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"io"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/jmurray2011/lore/internal/adapters/memstore"
+	"github.com/jmurray2011/lore/internal/app"
+	"github.com/jmurray2011/lore/internal/cli"
+	"github.com/jmurray2011/lore/internal/domain"
+)
+
+// The CLI is an integration boundary, so these tests drive it against the
+// real memstore reference adapters plus tiny stubs for the network ports.
+
+type stubEmbedder struct {
+	space domain.EmbeddingSpace
+	vec   []float32
+}
+
+func (s stubEmbedder) Space(context.Context) (domain.EmbeddingSpace, error) { return s.space, nil }
+
+func (s stubEmbedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
+	out := make([][]float32, len(texts))
+	for i := range texts {
+		out[i] = s.vec
+	}
+	return out, nil
+}
+
+type stubGenerator struct{ text string }
+
+func (s stubGenerator) Synthesize(_ context.Context, _ string, hits []domain.ChunkHit) (app.Answer, error) {
+	cites := make([]domain.ChunkID, len(hits))
+	for i, h := range hits {
+		cites[i] = h.Chunk.ID
+	}
+	return app.Answer{Text: s.text, Citations: cites}, nil
+}
+
+func newDeps(emb app.Embedder, gen app.Generator) (cli.Deps, *memstore.CollectionRepository, *memstore.DocumentRepository, *memstore.VectorIndex) {
+	colls := memstore.NewCollectionRepository()
+	docs := memstore.NewDocumentRepository()
+	index := memstore.NewVectorIndex()
+	q := app.NewQuerier(colls, index, docs, emb)
+	deps := cli.Deps{Catalog: app.NewCatalog(colls, emb), Query: q, Ask: app.NewAsker(q, gen)}
+	return deps, colls, docs, index
+}
+
+// exec runs one command with a fresh root (clean flag state) over shared deps.
+func exec(deps cli.Deps, args ...string) (string, int) {
+	var out bytes.Buffer
+	root := cli.NewRootCommand(deps, "test", &out, io.Discard)
+	root.SetArgs(args)
+	code := cli.ExitCode(root.Execute())
+	return out.String(), code
+}
+
+func testSpace() domain.EmbeddingSpace {
+	return domain.EmbeddingSpace{Model: "test-embed", Dimensions: 3}
+}
+
+func TestCLICollectionLifecycle(t *testing.T) {
+	deps, _, _, _ := newDeps(stubEmbedder{space: testSpace()}, stubGenerator{})
+
+	t.Run("init emits JSON", func(t *testing.T) {
+		out, code := exec(deps, "init", "docs", "--json")
+		if code != 0 {
+			t.Fatalf("exit %d, out %q", code, out)
+		}
+		var v collectionViewJSON
+		if err := json.Unmarshal([]byte(out), &v); err != nil {
+			t.Fatalf("bad JSON %q: %v", out, err)
+		}
+		if v.Name != "docs" || v.Model != "test-embed" || v.Dimensions != 3 {
+			t.Errorf("view = %+v", v)
+		}
+	})
+
+	t.Run("ls lists the created collection", func(t *testing.T) {
+		out, code := exec(deps, "ls")
+		if code != 0 || !strings.Contains(out, "docs") {
+			t.Errorf("ls: code %d, out %q", code, out)
+		}
+	})
+
+	t.Run("status of known collection", func(t *testing.T) {
+		out, code := exec(deps, "status", "docs")
+		if code != 0 || !strings.Contains(out, "test-embed") {
+			t.Errorf("status: code %d, out %q", code, out)
+		}
+	})
+
+	t.Run("status of unknown collection exits 3", func(t *testing.T) {
+		_, code := exec(deps, "status", "ghost")
+		if code != 3 {
+			t.Errorf("want exit 3, got %d", code)
+		}
+	})
+}
+
+func TestCLIUsageErrors(t *testing.T) {
+	deps, _, _, _ := newDeps(stubEmbedder{space: testSpace()}, stubGenerator{})
+	cases := [][]string{
+		{"init"},                 // missing name
+		{"query", "docs"},        // missing query string
+		{"ask", "docs"},          // missing question
+		{"query", "a", "b", "c"}, // too many args
+	}
+	for _, args := range cases {
+		if _, code := exec(deps, args...); code != 2 {
+			t.Errorf("%v: want exit 2 (usage), got %d", args, code)
+		}
+	}
+}
+
+func TestCLIQuery(t *testing.T) {
+	space := testSpace()
+	qvec := []float32{1, 0, 0}
+	deps, _, docs, index := newDeps(stubEmbedder{space: space, vec: qvec}, stubGenerator{})
+
+	if _, code := exec(deps, "init", "docs"); code != 0 {
+		t.Fatalf("init exit %d", code)
+	}
+
+	// Populate one chunk + its matching vector directly through the ports.
+	ctx := context.Background()
+	doc, err := domain.NewDocument("docs", "file:///a.md", domain.HashContent([]byte("x")), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	chunk, err := domain.NewChunk(doc.ID, 0, "the grounded answer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := docs.Upsert(ctx, doc, []domain.Chunk{chunk}); err != nil {
+		t.Fatal(err)
+	}
+	if err := index.Upsert(ctx, "docs", []app.VectorEntry{{ChunkID: chunk.ID, Vector: qvec}}); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("returns a hit as JSON", func(t *testing.T) {
+		out, code := exec(deps, "query", "docs", "anything", "--json")
+		if code != 0 {
+			t.Fatalf("exit %d, out %q", code, out)
+		}
+		var hits []hitViewJSON
+		if err := json.Unmarshal([]byte(out), &hits); err != nil {
+			t.Fatalf("bad JSON %q: %v", out, err)
+		}
+		if len(hits) != 1 || hits[0].ChunkID != string(chunk.ID) || hits[0].Score < 0.99 {
+			t.Errorf("hits = %+v", hits)
+		}
+	})
+
+	t.Run("unknown collection exits 3", func(t *testing.T) {
+		_, code := exec(deps, "query", "ghost", "anything")
+		if code != 3 {
+			t.Errorf("want exit 3, got %d", code)
+		}
+	})
+}
+
+func TestCLISpaceMismatchExits4(t *testing.T) {
+	// Collection pinned to one space; embedder reports a different one.
+	deps, colls, _, _ := newDeps(stubEmbedder{space: domain.EmbeddingSpace{Model: "other", Dimensions: 9}}, stubGenerator{})
+	coll, err := domain.NewCollection("docs", testSpace(), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := colls.Create(context.Background(), coll); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, code := exec(deps, "query", "docs", "anything"); code != 4 {
+		t.Errorf("want exit 4 (invariant), got %d", code)
+	}
+}
+
+func TestCLIAsk(t *testing.T) {
+	deps, _, _, _ := newDeps(stubEmbedder{space: testSpace(), vec: []float32{1, 0, 0}}, stubGenerator{text: "the answer"})
+	if _, code := exec(deps, "init", "docs"); code != 0 {
+		t.Fatal("init failed")
+	}
+	out, code := exec(deps, "ask", "docs", "why?", "--json")
+	if code != 0 {
+		t.Fatalf("exit %d, out %q", code, out)
+	}
+	var ans answerViewJSON
+	if err := json.Unmarshal([]byte(out), &ans); err != nil {
+		t.Fatalf("bad JSON %q: %v", out, err)
+	}
+	if ans.Text != "the answer" {
+		t.Errorf("answer = %+v", ans)
+	}
+}
+
+// Mirror of the CLI's JSON output shapes, for decoding in tests.
+type collectionViewJSON struct {
+	Name       string `json:"name"`
+	Model      string `json:"model"`
+	Dimensions int    `json:"dimensions"`
+	CreatedAt  string `json:"created_at"`
+}
+
+type hitViewJSON struct {
+	ChunkID string  `json:"chunk_id"`
+	Score   float64 `json:"score"`
+	Text    string  `json:"text"`
+}
+
+type answerViewJSON struct {
+	Text      string   `json:"text"`
+	Citations []string `json:"citations"`
+}
