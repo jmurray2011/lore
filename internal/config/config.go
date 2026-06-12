@@ -46,6 +46,11 @@ type Provider struct {
 	// OpenAI-compatible endpoint; enable it for providers that support it
 	// (decision 19).
 	StructuredOutput bool
+	// ImageInput / DocumentInput declare that the provider accepts image /
+	// document attachments (decision 20). Off by default; `ask --attach`
+	// errors for an attachment whose capability is off.
+	ImageInput    bool
+	DocumentInput bool
 }
 
 // Log configures the slog logger.
@@ -107,6 +112,8 @@ type fileConfig struct {
 		Dimensions       int    `toml:"dimensions"`
 		ChatModel        string `toml:"chat_model"`
 		StructuredOutput bool   `toml:"structured_output"`
+		ImageInput       bool   `toml:"image_input"`
+		DocumentInput    bool   `toml:"document_input"`
 	} `toml:"provider"`
 	Storage struct {
 		Backend string `toml:"backend"`
@@ -131,6 +138,12 @@ func applyFile(cfg *Config, fc fileConfig) error {
 	}
 	if fc.Provider.StructuredOutput {
 		cfg.Provider.StructuredOutput = true
+	}
+	if fc.Provider.ImageInput {
+		cfg.Provider.ImageInput = true
+	}
+	if fc.Provider.DocumentInput {
+		cfg.Provider.DocumentInput = true
 	}
 	if fc.Log.Level != "" {
 		lvl, err := parseLevel(fc.Log.Level)
@@ -158,12 +171,14 @@ func applyEnv(cfg *Config, getenv func(string) string) error {
 		}
 		cfg.Provider.Dimensions = d
 	}
-	if v := getenv("LORE_STRUCTURED_OUTPUT"); v != "" {
-		b, err := strconv.ParseBool(v)
-		if err != nil {
-			return fmt.Errorf("config: %w: LORE_STRUCTURED_OUTPUT %q is not a boolean", domain.ErrInvalidArgument, v)
-		}
-		cfg.Provider.StructuredOutput = b
+	if err := applyBoolEnv(&cfg.Provider.StructuredOutput, getenv, "LORE_STRUCTURED_OUTPUT"); err != nil {
+		return err
+	}
+	if err := applyBoolEnv(&cfg.Provider.ImageInput, getenv, "LORE_IMAGE_INPUT"); err != nil {
+		return err
+	}
+	if err := applyBoolEnv(&cfg.Provider.DocumentInput, getenv, "LORE_DOCUMENT_INPUT"); err != nil {
+		return err
 	}
 	if v := getenv("LORE_LOG_LEVEL"); v != "" {
 		lvl, err := parseLevel(v)
@@ -179,6 +194,20 @@ func setString(dst *string, v string) {
 	if v != "" {
 		*dst = v
 	}
+}
+
+// applyBoolEnv overlays a boolean environment variable onto dst when set.
+func applyBoolEnv(dst *bool, getenv func(string) string, key string) error {
+	v := getenv(key)
+	if v == "" {
+		return nil
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		return fmt.Errorf("config: %w: %s %q is not a boolean", domain.ErrInvalidArgument, key, v)
+	}
+	*dst = b
+	return nil
 }
 
 func parseLevel(s string) (slog.Level, error) {

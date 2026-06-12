@@ -37,9 +37,15 @@ func (s stubEmbedder) Embed(_ context.Context, texts []string) ([][]float32, err
 	return out, nil
 }
 
-type stubGenerator struct{ text string }
+type stubGenerator struct {
+	text string
+	rec  *[]domain.Attachment // when set, records the attachments it was given
+}
 
-func (s stubGenerator) Synthesize(_ context.Context, _ string, hits []domain.ChunkHit) (app.Answer, error) {
+func (s stubGenerator) Synthesize(_ context.Context, _ string, hits []domain.ChunkHit, attachments []domain.Attachment) (app.Answer, error) {
+	if s.rec != nil {
+		*s.rec = attachments
+	}
 	cites := make([]domain.ChunkID, len(hits))
 	for i, h := range hits {
 		cites[i] = h.Chunk.ID
@@ -210,6 +216,43 @@ func TestCLIAsk(t *testing.T) {
 	if ans.Text != "the answer" {
 		t.Errorf("answer = %+v", ans)
 	}
+}
+
+func TestCLIAskAttach(t *testing.T) {
+	t.Run("--attach reads a file into an Attachment passed to the generator", func(t *testing.T) {
+		var got []domain.Attachment
+		deps, _, _, _ := newDeps(
+			stubEmbedder{space: testSpace(), vec: []float32{1, 0, 0}},
+			stubGenerator{text: "answer", rec: &got},
+		)
+		if _, code := exec(deps, "init", "docs"); code != 0 {
+			t.Fatal("init failed")
+		}
+		img := filepath.Join(t.TempDir(), "c.png")
+		if err := os.WriteFile(img, []byte{0x89, 0x50, 0x4e, 0x47}, 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		_, code := exec(deps, "ask", "docs", "what is this?", "--attach", img)
+		if code != 0 {
+			t.Fatalf("ask --attach exit %d", code)
+		}
+		if len(got) != 1 || got[0].MediaType != "image/png" || got[0].Name != "c.png" || len(got[0].Data) == 0 {
+			t.Errorf("attachment = %+v", got)
+		}
+	})
+
+	t.Run("unknown file extension is a usage error (exit 2)", func(t *testing.T) {
+		deps, _, _, _ := newDeps(stubEmbedder{space: testSpace(), vec: []float32{1, 0, 0}}, stubGenerator{})
+		exec(deps, "init", "docs")
+		mystery := filepath.Join(t.TempDir(), "blob.unknownext")
+		if err := os.WriteFile(mystery, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, code := exec(deps, "ask", "docs", "q", "--attach", mystery); code != 2 {
+			t.Errorf("want exit 2 for undetectable media type, got %d", code)
+		}
+	})
 }
 
 func TestCLIAddThenQuery(t *testing.T) {

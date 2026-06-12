@@ -87,9 +87,11 @@ type Answer struct {
 	Citations []domain.ChunkID
 }
 
-// Generator synthesizes an answer grounded in retrieved chunks.
+// Generator synthesizes an answer grounded in retrieved chunks, optionally with
+// raw attachments (images/documents) the model reads directly. Attachments are
+// ephemeral context, not part of the collection.
 type Generator interface {
-	Synthesize(ctx context.Context, question string, hits []domain.ChunkHit) (Answer, error)
+	Synthesize(ctx context.Context, question string, hits []domain.ChunkHit, attachments []domain.Attachment) (Answer, error)
 }
 
 // SourceItem is one raw document yielded by a Source.

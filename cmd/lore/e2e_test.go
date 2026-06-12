@@ -15,6 +15,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -30,7 +31,7 @@ func TestEndToEnd(t *testing.T) {
 	}
 
 	const dims = 8
-	provider := stubProvider(t, dims)
+	provider, chat := stubProvider(t, dims)
 	defer provider.Close()
 
 	dir := t.TempDir()
@@ -53,6 +54,7 @@ func TestEndToEnd(t *testing.T) {
 		"LORE_DIMENSIONS="+strconv.Itoa(dims),
 		"LORE_STORAGE_BACKEND=sqlite",
 		"LORE_DB_PATH="+dbPath,
+		"LORE_IMAGE_INPUT=true",
 		"XDG_CONFIG_HOME="+filepath.Join(dir, "config"), // isolate from any real config.toml
 	)
 
@@ -119,18 +121,50 @@ func TestEndToEnd(t *testing.T) {
 		t.Fatalf("ask did not return the synthesized answer: %s", out)
 	}
 
+	// Attachment path: with image_input enabled, --attach reaches the provider
+	// as a multimodal image_url part (config flag → caps → generator → HTTP).
+	imgPath := filepath.Join(dir, "shot.png")
+	if err := os.WriteFile(imgPath, []byte{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mustSucceed(t, "ask", "docs", "describe the image", "--attach", imgPath)
+	if body := chat.last(); !strings.Contains(body, `"type":"image_url"`) || !strings.Contains(body, "data:image/png;base64,") {
+		t.Fatalf("attachment did not reach the provider as image_url: %s", body)
+	}
+
 	mustSucceed(t, "rm", "docs")
 	if out := mustSucceed(t, "--json", "ls"); strings.Contains(out, `"name": "docs"`) {
 		t.Fatalf("collection survived rm: %s", out)
 	}
 }
 
+// chatRecorder captures the most recent /v1/chat/completions request body so a
+// test can assert what the binary actually sent.
+type chatRecorder struct {
+	mu   sync.Mutex
+	body string
+}
+
+func (c *chatRecorder) record(b []byte) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.body = string(b)
+}
+
+func (c *chatRecorder) last() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.body
+}
+
 // stubProvider serves an OpenAI-compatible /v1/embeddings and
 // /v1/chat/completions. Every embedding is the same unit vector, which is all
-// retrieval needs to surface the ingested chunk.
-func stubProvider(t *testing.T, dims int) *httptest.Server {
+// retrieval needs to surface the ingested chunk. It returns a recorder for the
+// last chat request body.
+func stubProvider(t *testing.T, dims int) (*httptest.Server, *chatRecorder) {
 	t.Helper()
 	mux := http.NewServeMux()
+	chat := &chatRecorder{}
 
 	mux.HandleFunc("/v1/embeddings", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -158,12 +192,14 @@ func stubProvider(t *testing.T, dims int) *httptest.Server {
 		_ = json.NewEncoder(w).Encode(resp)
 	})
 
-	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		chat.record(b)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"stub answer grounded in context"}}]}`)
 	})
 
-	return httptest.NewServer(mux)
+	return httptest.NewServer(mux), chat
 }
 
 // docxBytes builds a minimal .docx (zip with word/document.xml) carrying text.
