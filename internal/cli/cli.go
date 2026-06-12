@@ -24,6 +24,7 @@ type Deps struct {
 	Ingest  *app.Ingestor
 	Query   *app.Querier
 	Ask     *app.Asker
+	Remove  *app.Remover
 }
 
 // NewRootCommand builds the lore command tree, writing data to out and errors to
@@ -49,6 +50,7 @@ func NewRootCommand(deps Deps, version string, out, errOut io.Writer) *cobra.Com
 		newStatusCmd(deps),
 		newQueryCmd(deps),
 		newAskCmd(deps),
+		newRmCmd(deps),
 	)
 	return root
 }
@@ -112,4 +114,10 @@ type hitView struct {
 type answerView struct {
 	Text      string   `json:"text"`
 	Citations []string `json:"citations"`
+}
+
+type rmView struct {
+	Removed    string `json:"removed"` // "collection" or "document"
+	Collection string `json:"collection"`
+	Document   string `json:"document,omitempty"`
 }

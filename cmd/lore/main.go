@@ -72,6 +72,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		Ingest:  app.NewIngestor(collections, docs, index, embedder, extract.New(), fs.NewSource(), chunker),
 		Query:   querier,
 		Ask:     app.NewAsker(querier, generator),
+		Remove:  app.NewRemover(collections, docs, index),
 	}
 
 	root := cli.NewRootCommand(deps, fmt.Sprintf("%s (commit %s, built %s)", version, commit, date), stdout, stderr)

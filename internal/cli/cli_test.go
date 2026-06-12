@@ -58,6 +58,7 @@ func newDeps(emb app.Embedder, gen app.Generator) (cli.Deps, *memstore.Collectio
 		Ingest:  app.NewIngestor(colls, docs, index, emb, extract.New(), fs.NewSource(), chunker),
 		Query:   q,
 		Ask:     app.NewAsker(q, gen),
+		Remove:  app.NewRemover(colls, docs, index),
 	}
 	return deps, colls, docs, index
 }
@@ -254,6 +255,60 @@ func TestCLIAddThenQuery(t *testing.T) {
 	if len(hits) < 1 || !strings.Contains(hits[0].Text, "hello grounded world") {
 		t.Errorf("hits = %+v", hits)
 	}
+}
+
+func TestCLIRemove(t *testing.T) {
+	t.Run("rm collection removes it", func(t *testing.T) {
+		deps, _, _, _ := newDeps(stubEmbedder{space: testSpace(), vec: []float32{1, 0, 0}}, stubGenerator{})
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "d.txt"), []byte("content here"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		exec(deps, "init", "docs")
+		exec(deps, "add", "docs", dir)
+
+		if _, code := exec(deps, "rm", "docs"); code != 0 {
+			t.Fatalf("rm exit %d", code)
+		}
+		if _, code := exec(deps, "status", "docs"); code != 3 {
+			t.Errorf("collection should be gone, status exit %d", code)
+		}
+	})
+
+	t.Run("rm --doc removes one document's content", func(t *testing.T) {
+		deps, _, _, _ := newDeps(stubEmbedder{space: testSpace(), vec: []float32{1, 0, 0}}, stubGenerator{})
+		dir := t.TempDir()
+		path := filepath.Join(dir, "d.txt")
+		if err := os.WriteFile(path, []byte("content here"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		exec(deps, "init", "docs")
+		exec(deps, "add", "docs", dir)
+
+		abs, _ := filepath.Abs(path)
+		uri := "file://" + filepath.ToSlash(abs)
+		if _, code := exec(deps, "rm", "docs", "--doc", uri); code != 0 {
+			t.Fatalf("rm --doc exit %d", code)
+		}
+		if _, code := exec(deps, "status", "docs"); code != 0 {
+			t.Errorf("collection should remain, status exit %d", code)
+		}
+		out, _ := exec(deps, "query", "docs", "anything", "--json")
+		var hits []hitViewJSON
+		if err := json.Unmarshal([]byte(out), &hits); err != nil {
+			t.Fatal(err)
+		}
+		if len(hits) != 0 {
+			t.Errorf("document removed, want no hits, got %+v", hits)
+		}
+	})
+
+	t.Run("rm unknown collection exits 3", func(t *testing.T) {
+		deps, _, _, _ := newDeps(stubEmbedder{space: testSpace()}, stubGenerator{})
+		if _, code := exec(deps, "rm", "ghost"); code != 3 {
+			t.Errorf("want exit 3, got %d", code)
+		}
+	})
 }
 
 // Mirror of the CLI's JSON output shapes, for decoding in tests.

@@ -47,6 +47,35 @@ func newLsCmd(deps Deps) *cobra.Command {
 	}
 }
 
+func newRmCmd(deps Deps) *cobra.Command {
+	var docURI string
+	cmd := &cobra.Command{
+		Use:   "rm <collection>",
+		Short: "Remove a collection, or a single document with --doc",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) != 1 {
+				return fmt.Errorf("%w: rm takes exactly one collection name", domain.ErrInvalidArgument)
+			}
+			collection := args[0]
+
+			if docURI != "" {
+				if err := deps.Remove.RemoveDocument(cmd.Context(), collection, docURI); err != nil {
+					return err
+				}
+				view := rmView{Removed: "document", Collection: collection, Document: docURI}
+				return render(cmd, view, fmt.Sprintf("removed document %q from %q", docURI, collection))
+			}
+
+			if err := deps.Remove.RemoveCollection(cmd.Context(), collection); err != nil {
+				return err
+			}
+			return render(cmd, rmView{Removed: "collection", Collection: collection}, fmt.Sprintf("removed collection %q", collection))
+		},
+	}
+	cmd.Flags().StringVar(&docURI, "doc", "", "remove only this document, by source URI")
+	return cmd
+}
+
 func newStatusCmd(deps Deps) *cobra.Command {
 	return &cobra.Command{
 		Use:   "status <collection>",
