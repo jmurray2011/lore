@@ -57,7 +57,12 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	}
 	defer func() { _ = store.close() }()
 
-	embedder, err := openai.NewEmbedder(cfg.Provider.BaseURL, cfg.Provider.APIKey, cfg.Provider.EmbedModel, cfg.Provider.Dimensions, nil)
+	auth := openai.AuthBearer
+	if cfg.Provider.Auth == "api-key" {
+		auth = openai.AuthAPIKey
+	}
+
+	embedder, err := openai.NewEmbedder(cfg.Provider.BaseURL, cfg.Provider.APIKey, cfg.Provider.EmbedModel, cfg.Provider.Dimensions, auth, nil)
 	if err != nil {
 		return fail(err)
 	}
@@ -66,7 +71,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		ImageInput:       cfg.Provider.ImageInput,
 		DocumentInput:    cfg.Provider.DocumentInput,
 	}
-	generator, err := openai.NewGenerator(cfg.Provider.BaseURL, cfg.Provider.APIKey, cfg.Provider.ChatModel, caps, nil)
+	generator, err := openai.NewGenerator(cfg.Provider.BaseURL, cfg.Provider.APIKey, cfg.Provider.ChatModel, caps, auth, nil)
 	if err != nil {
 		return fail(err)
 	}

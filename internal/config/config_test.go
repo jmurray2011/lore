@@ -101,6 +101,24 @@ func TestLoadStructuredOutputCapability(t *testing.T) {
 	}
 }
 
+func TestLoadAuth(t *testing.T) {
+	if got := config.Defaults().Provider.Auth; got != "bearer" {
+		t.Errorf("default auth = %q, want bearer", got)
+	}
+
+	cfg, err := config.Load("", env(map[string]string{"LORE_AUTH": "api-key"}))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Provider.Auth != "api-key" {
+		t.Errorf("LORE_AUTH not applied: %q", cfg.Provider.Auth)
+	}
+
+	if _, err := config.Load("", env(map[string]string{"LORE_AUTH": "oauth"})); !errors.Is(err, domain.ErrInvalidArgument) {
+		t.Errorf("invalid auth: want ErrInvalidArgument, got %v", err)
+	}
+}
+
 func TestLoadAttachmentCapabilities(t *testing.T) {
 	d := config.Defaults().Provider
 	if d.ImageInput || d.DocumentInput {
