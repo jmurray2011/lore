@@ -85,6 +85,29 @@ func RunDocumentRepositorySuite(t *testing.T, factory func(t *testing.T) app.Doc
 		}
 	})
 
+	t.Run("get documents by id preserves input order and skips missing IDs", func(t *testing.T) {
+		repo := factory(t)
+		docA, chunksA := newDoc(t, "docs", "file:///a.md", "alpha", 1)
+		docB, chunksB := newDoc(t, "docs", "file:///b.md", "beta", 1)
+		mustUpsert(t, repo, docA, chunksA)
+		mustUpsert(t, repo, docB, chunksB)
+
+		missing := domain.DeriveDocumentID("docs", "file:///gone.md")
+		got, err := repo.GetDocuments(ctx, []domain.DocumentID{docB.ID, missing, docA.ID})
+		if err != nil {
+			t.Fatalf("GetDocuments: %v", err)
+		}
+		if len(got) != 2 {
+			t.Fatalf("want 2 documents (missing skipped), got %d", len(got))
+		}
+		if got[0].ID != docB.ID || got[1].ID != docA.ID {
+			t.Errorf("input order not preserved: got [%s %s]", got[0].ID, got[1].ID)
+		}
+		if got[0].SourceURI != docB.SourceURI {
+			t.Errorf("document not hydrated: got SourceURI %q, want %q", got[0].SourceURI, docB.SourceURI)
+		}
+	})
+
 	t.Run("upsert replaces a document's chunks", func(t *testing.T) {
 		repo := factory(t)
 		doc, chunks := newDoc(t, "docs", "file:///a.md", "alpha", 3)

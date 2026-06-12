@@ -105,6 +105,52 @@ func (r *DocumentRepository) GetChunks(ctx context.Context, ids []domain.ChunkID
 	return out, nil
 }
 
+// GetDocuments hydrates documents by ID, preserving input order and skipping IDs
+// with no stored document.
+func (r *DocumentRepository) GetDocuments(ctx context.Context, ids []domain.DocumentID) ([]*domain.Document, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		args[i] = id
+	}
+	query := `SELECT id, collection, source_uri, hash, ingested_at FROM documents WHERE id IN (?` + strings.Repeat(",?", len(ids)-1) + `)`
+	rows, err := r.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: get documents: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	byID := make(map[domain.DocumentID]*domain.Document, len(ids))
+	for rows.Next() {
+		var (
+			d          domain.Document
+			ingestedAt string
+		)
+		if err := rows.Scan(&d.ID, &d.Collection, &d.SourceURI, &d.Hash, &ingestedAt); err != nil {
+			return nil, fmt.Errorf("sqlite: scan document: %w", err)
+		}
+		t, err := time.Parse(time.RFC3339Nano, ingestedAt)
+		if err != nil {
+			return nil, fmt.Errorf("sqlite: parse ingested_at: %w", err)
+		}
+		d.IngestedAt = t
+		byID[d.ID] = &d
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	out := make([]*domain.Document, 0, len(ids))
+	for _, id := range ids {
+		if d, ok := byID[id]; ok {
+			out = append(out, d)
+		}
+	}
+	return out, nil
+}
+
 // Delete removes the document and its chunks, returning the removed chunk IDs,
 // or fails with ErrNotFound.
 func (r *DocumentRepository) Delete(ctx context.Context, collection string, id domain.DocumentID) ([]domain.ChunkID, error) {

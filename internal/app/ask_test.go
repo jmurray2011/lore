@@ -25,7 +25,7 @@ func TestAsker(t *testing.T) {
 		idx := &fakeIndex{matches: map[string][]domain.VectorMatch{"docs": {{ChunkID: c0.ID, Score: 0.8}}}}
 		docs := &fakeDocs{chunks: map[domain.ChunkID]domain.Chunk{c0.ID: c0}}
 		emb := &fakeEmbedder{space: space, byText: map[string][]float32{"why": {1, 0, 0}}}
-		gen := &fakeGenerator{answer: app.Answer{Text: "because", Citations: []domain.ChunkID{c0.ID}}}
+		gen := &fakeGenerator{answer: app.Answer{Text: "because", Citations: []domain.Citation{{ChunkID: c0.ID, Source: "file:///a.md", Seq: 0}}}}
 		a := newAsker(gen, emb, idx, docs)
 
 		att, err := domain.NewAttachment("image/png", "c.png", []byte{1, 2, 3})

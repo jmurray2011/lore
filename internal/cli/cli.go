@@ -107,13 +107,21 @@ func viewCollection(c *domain.Collection) collectionView {
 
 type hitView struct {
 	ChunkID string  `json:"chunk_id"`
+	Source  string  `json:"source"`
+	Seq     int     `json:"seq"`
 	Score   float64 `json:"score"`
 	Text    string  `json:"text"`
 }
 
+type citationView struct {
+	ChunkID string `json:"chunk_id"`
+	Source  string `json:"source"`
+	Seq     int    `json:"seq"`
+}
+
 type answerView struct {
-	Text      string   `json:"text"`
-	Citations []string `json:"citations"`
+	Text      string         `json:"text"`
+	Citations []citationView `json:"citations"`
 }
 
 type rmView struct {

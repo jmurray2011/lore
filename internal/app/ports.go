@@ -40,6 +40,10 @@ type DocumentRepository interface {
 	// GetChunks hydrates chunks by ID, preserving input order. IDs with no
 	// stored chunk are skipped, so the result may be shorter than the input.
 	GetChunks(ctx context.Context, ids []domain.ChunkID) ([]domain.Chunk, error)
+	// GetDocuments hydrates documents by ID, preserving input order. IDs with no
+	// stored document are skipped, so the result may be shorter than the input.
+	// Used to attach source provenance to retrieval results.
+	GetDocuments(ctx context.Context, ids []domain.DocumentID) ([]*domain.Document, error)
 	// Delete removes the document and its chunks, returning the removed chunk
 	// IDs so the use case can delete their vectors via the VectorIndex
 	// (invariant 3 — this port cannot reach it). Fails with ErrNotFound if no
@@ -81,10 +85,11 @@ type Embedder interface {
 	Embed(ctx context.Context, texts []string) ([][]float32, error)
 }
 
-// Answer is a grounded synthesis result with citations back to chunks.
+// Answer is a grounded synthesis result with citations back to chunks, each
+// carrying the source provenance needed to display it.
 type Answer struct {
 	Text      string
-	Citations []domain.ChunkID
+	Citations []domain.Citation
 }
 
 // Generator synthesizes an answer grounded in retrieved chunks, optionally with

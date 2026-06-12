@@ -74,9 +74,38 @@ func (q *Querier) Query(ctx context.Context, collection, query string, k int) ([
 		return nil, fmt.Errorf("hydrate chunks: %w", err)
 	}
 
+	sourceByDoc, err := q.sources(ctx, chunks)
+	if err != nil {
+		return nil, err
+	}
+
 	hits := make([]domain.ChunkHit, 0, len(chunks))
 	for _, c := range chunks {
-		hits = append(hits, domain.ChunkHit{Chunk: c, Score: scoreByID[c.ID]})
+		hits = append(hits, domain.ChunkHit{Chunk: c, Score: scoreByID[c.ID], Source: sourceByDoc[c.DocumentID]})
 	}
 	return hits, nil
+}
+
+// sources hydrates the source URI of each chunk's document, returning a map from
+// document ID to source URI. Documents that can't be hydrated are simply absent,
+// leaving those hits with an empty Source rather than failing the whole query.
+func (q *Querier) sources(ctx context.Context, chunks []domain.Chunk) (map[domain.DocumentID]string, error) {
+	ids := make([]domain.DocumentID, 0, len(chunks))
+	seen := make(map[domain.DocumentID]bool, len(chunks))
+	for _, c := range chunks {
+		if !seen[c.DocumentID] {
+			seen[c.DocumentID] = true
+			ids = append(ids, c.DocumentID)
+		}
+	}
+
+	docs, err := q.docs.GetDocuments(ctx, ids)
+	if err != nil {
+		return nil, fmt.Errorf("hydrate sources: %w", err)
+	}
+	byDoc := make(map[domain.DocumentID]string, len(docs))
+	for _, d := range docs {
+		byDoc[d.ID] = d.SourceURI
+	}
+	return byDoc, nil
 }

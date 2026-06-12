@@ -46,9 +46,9 @@ func (s stubGenerator) Synthesize(_ context.Context, _ string, hits []domain.Chu
 	if s.rec != nil {
 		*s.rec = attachments
 	}
-	cites := make([]domain.ChunkID, len(hits))
+	cites := make([]domain.Citation, len(hits))
 	for i, h := range hits {
-		cites[i] = h.Chunk.ID
+		cites[i] = domain.Citation{ChunkID: h.Chunk.ID, Source: h.Source, Seq: h.Chunk.Seq}
 	}
 	return app.Answer{Text: s.text, Citations: cites}, nil
 }
@@ -174,6 +174,9 @@ func TestCLIQuery(t *testing.T) {
 		if len(hits) != 1 || hits[0].ChunkID != string(chunk.ID) || hits[0].Score < 0.99 {
 			t.Errorf("hits = %+v", hits)
 		}
+		if hits[0].Source != "file:///a.md" || hits[0].Seq != 0 {
+			t.Errorf("hit provenance = %q#%d, want file:///a.md#0", hits[0].Source, hits[0].Seq)
+		}
 	})
 
 	t.Run("unknown collection exits 3", func(t *testing.T) {
@@ -201,10 +204,29 @@ func TestCLISpaceMismatchExits4(t *testing.T) {
 }
 
 func TestCLIAsk(t *testing.T) {
-	deps, _, _, _ := newDeps(stubEmbedder{space: testSpace(), vec: []float32{1, 0, 0}}, stubGenerator{text: "the answer"})
+	qvec := []float32{1, 0, 0}
+	deps, _, docs, index := newDeps(stubEmbedder{space: testSpace(), vec: qvec}, stubGenerator{text: "the answer"})
 	if _, code := exec(deps, "init", "docs"); code != 0 {
 		t.Fatal("init failed")
 	}
+
+	// Seed one chunk + matching vector so the answer carries a citation.
+	ctx := context.Background()
+	doc, err := domain.NewDocument("docs", "file:///a.md", domain.HashContent([]byte("x")), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	chunk, err := domain.NewChunk(doc.ID, 0, "the grounded answer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := docs.Upsert(ctx, doc, []domain.Chunk{chunk}); err != nil {
+		t.Fatal(err)
+	}
+	if err := index.Upsert(ctx, "docs", []app.VectorEntry{{ChunkID: chunk.ID, Vector: qvec}}); err != nil {
+		t.Fatal(err)
+	}
+
 	out, code := exec(deps, "ask", "docs", "why?", "--json")
 	if code != 0 {
 		t.Fatalf("exit %d, out %q", code, out)
@@ -215,6 +237,9 @@ func TestCLIAsk(t *testing.T) {
 	}
 	if ans.Text != "the answer" {
 		t.Errorf("answer = %+v", ans)
+	}
+	if len(ans.Citations) != 1 || ans.Citations[0].Source != "file:///a.md" || ans.Citations[0].Seq != 0 {
+		t.Errorf("citation provenance = %+v, want one file:///a.md#0", ans.Citations)
 	}
 }
 
@@ -364,13 +389,19 @@ type collectionViewJSON struct {
 
 type hitViewJSON struct {
 	ChunkID string  `json:"chunk_id"`
+	Source  string  `json:"source"`
+	Seq     int     `json:"seq"`
 	Score   float64 `json:"score"`
 	Text    string  `json:"text"`
 }
 
 type answerViewJSON struct {
-	Text      string   `json:"text"`
-	Citations []string `json:"citations"`
+	Text      string `json:"text"`
+	Citations []struct {
+		ChunkID string `json:"chunk_id"`
+		Source  string `json:"source"`
+		Seq     int    `json:"seq"`
+	} `json:"citations"`
 }
 
 type ingestViewJSON struct {

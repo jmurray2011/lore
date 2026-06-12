@@ -21,7 +21,7 @@ func TestGeneratorSynthesize(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	hits := []domain.ChunkHit{{Chunk: chunk, Score: 0.9}}
+	hits := []domain.ChunkHit{{Chunk: chunk, Score: 0.9, Source: "file:///a.md"}}
 
 	t.Run("builds a grounded request and returns an answer with citations", func(t *testing.T) {
 		var gotPath string
@@ -48,8 +48,11 @@ func TestGeneratorSynthesize(t *testing.T) {
 		if ans.Text != "The sky is blue." {
 			t.Errorf("answer text = %q", ans.Text)
 		}
-		if len(ans.Citations) != 1 || ans.Citations[0] != chunk.ID {
+		if len(ans.Citations) != 1 || ans.Citations[0].ChunkID != chunk.ID {
 			t.Errorf("citations = %v, want [%s]", ans.Citations, chunk.ID)
+		}
+		if ans.Citations[0].Source != "file:///a.md" || ans.Citations[0].Seq != 0 {
+			t.Errorf("citation provenance = %q#%d, want file:///a.md#0", ans.Citations[0].Source, ans.Citations[0].Seq)
 		}
 		if gotPath != "/chat/completions" {
 			t.Errorf("path = %q", gotPath)
@@ -122,8 +125,11 @@ func TestGeneratorSynthesize(t *testing.T) {
 			t.Errorf("answer text = %q", ans.Text)
 		}
 		// Bogus citation filtered out; only the real chunk ID survives.
-		if len(ans.Citations) != 1 || ans.Citations[0] != chunk.ID {
+		if len(ans.Citations) != 1 || ans.Citations[0].ChunkID != chunk.ID {
 			t.Errorf("citations = %v, want [%s]", ans.Citations, chunk.ID)
+		}
+		if ans.Citations[0].Source != "file:///a.md" || ans.Citations[0].Seq != 0 {
+			t.Errorf("citation provenance = %q#%d, want file:///a.md#0", ans.Citations[0].Source, ans.Citations[0].Seq)
 		}
 	})
 

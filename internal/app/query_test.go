@@ -74,6 +74,35 @@ func TestQuerier(t *testing.T) {
 		}
 	})
 
+	t.Run("hydrates source provenance onto hits", func(t *testing.T) {
+		doc, err := domain.NewDocument("docs", "file:///a.md", domain.HashContent([]byte("x")), time.Unix(0, 0).UTC())
+		if err != nil {
+			t.Fatalf("NewDocument: %v", err)
+		}
+		idx := &fakeIndex{matches: map[string][]domain.VectorMatch{
+			"docs": {{ChunkID: c1.ID, Score: 0.9}, {ChunkID: c0.ID, Score: 0.4}},
+		}}
+		docs := &fakeDocs{
+			docs:   map[domain.DocumentID]domain.Document{doc.ID: *doc},
+			chunks: map[domain.ChunkID]domain.Chunk{c0.ID: c0, c1.ID: c1},
+		}
+		emb := &fakeEmbedder{space: space, byText: map[string][]float32{"q": {1, 0, 0}}}
+		q := newQuerier(idx, docs, emb)
+
+		hits, err := q.Query(ctx, "docs", "q", 2)
+		if err != nil {
+			t.Fatalf("Query: %v", err)
+		}
+		if len(hits) != 2 {
+			t.Fatalf("want 2 hits, got %d", len(hits))
+		}
+		for _, h := range hits {
+			if h.Source != "file:///a.md" {
+				t.Errorf("hit %s: Source = %q, want file:///a.md", h.Chunk.ID, h.Source)
+			}
+		}
+	})
+
 	t.Run("skips matches with no stored chunk, keeps scores aligned", func(t *testing.T) {
 		idx := &fakeIndex{matches: map[string][]domain.VectorMatch{
 			"docs": {
