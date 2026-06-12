@@ -87,6 +87,50 @@ format = "json"
 	}
 }
 
+func TestLoadStorageDefaults(t *testing.T) {
+	cfg, err := config.Load("", env(nil))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := config.Storage{Backend: "sqlite", Path: ""}
+	if cfg.Storage != want {
+		t.Errorf("storage defaults = %+v, want %+v", cfg.Storage, want)
+	}
+}
+
+func TestLoadStorageFileThenEnvPrecedence(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	content := `
+[storage]
+backend = "memory"
+path = "/file/lore.db"
+`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := config.Load(path, env(map[string]string{"LORE_DB_PATH": "/env/lore.db"}))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Storage.Backend != "memory" {
+		t.Errorf("file backend lost: %q", cfg.Storage.Backend)
+	}
+	if cfg.Storage.Path != "/env/lore.db" {
+		t.Errorf("env must beat file: %q", cfg.Storage.Path)
+	}
+}
+
+func TestDefaultDBPath(t *testing.T) {
+	p, err := config.DefaultDBPath()
+	if err != nil {
+		t.Fatalf("DefaultDBPath: %v", err)
+	}
+	if !strings.HasSuffix(p, filepath.Join("lore", "lore.db")) {
+		t.Errorf("DefaultDBPath = %q, want suffix lore/lore.db", p)
+	}
+}
+
 func TestLoadMissingFileIsNotAnError(t *testing.T) {
 	cfg, err := config.Load(filepath.Join(t.TempDir(), "absent.toml"), env(nil))
 	if err != nil {
@@ -105,6 +149,7 @@ func TestLoadInvalidIsErrInvalidArgument(t *testing.T) {
 		{"bad dimensions", map[string]string{"LORE_DIMENSIONS": "lots"}},
 		{"bad level", map[string]string{"LORE_LOG_LEVEL": "loud"}},
 		{"bad format", map[string]string{"LORE_LOG_FORMAT": "yaml"}},
+		{"bad backend", map[string]string{"LORE_STORAGE_BACKEND": "lmdb"}},
 	}
 	for _, c := range cases {
 		if _, err := config.Load("", env(c.env)); !errors.Is(err, domain.ErrInvalidArgument) {

@@ -22,7 +22,16 @@ import (
 // Config is lore's resolved configuration.
 type Config struct {
 	Provider Provider
+	Storage  Storage
 	Log      Log
+}
+
+// Storage selects the persistence backend. Backend is "sqlite" (default) or
+// "memory". Path is the SQLite database file; empty means the default location
+// (DefaultDBPath) and it is ignored for the memory backend.
+type Storage struct {
+	Backend string
+	Path    string
 }
 
 // Provider configures the OpenAI-compatible backend.
@@ -51,7 +60,8 @@ func Defaults() Config {
 			Dimensions: 1536,
 			ChatModel:  "gpt-4o-mini",
 		},
-		Log: Log{Level: slog.LevelInfo, Format: "text"},
+		Storage: Storage{Backend: "sqlite"},
+		Log:     Log{Level: slog.LevelInfo, Format: "text"},
 	}
 }
 
@@ -92,6 +102,10 @@ type fileConfig struct {
 		Dimensions int    `toml:"dimensions"`
 		ChatModel  string `toml:"chat_model"`
 	} `toml:"provider"`
+	Storage struct {
+		Backend string `toml:"backend"`
+		Path    string `toml:"path"`
+	} `toml:"storage"`
 	Log struct {
 		Level  string `toml:"level"`
 		Format string `toml:"format"`
@@ -103,6 +117,8 @@ func applyFile(cfg *Config, fc fileConfig) error {
 	setString(&cfg.Provider.APIKey, fc.Provider.APIKey)
 	setString(&cfg.Provider.EmbedModel, fc.Provider.EmbedModel)
 	setString(&cfg.Provider.ChatModel, fc.Provider.ChatModel)
+	setString(&cfg.Storage.Backend, fc.Storage.Backend)
+	setString(&cfg.Storage.Path, fc.Storage.Path)
 	setString(&cfg.Log.Format, fc.Log.Format)
 	if fc.Provider.Dimensions != 0 {
 		cfg.Provider.Dimensions = fc.Provider.Dimensions
@@ -122,6 +138,8 @@ func applyEnv(cfg *Config, getenv func(string) string) error {
 	setString(&cfg.Provider.APIKey, getenv("LORE_API_KEY"))
 	setString(&cfg.Provider.EmbedModel, getenv("LORE_EMBED_MODEL"))
 	setString(&cfg.Provider.ChatModel, getenv("LORE_CHAT_MODEL"))
+	setString(&cfg.Storage.Backend, getenv("LORE_STORAGE_BACKEND"))
+	setString(&cfg.Storage.Path, getenv("LORE_DB_PATH"))
 	setString(&cfg.Log.Format, getenv("LORE_LOG_FORMAT"))
 
 	if v := getenv("LORE_DIMENSIONS"); v != "" {
@@ -169,6 +187,9 @@ func validate(cfg Config) error {
 	if cfg.Provider.Dimensions <= 0 {
 		return fmt.Errorf("config: %w: provider dimensions must be positive, got %d", domain.ErrInvalidArgument, cfg.Provider.Dimensions)
 	}
+	if cfg.Storage.Backend != "sqlite" && cfg.Storage.Backend != "memory" {
+		return fmt.Errorf("config: %w: storage backend %q (want \"sqlite\" or \"memory\")", domain.ErrInvalidArgument, cfg.Storage.Backend)
+	}
 	return nil
 }
 
@@ -180,4 +201,14 @@ func DefaultPath() (string, error) {
 		return "", fmt.Errorf("config: locate user config dir: %w", err)
 	}
 	return filepath.Join(dir, "lore", "config.toml"), nil
+}
+
+// DefaultDBPath is the conventional SQLite database location, alongside the
+// config file: <user-config-dir>/lore/lore.db.
+func DefaultDBPath() (string, error) {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return "", fmt.Errorf("config: locate user config dir: %w", err)
+	}
+	return filepath.Join(dir, "lore", "lore.db"), nil
 }

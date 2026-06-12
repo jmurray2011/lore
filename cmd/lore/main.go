@@ -9,11 +9,13 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 
 	"github.com/jmurray2011/lore/internal/adapters/extract"
 	"github.com/jmurray2011/lore/internal/adapters/fs"
 	"github.com/jmurray2011/lore/internal/adapters/memstore"
 	"github.com/jmurray2011/lore/internal/adapters/openai"
+	"github.com/jmurray2011/lore/internal/adapters/sqlite"
 	"github.com/jmurray2011/lore/internal/app"
 	"github.com/jmurray2011/lore/internal/cli"
 	"github.com/jmurray2011/lore/internal/config"
@@ -47,10 +49,11 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	}
 	logger := config.NewLogger(cfg.Log, stderr)
 
-	// memstore is in-memory and per-process; persistence arrives with sqlite.
-	collections := memstore.NewCollectionRepository()
-	docs := memstore.NewDocumentRepository()
-	index := memstore.NewVectorIndex()
+	store, err := openStorage(cfg.Storage)
+	if err != nil {
+		return fail(err)
+	}
+	defer func() { _ = store.close() }()
 
 	embedder, err := openai.NewEmbedder(cfg.Provider.BaseURL, cfg.Provider.APIKey, cfg.Provider.EmbedModel, cfg.Provider.Dimensions, nil)
 	if err != nil {
@@ -66,13 +69,13 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return fail(err)
 	}
 
-	querier := app.NewQuerier(collections, index, docs, embedder)
+	querier := app.NewQuerier(store.collections, store.index, store.docs, embedder)
 	deps := cli.Deps{
-		Catalog: app.NewCatalog(collections, embedder),
-		Ingest:  app.NewIngestor(collections, docs, index, embedder, extract.New(), fs.NewSource(), chunker),
+		Catalog: app.NewCatalog(store.collections, embedder),
+		Ingest:  app.NewIngestor(store.collections, store.docs, store.index, embedder, extract.New(), fs.NewSource(), chunker),
 		Query:   querier,
 		Ask:     app.NewAsker(querier, generator),
-		Remove:  app.NewRemover(collections, docs, index),
+		Remove:  app.NewRemover(store.collections, store.docs, store.index),
 	}
 
 	root := cli.NewRootCommand(deps, fmt.Sprintf("%s (commit %s, built %s)", version, commit, date), stdout, stderr)
@@ -82,4 +85,53 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return fail(err)
 	}
 	return 0
+}
+
+// storage holds the three persistence ports for one backend plus a close hook.
+type storage struct {
+	collections app.CollectionRepository
+	docs        app.DocumentRepository
+	index       app.VectorIndex
+	close       func() error
+}
+
+// openStorage selects the persistence backend from config. The "sqlite" backend
+// (default) opens one DB file, resolving an empty path to config.DefaultDBPath
+// and creating its parent directory; "memory" uses the in-memory reference
+// adapter (no persistence across processes).
+func openStorage(cfg config.Storage) (storage, error) {
+	switch cfg.Backend {
+	case "memory":
+		return storage{
+			collections: memstore.NewCollectionRepository(),
+			docs:        memstore.NewDocumentRepository(),
+			index:       memstore.NewVectorIndex(),
+			close:       func() error { return nil },
+		}, nil
+	case "sqlite":
+		path := cfg.Path
+		if path == "" {
+			p, err := config.DefaultDBPath()
+			if err != nil {
+				return storage{}, err
+			}
+			path = p
+		}
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return storage{}, fmt.Errorf("lore: create data directory: %w", err)
+		}
+		s, err := sqlite.Open(path)
+		if err != nil {
+			return storage{}, err
+		}
+		return storage{
+			collections: s.Collections(),
+			docs:        s.Documents(),
+			index:       s.Vectors(),
+			close:       s.Close,
+		}, nil
+	default:
+		// config validation rejects unknown backends; this stays defensive.
+		return storage{}, fmt.Errorf("lore: %w: unknown storage backend %q", domain.ErrInvalidArgument, cfg.Backend)
+	}
 }
