@@ -48,6 +48,7 @@ func NewRootCommand(deps Deps, version string, out, errOut io.Writer) *cobra.Com
 		newAddCmd(deps),
 		newLsCmd(deps),
 		newStatusCmd(deps),
+		newDocsCmd(deps),
 		newQueryCmd(deps),
 		newAskCmd(deps),
 		newRmCmd(deps),
@@ -122,6 +123,12 @@ type citationView struct {
 type answerView struct {
 	Text      string         `json:"text"`
 	Citations []citationView `json:"citations"`
+}
+
+type docView struct {
+	Source     string `json:"source"`
+	Hash       string `json:"hash"`
+	IngestedAt string `json:"ingested_at"`
 }
 
 type rmView struct {

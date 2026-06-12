@@ -108,6 +108,39 @@ func RunDocumentRepositorySuite(t *testing.T, factory func(t *testing.T) app.Doc
 		}
 	})
 
+	t.Run("list documents returns a collection's documents, isolated by collection", func(t *testing.T) {
+		repo := factory(t)
+		docA, chunksA := newDoc(t, "docs", "file:///a.md", "alpha", 1)
+		docB, chunksB := newDoc(t, "docs", "file:///b.md", "beta", 2)
+		other, otherChunks := newDoc(t, "notes", "file:///c.md", "gamma", 1)
+		mustUpsert(t, repo, docA, chunksA)
+		mustUpsert(t, repo, docB, chunksB)
+		mustUpsert(t, repo, other, otherChunks)
+
+		got, err := repo.ListDocuments(ctx, "docs")
+		if err != nil {
+			t.Fatalf("ListDocuments: %v", err)
+		}
+		ids := make(map[domain.DocumentID]bool, len(got))
+		for _, d := range got {
+			ids[d.ID] = true
+		}
+		if len(got) != 2 || !ids[docA.ID] || !ids[docB.ID] {
+			t.Errorf("want documents A and B in docs, got %d: %v", len(got), ids)
+		}
+		if ids[other.ID] {
+			t.Errorf("ListDocuments must not cross collections")
+		}
+	})
+
+	t.Run("list documents of an empty collection returns nothing, no error", func(t *testing.T) {
+		repo := factory(t)
+		got, err := repo.ListDocuments(ctx, "empty")
+		if err != nil || len(got) != 0 {
+			t.Errorf("want empty, nil; got %v, %v", got, err)
+		}
+	})
+
 	t.Run("upsert replaces a document's chunks", func(t *testing.T) {
 		repo := factory(t)
 		doc, chunks := newDoc(t, "docs", "file:///a.md", "alpha", 3)

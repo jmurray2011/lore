@@ -228,6 +228,19 @@ func (f *fakeDocs) GetDocuments(_ context.Context, ids []domain.DocumentID) ([]*
 	return out, nil
 }
 
+func (f *fakeDocs) ListDocuments(_ context.Context, collection string) ([]*domain.Document, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []*domain.Document
+	for _, d := range f.docs {
+		if d.Collection == collection {
+			doc := d
+			out = append(out, &doc)
+		}
+	}
+	return out, nil
+}
+
 func (f *fakeDocs) Delete(_ context.Context, collection string, id domain.DocumentID) ([]domain.ChunkID, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

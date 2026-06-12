@@ -124,19 +124,11 @@ func (r *DocumentRepository) GetDocuments(ctx context.Context, ids []domain.Docu
 
 	byID := make(map[domain.DocumentID]*domain.Document, len(ids))
 	for rows.Next() {
-		var (
-			d          domain.Document
-			ingestedAt string
-		)
-		if err := rows.Scan(&d.ID, &d.Collection, &d.SourceURI, &d.Hash, &ingestedAt); err != nil {
-			return nil, fmt.Errorf("sqlite: scan document: %w", err)
-		}
-		t, err := time.Parse(time.RFC3339Nano, ingestedAt)
+		d, err := scanDoc(rows)
 		if err != nil {
-			return nil, fmt.Errorf("sqlite: parse ingested_at: %w", err)
+			return nil, err
 		}
-		d.IngestedAt = t
-		byID[d.ID] = &d
+		byID[d.ID] = d
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -149,6 +141,45 @@ func (r *DocumentRepository) GetDocuments(ctx context.Context, ids []domain.Docu
 		}
 	}
 	return out, nil
+}
+
+// ListDocuments returns every document in the collection, ordered by source URI.
+// An unknown or empty collection yields no documents and no error.
+func (r *DocumentRepository) ListDocuments(ctx context.Context, collection string) ([]*domain.Document, error) {
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT id, collection, source_uri, hash, ingested_at FROM documents WHERE collection=? ORDER BY source_uri`, collection)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: list documents: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []*domain.Document
+	for rows.Next() {
+		d, err := scanDoc(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+// scanDoc reads one document row (id, collection, source_uri, hash,
+// ingested_at), parsing the stored RFC3339Nano timestamp.
+func scanDoc(s interface{ Scan(...any) error }) (*domain.Document, error) {
+	var (
+		d          domain.Document
+		ingestedAt string
+	)
+	if err := s.Scan(&d.ID, &d.Collection, &d.SourceURI, &d.Hash, &ingestedAt); err != nil {
+		return nil, fmt.Errorf("sqlite: scan document: %w", err)
+	}
+	t, err := time.Parse(time.RFC3339Nano, ingestedAt)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: parse ingested_at: %w", err)
+	}
+	d.IngestedAt = t
+	return &d, nil
 }
 
 // Delete removes the document and its chunks, returning the removed chunk IDs,

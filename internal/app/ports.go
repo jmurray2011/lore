@@ -44,6 +44,10 @@ type DocumentRepository interface {
 	// stored document are skipped, so the result may be shorter than the input.
 	// Used to attach source provenance to retrieval results.
 	GetDocuments(ctx context.Context, ids []domain.DocumentID) ([]*domain.Document, error)
+	// ListDocuments returns every document in the collection. An unknown or empty
+	// collection yields no documents and no error; collection existence is the
+	// CollectionRepository's concern. Order is unspecified.
+	ListDocuments(ctx context.Context, collection string) ([]*domain.Document, error)
 	// Delete removes the document and its chunks, returning the removed chunk
 	// IDs so the use case can delete their vectors via the VectorIndex
 	// (invariant 3 — this port cannot reach it). Fails with ErrNotFound if no

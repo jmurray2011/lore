@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -74,6 +75,33 @@ func newRmCmd(deps Deps) *cobra.Command {
 	}
 	cmd.Flags().StringVar(&docURI, "doc", "", "remove only this document, by source URI")
 	return cmd
+}
+
+func newDocsCmd(deps Deps) *cobra.Command {
+	return &cobra.Command{
+		Use:   "docs <collection>",
+		Short: "List the documents ingested into a collection",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) != 1 {
+				return fmt.Errorf("%w: docs takes exactly one collection name", domain.ErrInvalidArgument)
+			}
+			list, err := deps.Catalog.ListDocuments(cmd.Context(), args[0])
+			if err != nil {
+				return err
+			}
+			// Sort by source URI so output is stable regardless of backend.
+			sort.Slice(list, func(i, j int) bool { return list[i].SourceURI < list[j].SourceURI })
+
+			views := make([]docView, len(list))
+			var b strings.Builder
+			for i, d := range list {
+				ingested := d.IngestedAt.UTC().Format(time.RFC3339)
+				views[i] = docView{Source: d.SourceURI, Hash: string(d.Hash), IngestedAt: ingested}
+				fmt.Fprintf(&b, "%s\t%s\n", d.SourceURI, ingested)
+			}
+			return render(cmd, views, strings.TrimRight(b.String(), "\n"))
+		},
+	}
 }
 
 func newStatusCmd(deps Deps) *cobra.Command {

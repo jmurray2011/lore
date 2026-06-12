@@ -60,7 +60,7 @@ func newDeps(emb app.Embedder, gen app.Generator) (cli.Deps, *memstore.Collectio
 	q := app.NewQuerier(colls, index, docs, emb)
 	chunker, _ := domain.NewChunker(domain.DefaultChunkSize, domain.DefaultChunkOverlap)
 	deps := cli.Deps{
-		Catalog: app.NewCatalog(colls, emb),
+		Catalog: app.NewCatalog(colls, docs, emb),
 		Ingest:  app.NewIngestor(colls, docs, index, emb, extract.New(), fs.NewSource(), chunker),
 		Query:   q,
 		Ask:     app.NewAsker(q, gen),
@@ -116,6 +116,50 @@ func TestCLICollectionLifecycle(t *testing.T) {
 	t.Run("status of unknown collection exits 3", func(t *testing.T) {
 		_, code := exec(deps, "status", "ghost")
 		if code != 3 {
+			t.Errorf("want exit 3, got %d", code)
+		}
+	})
+}
+
+func TestCLIDocs(t *testing.T) {
+	deps, _, docs, _ := newDeps(stubEmbedder{space: testSpace()}, stubGenerator{})
+	if _, code := exec(deps, "init", "docs"); code != 0 {
+		t.Fatal("init failed")
+	}
+
+	ctx := context.Background()
+	for _, uri := range []string{"file:///b.md", "file:///a.md"} { // unsorted on purpose
+		doc, err := domain.NewDocument("docs", uri, domain.HashContent([]byte(uri)), time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := docs.Upsert(ctx, doc, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("lists a collection's documents sorted by source, as JSON", func(t *testing.T) {
+		out, code := exec(deps, "docs", "docs", "--json")
+		if code != 0 {
+			t.Fatalf("exit %d, out %q", code, out)
+		}
+		var list []docViewJSON
+		if err := json.Unmarshal([]byte(out), &list); err != nil {
+			t.Fatalf("bad JSON %q: %v", out, err)
+		}
+		if len(list) != 2 {
+			t.Fatalf("want 2 docs, got %d", len(list))
+		}
+		if list[0].Source != "file:///a.md" || list[1].Source != "file:///b.md" {
+			t.Errorf("not sorted by source: %+v", list)
+		}
+		if list[0].Hash == "" || list[0].IngestedAt == "" {
+			t.Errorf("missing hash/ingested_at: %+v", list[0])
+		}
+	})
+
+	t.Run("unknown collection exits 3", func(t *testing.T) {
+		if _, code := exec(deps, "docs", "ghost"); code != 3 {
 			t.Errorf("want exit 3, got %d", code)
 		}
 	})
@@ -385,6 +429,12 @@ type collectionViewJSON struct {
 	Model      string `json:"model"`
 	Dimensions int    `json:"dimensions"`
 	CreatedAt  string `json:"created_at"`
+}
+
+type docViewJSON struct {
+	Source     string `json:"source"`
+	Hash       string `json:"hash"`
+	IngestedAt string `json:"ingested_at"`
 }
 
 type hitViewJSON struct {

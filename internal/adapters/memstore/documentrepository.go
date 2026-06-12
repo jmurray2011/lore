@@ -98,6 +98,22 @@ func (r *DocumentRepository) GetDocuments(_ context.Context, ids []domain.Docume
 	return out, nil
 }
 
+// ListDocuments returns every document in the collection (order unspecified). An
+// unknown or empty collection yields no documents and no error.
+func (r *DocumentRepository) ListDocuments(_ context.Context, collection string) ([]*domain.Document, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	var out []*domain.Document
+	for _, d := range r.docs {
+		if d.Collection == collection {
+			doc := d
+			out = append(out, &doc)
+		}
+	}
+	return out, nil
+}
+
 // Delete removes the document and its chunks, returning the removed chunk IDs,
 // or fails with ErrNotFound. Their vectors live in the VectorIndex and are
 // removed by the use case.

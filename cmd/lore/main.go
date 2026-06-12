@@ -86,7 +86,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 
 	querier := app.NewQuerier(store.collections, store.index, store.docs, embedder)
 	deps := cli.Deps{
-		Catalog: app.NewCatalog(store.collections, embedder),
+		Catalog: app.NewCatalog(store.collections, store.docs, embedder),
 		Ingest:  app.NewIngestor(store.collections, store.docs, store.index, embedder, extractor, fs.NewSource(), chunker, app.WithConcurrency(cfg.Ingest.Concurrency)),
 		Query:   querier,
 		Ask:     app.NewAsker(querier, generator),

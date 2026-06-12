@@ -47,9 +47,13 @@ lore ask notes "what is our key rotation policy?"
 # inventory & cleanup
 lore ls
 lore status notes
+lore docs notes                                        # list ingested documents
 lore rm notes --doc file:///abs/path/to/report.pdf   # one document
 lore rm notes                                          # whole collection
 ```
+
+Query hits and answer citations are tagged with their source as `source#chunk`,
+so every result traces back to the document it came from.
 
 Add `--json` to any command for machine-readable output.
 

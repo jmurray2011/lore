@@ -114,6 +114,11 @@ func TestEndToEnd(t *testing.T) {
 	if out := mustSucceed(t, "--json", "status", "docs"); !strings.Contains(out, "stub-embed") {
 		t.Fatalf("status missing pinned model: %s", out)
 	}
+	// docs lists every ingested source (persisted via sqlite ListDocuments).
+	if out := mustSucceed(t, "--json", "docs", "docs"); !strings.Contains(out, "alpha.txt") ||
+		!strings.Contains(out, "report.docx") || !strings.Contains(out, "paper.pdf") || !strings.Contains(out, "sheet.xlsx") {
+		t.Fatalf("docs did not list all ingested sources: %s", out)
+	}
 	// All three formats flowed through the router into the store.
 	out := mustSucceed(t, "--json", "query", "docs", "alpha")
 	for _, want := range []string{"alpha beta gamma", "docxsentinel", "pdfsentinel", "xlsxsentinel"} {
