@@ -1,0 +1,21 @@
+#!/bin/sh
+# lore pre-push: full verification before anything leaves the machine.
+# (-race is left to CI: it needs a C toolchain on Windows.)
+set -e
+
+echo "pre-push: gofmt" >&2
+unformatted=$(gofmt -l .)
+if [ -n "$unformatted" ]; then
+    echo "pre-push: unformatted Go files:" >&2
+    echo "$unformatted" >&2
+    exit 1
+fi
+
+echo "pre-push: go vet ./..." >&2
+go vet ./...
+
+echo "pre-push: go test -count=1 ./..." >&2
+go test -count=1 ./...
+
+echo "pre-push: go build ./..." >&2
+go build ./...

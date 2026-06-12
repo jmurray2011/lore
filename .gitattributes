@@ -1,0 +1,9 @@
+# Normalize line endings; Go tooling and sh hooks require LF.
+* text=auto
+*.go text eol=lf
+*.sh text eol=lf
+.githooks/* text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+go.mod text eol=lf
+go.sum text eol=lf

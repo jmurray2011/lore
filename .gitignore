@@ -1,0 +1,21 @@
+# binaries
+/lore
+/bin/
+dist/
+
+# test & profiling artifacts
+*.test
+*.out
+coverage.html
+
+# editor/OS noise
+.idea/
+.vscode/
+.DS_Store
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# AI generated files
+CLAUDE.md
+DESIGN.md

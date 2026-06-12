@@ -1,0 +1,23 @@
+#!/bin/sh
+# lore pre-commit: fast, honest commits.
+# Enable once per clone:  git config core.hooksPath .githooks
+set -e
+
+# 1. Staged Go files must be gofmt-clean.
+staged=$(git diff --cached --name-only --diff-filter=ACMR -- '*.go')
+if [ -n "$staged" ]; then
+    unformatted=$(gofmt -l $staged)
+    if [ -n "$unformatted" ]; then
+        echo "pre-commit: unformatted Go files:" >&2
+        echo "$unformatted" >&2
+        echo "fix with: gofmt -w <files>  (then re-stage)" >&2
+        exit 1
+    fi
+fi
+
+# 2. Vet and tests — the repo is small; commits stay green (CLAUDE.md rule).
+echo "pre-commit: go vet ./..." >&2
+go vet ./...
+
+echo "pre-commit: go test ./..." >&2
+go test ./...

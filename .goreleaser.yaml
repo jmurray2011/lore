@@ -1,0 +1,40 @@
+version: 2
+
+project_name: lore
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: lore
+    main: ./cmd/lore
+    binary: lore
+    env:
+      - CGO_ENABLED=0 # static binaries, trivial cross-compilation
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+    mod_timestamp: "{{ .CommitTimestamp }}" # reproducible builds
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.ShortCommit}}
+      - -X main.date={{.CommitDate}}
+
+archives:
+  - formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  use: github-native
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-dev"
