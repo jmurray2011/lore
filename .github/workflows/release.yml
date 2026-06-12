@@ -17,8 +17,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
-          check-latest: true
+          go-version: stable
 
       # Never ship what wouldn't pass CI.
       - name: verify
