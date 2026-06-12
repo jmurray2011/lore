@@ -10,11 +10,14 @@ import (
 	"os"
 	"os/signal"
 
+	"github.com/jmurray2011/lore/internal/adapters/extract"
+	"github.com/jmurray2011/lore/internal/adapters/fs"
 	"github.com/jmurray2011/lore/internal/adapters/memstore"
 	"github.com/jmurray2011/lore/internal/adapters/openai"
 	"github.com/jmurray2011/lore/internal/app"
 	"github.com/jmurray2011/lore/internal/cli"
 	"github.com/jmurray2011/lore/internal/config"
+	"github.com/jmurray2011/lore/internal/domain"
 )
 
 // Set by goreleaser via -ldflags (see .goreleaser.yaml).
@@ -58,9 +61,15 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return fail(err)
 	}
 
+	chunker, err := domain.NewChunker(domain.DefaultChunkSize, domain.DefaultChunkOverlap)
+	if err != nil {
+		return fail(err)
+	}
+
 	querier := app.NewQuerier(collections, index, docs, embedder)
 	deps := cli.Deps{
 		Catalog: app.NewCatalog(collections, embedder),
+		Ingest:  app.NewIngestor(collections, docs, index, embedder, extract.New(), fs.NewSource(), chunker),
 		Query:   querier,
 		Ask:     app.NewAsker(querier, generator),
 	}

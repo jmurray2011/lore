@@ -21,6 +21,7 @@ import (
 // Deps are the use cases the commands invoke, wired by the composition root.
 type Deps struct {
 	Catalog *app.Catalog
+	Ingest  *app.Ingestor
 	Query   *app.Querier
 	Ask     *app.Asker
 }
@@ -43,6 +44,7 @@ func NewRootCommand(deps Deps, version string, out, errOut io.Writer) *cobra.Com
 	})
 	root.AddCommand(
 		newInitCmd(deps),
+		newAddCmd(deps),
 		newLsCmd(deps),
 		newStatusCmd(deps),
 		newQueryCmd(deps),

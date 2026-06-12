@@ -5,10 +5,14 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/jmurray2011/lore/internal/adapters/extract"
+	"github.com/jmurray2011/lore/internal/adapters/fs"
 	"github.com/jmurray2011/lore/internal/adapters/memstore"
 	"github.com/jmurray2011/lore/internal/app"
 	"github.com/jmurray2011/lore/internal/cli"
@@ -48,7 +52,13 @@ func newDeps(emb app.Embedder, gen app.Generator) (cli.Deps, *memstore.Collectio
 	docs := memstore.NewDocumentRepository()
 	index := memstore.NewVectorIndex()
 	q := app.NewQuerier(colls, index, docs, emb)
-	deps := cli.Deps{Catalog: app.NewCatalog(colls, emb), Query: q, Ask: app.NewAsker(q, gen)}
+	chunker, _ := domain.NewChunker(domain.DefaultChunkSize, domain.DefaultChunkOverlap)
+	deps := cli.Deps{
+		Catalog: app.NewCatalog(colls, emb),
+		Ingest:  app.NewIngestor(colls, docs, index, emb, extract.New(), fs.NewSource(), chunker),
+		Query:   q,
+		Ask:     app.NewAsker(q, gen),
+	}
 	return deps, colls, docs, index
 }
 
@@ -201,6 +211,51 @@ func TestCLIAsk(t *testing.T) {
 	}
 }
 
+func TestCLIAddThenQuery(t *testing.T) {
+	deps, _, _, _ := newDeps(stubEmbedder{space: testSpace(), vec: []float32{1, 0, 0}}, stubGenerator{})
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "doc.txt"), []byte("hello grounded world"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, code := exec(deps, "init", "docs"); code != 0 {
+		t.Fatal("init failed")
+	}
+
+	out, code := exec(deps, "add", "docs", dir, "--json")
+	if code != 0 {
+		t.Fatalf("add exit %d, out %q", code, out)
+	}
+	var sum ingestViewJSON
+	if err := json.Unmarshal([]byte(out), &sum); err != nil {
+		t.Fatalf("bad JSON %q: %v", out, err)
+	}
+	if sum.Added != 1 || sum.Chunks < 1 {
+		t.Errorf("add summary = %+v", sum)
+	}
+
+	out, _ = exec(deps, "add", "docs", dir, "--json")
+	if err := json.Unmarshal([]byte(out), &sum); err != nil {
+		t.Fatal(err)
+	}
+	if sum.Added != 0 || sum.Skipped != 1 {
+		t.Errorf("re-add must be idempotent: %+v", sum)
+	}
+
+	out, code = exec(deps, "query", "docs", "anything", "--json")
+	if code != 0 {
+		t.Fatalf("query exit %d", code)
+	}
+	var hits []hitViewJSON
+	if err := json.Unmarshal([]byte(out), &hits); err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) < 1 || !strings.Contains(hits[0].Text, "hello grounded world") {
+		t.Errorf("hits = %+v", hits)
+	}
+}
+
 // Mirror of the CLI's JSON output shapes, for decoding in tests.
 type collectionViewJSON struct {
 	Name       string `json:"name"`
@@ -218,4 +273,10 @@ type hitViewJSON struct {
 type answerViewJSON struct {
 	Text      string   `json:"text"`
 	Citations []string `json:"citations"`
+}
+
+type ingestViewJSON struct {
+	Added   int `json:"added"`
+	Skipped int `json:"skipped"`
+	Chunks  int `json:"chunks"`
 }
