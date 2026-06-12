@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jmurray2011/lore/internal/app"
 	"github.com/jmurray2011/lore/internal/domain"
@@ -184,6 +185,49 @@ func TestIngestor(t *testing.T) {
 
 		if _, err := ing.Ingest(ctx, "docs", "/root"); !errors.Is(err, boom) {
 			t.Errorf("want wrapped embed error, got %v", err)
+		}
+	})
+
+	t.Run("WithConcurrency bounds parallel embeds", func(t *testing.T) {
+		const limit = 2
+		coll := mustCollection(t, "docs", space)
+		items := make([]app.SourceItem, 6)
+		for i := range items {
+			items[i] = textItem(fmt.Sprintf("file:///c-%d.txt", i), words(10))
+		}
+		src := &fakeSource{items: items}
+
+		entered := make(chan struct{}, len(items))
+		release := make(chan struct{})
+		emb := &fakeEmbedder{space: space, onEmbed: func() {
+			entered <- struct{}{}
+			<-release
+		}}
+		ing := app.NewIngestor(newFakeCollections(coll), &fakeDocs{}, &fakeIndex{}, emb, &fakeExtractor{}, src, chunker41(t), app.WithConcurrency(limit))
+
+		done := make(chan error, 1)
+		go func() { _, err := ing.Ingest(ctx, "docs", "/root"); done <- err }()
+
+		// Wait until `limit` embeds are parked (proves at least `limit` ran at once).
+		for i := 0; i < limit; i++ {
+			select {
+			case <-entered:
+			case <-time.After(2 * time.Second):
+				close(release)
+				t.Fatalf("only %d concurrent embeds reached, want %d", i, limit)
+			}
+		}
+		// No further embed may start while `limit` are parked.
+		select {
+		case <-entered:
+			close(release)
+			t.Fatal("concurrency exceeded the configured limit")
+		case <-time.After(100 * time.Millisecond):
+		}
+
+		close(release)
+		if err := <-done; err != nil {
+			t.Fatalf("Ingest: %v", err)
 		}
 	})
 

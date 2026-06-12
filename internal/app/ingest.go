@@ -37,9 +37,23 @@ type Ingestor struct {
 	now         func() time.Time
 }
 
+// IngestOption configures an Ingestor at construction.
+type IngestOption func(*Ingestor)
+
+// WithConcurrency sets the bounded parallelism for ingestion. Values <= 0 are
+// ignored, leaving DefaultIngestConcurrency in place. Lower it for providers
+// with tight rate limits to avoid retry thrash.
+func WithConcurrency(n int) IngestOption {
+	return func(i *Ingestor) {
+		if n > 0 {
+			i.concurrency = n
+		}
+	}
+}
+
 // NewIngestor wires an Ingestor from the ports and domain services it needs.
-func NewIngestor(collections CollectionRepository, docs DocumentRepository, index VectorIndex, embedder Embedder, extractor Extractor, source Source, chunker domain.Chunker) *Ingestor {
-	return &Ingestor{
+func NewIngestor(collections CollectionRepository, docs DocumentRepository, index VectorIndex, embedder Embedder, extractor Extractor, source Source, chunker domain.Chunker, opts ...IngestOption) *Ingestor {
+	ing := &Ingestor{
 		collections: collections,
 		docs:        docs,
 		index:       index,
@@ -50,6 +64,10 @@ func NewIngestor(collections CollectionRepository, docs DocumentRepository, inde
 		concurrency: DefaultIngestConcurrency,
 		now:         time.Now,
 	}
+	for _, opt := range opts {
+		opt(ing)
+	}
+	return ing
 }
 
 // Ingest processes every document the Source yields under root into the named
