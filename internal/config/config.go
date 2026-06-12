@@ -23,7 +23,15 @@ import (
 type Config struct {
 	Provider Provider
 	Storage  Storage
+	Ingest   Ingest
 	Log      Log
+}
+
+// Ingest tunes the ingestion pipeline.
+type Ingest struct {
+	// Concurrency bounds parallel embedding during ingest. 0 means use the
+	// built-in default; lower it for providers with tight rate limits.
+	Concurrency int
 }
 
 // Storage selects the persistence backend. Backend is "sqlite" (default) or
@@ -124,6 +132,9 @@ type fileConfig struct {
 		Backend string `toml:"backend"`
 		Path    string `toml:"path"`
 	} `toml:"storage"`
+	Ingest struct {
+		Concurrency int `toml:"concurrency"`
+	} `toml:"ingest"`
 	Log struct {
 		Level  string `toml:"level"`
 		Format string `toml:"format"`
@@ -138,6 +149,9 @@ func applyFile(cfg *Config, fc fileConfig) error {
 	setString(&cfg.Provider.Auth, fc.Provider.Auth)
 	setString(&cfg.Storage.Backend, fc.Storage.Backend)
 	setString(&cfg.Storage.Path, fc.Storage.Path)
+	if fc.Ingest.Concurrency != 0 {
+		cfg.Ingest.Concurrency = fc.Ingest.Concurrency
+	}
 	setString(&cfg.Log.Format, fc.Log.Format)
 	if fc.Provider.Dimensions != 0 {
 		cfg.Provider.Dimensions = fc.Provider.Dimensions
@@ -177,6 +191,13 @@ func applyEnv(cfg *Config, getenv func(string) string) error {
 			return fmt.Errorf("config: %w: LORE_DIMENSIONS %q is not an integer", domain.ErrInvalidArgument, v)
 		}
 		cfg.Provider.Dimensions = d
+	}
+	if v := getenv("LORE_INGEST_CONCURRENCY"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("config: %w: LORE_INGEST_CONCURRENCY %q is not an integer", domain.ErrInvalidArgument, v)
+		}
+		cfg.Ingest.Concurrency = n
 	}
 	if err := applyBoolEnv(&cfg.Provider.StructuredOutput, getenv, "LORE_STRUCTURED_OUTPUT"); err != nil {
 		return err
@@ -241,6 +262,9 @@ func validate(cfg Config) error {
 	}
 	if cfg.Provider.Auth != "bearer" && cfg.Provider.Auth != "api-key" {
 		return fmt.Errorf("config: %w: provider auth %q (want \"bearer\" or \"api-key\")", domain.ErrInvalidArgument, cfg.Provider.Auth)
+	}
+	if cfg.Ingest.Concurrency < 0 {
+		return fmt.Errorf("config: %w: ingest concurrency must not be negative, got %d", domain.ErrInvalidArgument, cfg.Ingest.Concurrency)
 	}
 	if cfg.Storage.Backend != "sqlite" && cfg.Storage.Backend != "memory" {
 		return fmt.Errorf("config: %w: storage backend %q (want \"sqlite\" or \"memory\")", domain.ErrInvalidArgument, cfg.Storage.Backend)

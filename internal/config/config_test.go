@@ -101,6 +101,26 @@ func TestLoadStructuredOutputCapability(t *testing.T) {
 	}
 }
 
+func TestLoadIngestConcurrency(t *testing.T) {
+	if got := config.Defaults().Ingest.Concurrency; got != 0 {
+		t.Errorf("default concurrency = %d, want 0 (use built-in default)", got)
+	}
+
+	cfg, err := config.Load("", env(map[string]string{"LORE_INGEST_CONCURRENCY": "2"}))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Ingest.Concurrency != 2 {
+		t.Errorf("LORE_INGEST_CONCURRENCY not applied: %d", cfg.Ingest.Concurrency)
+	}
+
+	for _, bad := range []string{"lots", "-1"} {
+		if _, err := config.Load("", env(map[string]string{"LORE_INGEST_CONCURRENCY": bad})); !errors.Is(err, domain.ErrInvalidArgument) {
+			t.Errorf("LORE_INGEST_CONCURRENCY=%q: want ErrInvalidArgument, got %v", bad, err)
+		}
+	}
+}
+
 func TestLoadAuth(t *testing.T) {
 	if got := config.Defaults().Provider.Auth; got != "bearer" {
 		t.Errorf("default auth = %q, want bearer", got)

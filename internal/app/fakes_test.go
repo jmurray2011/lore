@@ -74,6 +74,7 @@ type fakeEmbedder struct {
 	spaceErr   error
 	embedErr   error
 	embedCalls atomic.Int64
+	onEmbed    func() // optional hook invoked at the start of each Embed
 }
 
 func (f *fakeEmbedder) Space(context.Context) (domain.EmbeddingSpace, error) {
@@ -82,6 +83,9 @@ func (f *fakeEmbedder) Space(context.Context) (domain.EmbeddingSpace, error) {
 
 func (f *fakeEmbedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
 	f.embedCalls.Add(1)
+	if f.onEmbed != nil {
+		f.onEmbed()
+	}
 	if f.embedErr != nil {
 		return nil, f.embedErr
 	}
