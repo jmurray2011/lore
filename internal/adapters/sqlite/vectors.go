@@ -74,6 +74,29 @@ func (x *VectorIndex) Search(ctx context.Context, collection string, query []flo
 	return matches, nil
 }
 
+// Entries returns every stored (chunk_id, vector) for the collection. An unknown
+// collection yields no entries and no error.
+func (x *VectorIndex) Entries(ctx context.Context, collection string) ([]app.VectorEntry, error) {
+	rows, err := x.db.QueryContext(ctx, `SELECT chunk_id, vector FROM vectors WHERE collection=?`, collection)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: entries: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []app.VectorEntry
+	for rows.Next() {
+		var (
+			id  domain.ChunkID
+			raw []byte
+		)
+		if err := rows.Scan(&id, &raw); err != nil {
+			return nil, fmt.Errorf("sqlite: scan vector: %w", err)
+		}
+		out = append(out, app.VectorEntry{ChunkID: id, Vector: decodeVector(raw)})
+	}
+	return out, rows.Err()
+}
+
 // Delete removes the given chunk IDs from the collection; absent IDs are a no-op.
 func (x *VectorIndex) Delete(ctx context.Context, collection string, ids []domain.ChunkID) error {
 	if len(ids) == 0 {

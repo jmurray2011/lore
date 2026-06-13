@@ -109,6 +109,71 @@ func RunVectorIndexSuite(t *testing.T, factory func(t *testing.T) app.VectorInde
 		}
 	})
 
+	t.Run("entries returns every stored vector for the collection", func(t *testing.T) {
+		idx := factory(t)
+		mustUpsert(t, idx, "docs", entries)
+		// Isolation: a distinct chunk in another collection must not leak. Chunk
+		// IDs are globally unique (the doc hash includes the collection), so this
+		// uses a fresh ID rather than reusing one of "docs"'.
+		mustUpsert(t, idx, "notes", []app.VectorEntry{{ChunkID: "z", Vector: []float32{0, 0, 1}}})
+
+		got, err := idx.Entries(ctx, "docs")
+		if err != nil {
+			t.Fatalf("Entries: %v", err)
+		}
+		if len(got) != len(entries) {
+			t.Fatalf("want %d entries, got %d", len(entries), len(got))
+		}
+		byID := make(map[domain.ChunkID][]float32, len(got))
+		for _, e := range got {
+			byID[e.ChunkID] = e.Vector
+		}
+		for _, want := range entries {
+			vec, ok := byID[want.ChunkID]
+			if !ok {
+				t.Errorf("entry %s missing", want.ChunkID)
+				continue
+			}
+			if len(vec) != len(want.Vector) {
+				t.Errorf("entry %s: vector len %d, want %d", want.ChunkID, len(vec), len(want.Vector))
+				continue
+			}
+			for i := range vec {
+				if vec[i] != want.Vector[i] {
+					t.Errorf("entry %s: vector %v, want %v", want.ChunkID, vec, want.Vector)
+					break
+				}
+			}
+		}
+	})
+
+	t.Run("entries on an unknown collection is empty, no error", func(t *testing.T) {
+		idx := factory(t)
+		got, err := idx.Entries(ctx, "nope")
+		if err != nil || len(got) != 0 {
+			t.Errorf("want empty, nil; got %v, %v", got, err)
+		}
+	})
+
+	t.Run("entries returns copies; caller mutation does not corrupt the index", func(t *testing.T) {
+		idx := factory(t)
+		mustUpsert(t, idx, "docs", []app.VectorEntry{{ChunkID: "a", Vector: []float32{1, 0, 0}}})
+
+		got, err := idx.Entries(ctx, "docs")
+		if err != nil || len(got) != 1 {
+			t.Fatalf("Entries: %v, %v", got, err)
+		}
+		got[0].Vector[0] = -1 // mutate the returned vector
+
+		again, err := idx.Search(ctx, "docs", []float32{1, 0, 0}, 1)
+		if err != nil {
+			t.Fatalf("Search: %v", err)
+		}
+		if len(again) != 1 || again[0].Score < 0.99 {
+			t.Errorf("index must return a copy from Entries; got %+v", again)
+		}
+	})
+
 	t.Run("delete removes vectors; absent IDs are a no-op", func(t *testing.T) {
 		idx := factory(t)
 		mustUpsert(t, idx, "docs", entries)

@@ -74,6 +74,22 @@ func (x *VectorIndex) Search(_ context.Context, collection string, query []float
 	return matches, nil
 }
 
+// Entries returns a copy of every stored vector for the collection (order
+// unspecified). An unknown collection yields no entries and no error.
+func (x *VectorIndex) Entries(_ context.Context, collection string) ([]app.VectorEntry, error) {
+	x.mu.RLock()
+	defer x.mu.RUnlock()
+
+	col := x.collections[collection]
+	out := make([]app.VectorEntry, 0, len(col))
+	for id, vec := range col {
+		v := make([]float32, len(vec))
+		copy(v, vec)
+		out = append(out, app.VectorEntry{ChunkID: id, Vector: v})
+	}
+	return out, nil
+}
+
 // Delete removes the given chunk IDs; absent IDs are a no-op.
 func (x *VectorIndex) Delete(_ context.Context, collection string, ids []domain.ChunkID) error {
 	x.mu.Lock()
