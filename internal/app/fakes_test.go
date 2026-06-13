@@ -317,6 +317,24 @@ func (f *fakeDocs) DeleteCollection(_ context.Context, collection string) ([]dom
 	return removed, nil
 }
 
+func (f *fakeDocs) DeleteChunks(_ context.Context, collection string, ids []domain.ChunkID) ([]domain.ChunkID, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var removed []domain.ChunkID
+	for _, id := range ids {
+		c, ok := f.chunks[id]
+		if !ok {
+			continue
+		}
+		if d, ok := f.docs[c.DocumentID]; !ok || d.Collection != collection {
+			continue
+		}
+		delete(f.chunks, id)
+		removed = append(removed, id)
+	}
+	return removed, nil
+}
+
 // removeLocked deletes a document and the chunks that belong to it (matched by
 // DocumentID), returning the removed chunk IDs. Callers must hold f.mu.
 func (f *fakeDocs) removeLocked(id domain.DocumentID) []domain.ChunkID {

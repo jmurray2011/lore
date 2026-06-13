@@ -70,6 +70,15 @@ type DocumentRepository interface {
 	// (invariant 3 — this port cannot reach it). Fails with ErrNotFound if no
 	// such document exists in the collection.
 	Delete(ctx context.Context, collection string, id domain.DocumentID) ([]domain.ChunkID, error)
+	// DeleteChunks removes the chunks with the given IDs that belong to the
+	// collection, returning the IDs actually removed so the use case can delete
+	// their vectors (invariant 3). The owning documents are left in place — a
+	// document keeps its record even after losing chunks (sub-document
+	// redaction, not document deletion). IDs absent from the collection
+	// (unknown, or owned by another collection) are skipped, so the caller can
+	// diff requested vs removed; an unknown collection removes nothing. No error
+	// for skips — a malformed-ID guard is the caller's concern.
+	DeleteChunks(ctx context.Context, collection string, ids []domain.ChunkID) ([]domain.ChunkID, error)
 	// DeleteCollection removes every document and its chunks in the collection,
 	// returning all removed chunk IDs for the same cascade. A collection with no
 	// documents is a no-op (no IDs, no error); collection existence is the

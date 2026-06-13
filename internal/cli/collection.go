@@ -55,32 +55,85 @@ func newLsCmd(deps *Deps) *cobra.Command {
 }
 
 func newRmCmd(deps *Deps) *cobra.Command {
-	var docURI string
+	var (
+		docURI   string
+		chunkIDs []string
+	)
 	cmd := &cobra.Command{
-		Use:   "rm <collection>",
-		Short: "Remove a collection, or a single document with --doc",
+		Use:   "rm <collection> [--doc <uri> | --chunk <id>...]",
+		Short: "Remove a collection, a single document (--doc), or specific chunks (--chunk)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) != 1 {
 				return fmt.Errorf("%w: rm takes exactly one collection name", domain.ErrInvalidArgument)
 			}
 			collection := args[0]
 
-			if docURI != "" {
+			switch {
+			case docURI != "" && len(chunkIDs) > 0:
+				return fmt.Errorf("%w: --doc and --chunk are mutually exclusive", domain.ErrInvalidArgument)
+			case len(chunkIDs) > 0:
+				return rmByChunk(cmd, deps, collection, chunkIDs)
+			case docURI != "":
 				if err := deps.Remove.RemoveDocument(cmd.Context(), collection, docURI); err != nil {
 					return err
 				}
 				view := rmView{Removed: "document", Collection: collection, Document: docURI}
 				return render(cmd, view, fmt.Sprintf("Removed document `%s` from **%s**.", docURI, collection))
+			default:
+				if err := deps.Remove.RemoveCollection(cmd.Context(), collection); err != nil {
+					return err
+				}
+				return render(cmd, rmView{Removed: "collection", Collection: collection}, fmt.Sprintf("Removed collection **%s**.", collection))
 			}
-
-			if err := deps.Remove.RemoveCollection(cmd.Context(), collection); err != nil {
-				return err
-			}
-			return render(cmd, rmView{Removed: "collection", Collection: collection}, fmt.Sprintf("Removed collection **%s**.", collection))
 		},
 	}
 	cmd.Flags().StringVar(&docURI, "doc", "", "remove only this document, by source URI")
+	cmd.Flags().StringArrayVar(&chunkIDs, "chunk", nil, "remove only these chunks, by ID (repeatable)")
 	return cmd
+}
+
+// rmByChunk deletes specific chunks by ID — sub-document redaction (the chunks'
+// document survives). Mirrors cat --chunk's input handling: a malformed ID is a
+// usage error (exit 2); any requested-but-missing ID is warned on stderr while
+// the found chunks are still removed, and the command exits 3. Note: removing a
+// chunk drops it from the index only — re-ingesting its source document restores
+// it. For permanent redaction, also remove or redact the source (or use rm --doc).
+func rmByChunk(cmd *cobra.Command, deps *Deps, collection string, ids []string) error {
+	want := make([]domain.ChunkID, len(ids))
+	for i, id := range ids {
+		if !domain.ChunkID(id).Valid() {
+			return fmt.Errorf("%w: malformed chunk ID %q", domain.ErrInvalidArgument, id)
+		}
+		want[i] = domain.ChunkID(id)
+	}
+
+	removed, err := deps.Remove.RemoveChunks(cmd.Context(), collection, want)
+	if err != nil {
+		return err
+	}
+
+	removedSet := make(map[string]bool, len(removed))
+	removedStrs := make([]string, len(removed))
+	for i, id := range removed {
+		removedSet[string(id)] = true
+		removedStrs[i] = string(id)
+	}
+	var missing int
+	for _, id := range ids {
+		if !removedSet[id] {
+			missing++
+			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "lore: warning: chunk %q not found in %q\n", id, collection)
+		}
+	}
+
+	view := rmView{Removed: "chunks", Collection: collection, ChunkIDs: removedStrs}
+	if err := render(cmd, view, fmt.Sprintf("Removed %d chunk(s) from **%s**.", len(removed), collection)); err != nil {
+		return err
+	}
+	if missing > 0 {
+		return fmt.Errorf("%w: %d of %d requested chunks", app.ErrNotFound, missing, len(ids))
+	}
+	return nil
 }
 
 func newDocsCmd(deps *Deps) *cobra.Command {

@@ -52,3 +52,22 @@ func (r *Remover) RemoveDocument(ctx context.Context, collection, sourceURI stri
 	}
 	return nil
 }
+
+// RemoveChunks deletes specific chunks by ID and their vectors, returning the
+// IDs actually removed. This is sub-document redaction: the chunks' documents
+// stay in place. IDs absent from the collection are skipped, so the caller can
+// diff requested vs removed and report the misses. Fails with ErrNotFound if no
+// such collection exists.
+func (r *Remover) RemoveChunks(ctx context.Context, collection string, ids []domain.ChunkID) ([]domain.ChunkID, error) {
+	if _, err := r.collections.Get(ctx, collection); err != nil {
+		return nil, err
+	}
+	removed, err := r.docs.DeleteChunks(ctx, collection, ids)
+	if err != nil {
+		return nil, fmt.Errorf("delete chunks: %w", err)
+	}
+	if err := r.index.Delete(ctx, collection, removed); err != nil {
+		return nil, fmt.Errorf("delete vectors: %w", err)
+	}
+	return removed, nil
+}

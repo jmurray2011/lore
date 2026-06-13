@@ -1272,6 +1272,103 @@ func TestCLIRemove(t *testing.T) {
 	})
 }
 
+func TestCLIRemoveChunk(t *testing.T) {
+	qvec := []float32{1, 0, 0}
+	docID := domain.DeriveDocumentID("docs", "file:///a.md")
+
+	seed := func(t *testing.T) (cli.Deps, domain.Chunk, domain.Chunk) {
+		t.Helper()
+		deps, _, docs, index := newDeps(stubEmbedder{space: testSpace(), vec: qvec}, stubGenerator{})
+		if _, code := exec(deps, "init", "docs"); code != 0 {
+			t.Fatal("init failed")
+		}
+		ctx := context.Background()
+		doc, err := domain.NewDocument("docs", "file:///a.md", domain.HashContent([]byte("a")), time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		c0, _ := domain.NewChunk(docID, 0, "first chunk body")
+		c1, _ := domain.NewChunk(docID, 1, "second chunk body")
+		if err := docs.Upsert(ctx, doc, []domain.Chunk{c0, c1}); err != nil {
+			t.Fatal(err)
+		}
+		for _, c := range []domain.Chunk{c0, c1} {
+			if err := index.Upsert(ctx, "docs", []app.VectorEntry{{ChunkID: c.ID, Vector: qvec}}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return deps, c0, c1
+	}
+
+	t.Run("removes the named chunk, leaving the document and its other chunks", func(t *testing.T) {
+		deps, c0, c1 := seed(t)
+		out, code := exec(deps, "rm", "docs", "--chunk", string(c1.ID), "--json")
+		if code != 0 {
+			t.Fatalf("rm --chunk exit %d, out %q", code, out)
+		}
+		var v rmViewJSON
+		if err := json.Unmarshal([]byte(out), &v); err != nil {
+			t.Fatalf("bad JSON %q: %v", out, err)
+		}
+		if v.Removed != "chunks" || v.Collection != "docs" || len(v.ChunkIDs) != 1 || v.ChunkIDs[0] != string(c1.ID) {
+			t.Errorf("rm view = %+v", v)
+		}
+
+		// The document survives with only its remaining chunk.
+		catOut, code := exec(deps, "cat", "docs", "--doc", "file:///a.md", "--json")
+		if code != 0 {
+			t.Fatalf("cat exit %d", code)
+		}
+		var chunks []chunkViewJSON
+		if err := json.Unmarshal([]byte(catOut), &chunks); err != nil {
+			t.Fatal(err)
+		}
+		if len(chunks) != 1 || chunks[0].ChunkID != string(c0.ID) {
+			t.Errorf("want only c0 left, got %+v", chunks)
+		}
+	})
+
+	t.Run("--chunk and --doc together is a usage error", func(t *testing.T) {
+		deps, c0, _ := seed(t)
+		if _, code := exec(deps, "rm", "docs", "--doc", "file:///a.md", "--chunk", string(c0.ID)); code != 2 {
+			t.Errorf("want exit 2, got %d", code)
+		}
+	})
+
+	t.Run("malformed chunk ID is a usage error", func(t *testing.T) {
+		deps, _, _ := seed(t)
+		if _, code := exec(deps, "rm", "docs", "--chunk", "not-a-valid-id"); code != 2 {
+			t.Errorf("want exit 2, got %d", code)
+		}
+	})
+
+	t.Run("partial miss removes the found, warns on stderr, exits 3", func(t *testing.T) {
+		deps, c0, _ := seed(t)
+		ghost := string(domain.DeriveChunkID(docID, 99))
+		out, errOut, code := execErr(deps, "rm", "docs", "--chunk", string(c0.ID), "--chunk", ghost, "--json")
+		if code != 3 {
+			t.Fatalf("want exit 3, got %d", code)
+		}
+		var v rmViewJSON
+		if err := json.Unmarshal([]byte(out), &v); err != nil {
+			t.Fatalf("bad JSON %q: %v", out, err)
+		}
+		if len(v.ChunkIDs) != 1 || v.ChunkIDs[0] != string(c0.ID) {
+			t.Errorf("the found chunk should still be removed: %+v", v)
+		}
+		if !strings.Contains(errOut, ghost) || !strings.Contains(errOut, "not found") {
+			t.Errorf("want a per-ID warning on stderr, got %q", errOut)
+		}
+	})
+
+	t.Run("unknown collection exits 3", func(t *testing.T) {
+		deps, c0, _ := seed(t)
+		if _, code := exec(deps, "rm", "ghostcoll", "--chunk", string(c0.ID)); code != 3 {
+			t.Errorf("want exit 3, got %d", code)
+		}
+	})
+}
+
 // Mirror of the CLI's JSON output shapes, for decoding in tests.
 type collectionViewJSON struct {
 	Name       string `json:"name"`
@@ -1344,4 +1441,11 @@ type ingestViewJSON struct {
 	Skipped     int `json:"skipped"`
 	Unsupported int `json:"unsupported"`
 	Chunks      int `json:"chunks"`
+}
+
+type rmViewJSON struct {
+	Removed    string   `json:"removed"`
+	Collection string   `json:"collection"`
+	Document   string   `json:"document"`
+	ChunkIDs   []string `json:"chunk_ids"`
 }

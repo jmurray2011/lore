@@ -185,6 +185,43 @@ func (r *DocumentRepository) DeleteCollection(_ context.Context, collection stri
 	return removed, nil
 }
 
+// DeleteChunks removes the given chunks that belong to the collection, returning
+// the IDs actually removed. The owning documents are left in place (their record
+// stands even after losing chunks). IDs absent from the collection are skipped.
+func (r *DocumentRepository) DeleteChunks(_ context.Context, collection string, ids []domain.ChunkID) ([]domain.ChunkID, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	removedSet := make(map[domain.ChunkID]bool, len(ids))
+	affected := make(map[domain.DocumentID]bool)
+	var removed []domain.ChunkID
+	for _, id := range ids {
+		c, ok := r.byChunkID[id]
+		if !ok {
+			continue
+		}
+		if d, ok := r.docs[c.DocumentID]; !ok || d.Collection != collection {
+			continue // chunk belongs to another collection
+		}
+		delete(r.byChunkID, id)
+		removedSet[id] = true
+		affected[c.DocumentID] = true
+		removed = append(removed, id)
+	}
+	// Detach the removed chunks from their documents' chunk lists so a later
+	// document Delete/cascade doesn't report them again.
+	for docID := range affected {
+		kept := r.docChunks[docID][:0]
+		for _, cid := range r.docChunks[docID] {
+			if !removedSet[cid] {
+				kept = append(kept, cid)
+			}
+		}
+		r.docChunks[docID] = kept
+	}
+	return removed, nil
+}
+
 // deleteLocked removes a document and its chunks, returning the removed chunk
 // IDs. Callers must hold r.mu.
 func (r *DocumentRepository) deleteLocked(id domain.DocumentID) []domain.ChunkID {

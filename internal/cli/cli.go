@@ -233,7 +233,10 @@ type docView struct {
 }
 
 type rmView struct {
-	Removed    string `json:"removed"` // "collection" or "document"
+	Removed    string `json:"removed"` // "collection", "document", or "chunks"
 	Collection string `json:"collection"`
 	Document   string `json:"document,omitempty"`
+	// ChunkIDs lists the chunks actually removed by rm --chunk; omitted for the
+	// collection/document cases so their output is unchanged.
+	ChunkIDs []string `json:"chunk_ids,omitempty"`
 }

@@ -331,6 +331,68 @@ func RunDocumentRepositorySuite(t *testing.T, factory func(t *testing.T) app.Doc
 		}
 	})
 
+	t.Run("delete chunks removes only the named chunks, keeps the document and its other chunks", func(t *testing.T) {
+		repo := factory(t)
+		doc, chunks := newDoc(t, "docs", "file:///a.md", "alpha", 3)
+		mustUpsert(t, repo, doc, chunks)
+
+		removed, err := repo.DeleteChunks(ctx, "docs", []domain.ChunkID{chunks[1].ID})
+		if err != nil {
+			t.Fatalf("DeleteChunks: %v", err)
+		}
+		assertSameChunkIDs(t, removed, []domain.ChunkID{chunks[1].ID})
+
+		// The document record survives losing a chunk (this is sub-document
+		// redaction, not document deletion).
+		if _, err := repo.GetBySource(ctx, "docs", "file:///a.md"); err != nil {
+			t.Errorf("document must survive chunk deletion: %v", err)
+		}
+		got, err := repo.GetChunks(ctx, []domain.ChunkID{chunks[0].ID, chunks[1].ID, chunks[2].ID})
+		if err != nil {
+			t.Fatalf("GetChunks: %v", err)
+		}
+		gotIDs := make([]domain.ChunkID, len(got))
+		for i, c := range got {
+			gotIDs[i] = c.ID
+		}
+		assertSameChunkIDs(t, gotIDs, []domain.ChunkID{chunks[0].ID, chunks[2].ID})
+	})
+
+	t.Run("delete chunks skips IDs absent from the collection, removing none of them", func(t *testing.T) {
+		repo := factory(t)
+		docA, chunksA := newDoc(t, "docs", "file:///a.md", "alpha", 1)
+		docB, chunksB := newDoc(t, "notes", "file:///b.md", "beta", 1)
+		mustUpsert(t, repo, docA, chunksA)
+		mustUpsert(t, repo, docB, chunksB)
+
+		unknown := domain.DeriveChunkID(domain.DeriveDocumentID("docs", "file:///ghost.md"), 0)
+		removed, err := repo.DeleteChunks(ctx, "docs", []domain.ChunkID{chunksB[0].ID, unknown})
+		if err != nil {
+			t.Fatalf("DeleteChunks: %v", err)
+		}
+		if len(removed) != 0 {
+			t.Errorf("must not remove cross-collection or unknown chunks, removed %v", removed)
+		}
+		got, err := repo.GetChunks(ctx, []domain.ChunkID{chunksB[0].ID})
+		if err != nil {
+			t.Fatalf("GetChunks: %v", err)
+		}
+		if len(got) != 1 {
+			t.Errorf("a chunk in another collection must be untouched, got %d", len(got))
+		}
+	})
+
+	t.Run("delete chunks on an unknown collection removes nothing, no error", func(t *testing.T) {
+		repo := factory(t)
+		doc, chunks := newDoc(t, "docs", "file:///a.md", "alpha", 1)
+		mustUpsert(t, repo, doc, chunks)
+
+		removed, err := repo.DeleteChunks(ctx, "ghost", []domain.ChunkID{chunks[0].ID})
+		if err != nil || len(removed) != 0 {
+			t.Errorf("unknown collection: want empty/nil, got %v / %v", removed, err)
+		}
+	})
+
 	t.Run("stored chunks are independent of the caller's slice", func(t *testing.T) {
 		repo := factory(t)
 		doc, chunks := newDoc(t, "docs", "file:///a.md", "alpha", 2)

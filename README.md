@@ -62,6 +62,7 @@ lore docs notes                                        # list ingested documents
 lore cat notes --doc file:///abs/path/to/report.pdf  # print a document's stored chunks
 lore cat notes --chunk 3f2a…9c --chunk 7b1e…04        # print specific chunks by ID
 lore rm notes --doc file:///abs/path/to/report.pdf   # one document
+lore rm notes --chunk 3f2a…9c --chunk 7b1e…04        # specific chunks by ID
 lore rm notes                                          # whole collection
 ```
 
@@ -114,6 +115,24 @@ usage error (exit 2); a well-formed but absent one warns on stderr, still prints
 the chunks that were found, and exits 3. `--expand` and `--explain` are
 orthogonal to each other, to `--source`, and to `--strict` (strict still
 hard-errors on an ungrounded question before either runs).
+
+To delete a specific chunk rather than read it — e.g. a passage that should no
+longer be retrievable — use `rm --chunk` (the write-side counterpart of
+`cat --chunk`):
+
+```bash
+# remove specific chunks by ID (repeatable); the rest of the document stays
+lore rm notes --chunk 3f2a…9c --chunk 7b1e…04
+lore rm notes --chunk 3f2a…9c --json          # {removed: "chunks", chunk_ids: [...]}
+```
+
+`rm --chunk` and `rm --doc` are mutually exclusive; ID validation and the
+missing-ID behavior match `cat --chunk` (malformed → exit 2; some absent →
+stderr warning, the found ones still removed, exit 3). It deletes the chunk and
+its vector from the index, **not** from the source document — re-ingesting that
+source (`add`/`sync`) re-chunks it and brings the text back. For permanent
+redaction, also remove or edit the source, or drop the whole document with
+`rm --doc`.
 
 ## Supported document formats
 
