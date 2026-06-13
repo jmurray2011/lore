@@ -94,6 +94,42 @@ func TestCollectionAcceptsSpace(t *testing.T) {
 	})
 }
 
+func TestSameSpace(t *testing.T) {
+	now := time.Now()
+	other := domain.EmbeddingSpace{Model: "other-model", Dimensions: 4}
+	mk := func(name string, space domain.EmbeddingSpace) *domain.Collection {
+		c, err := domain.NewCollection(name, space, testSpec, now)
+		if err != nil {
+			t.Fatalf("NewCollection(%q): %v", name, err)
+		}
+		return c
+	}
+
+	t.Run("zero, one, or all-matching collections are accepted", func(t *testing.T) {
+		for _, colls := range [][]*domain.Collection{
+			nil,
+			{mk("a", testSpace)},
+			{mk("a", testSpace), mk("b", testSpace), mk("c", testSpace)},
+		} {
+			if err := domain.SameSpace(colls); err != nil {
+				t.Errorf("len %d: unexpected error: %v", len(colls), err)
+			}
+		}
+	})
+
+	t.Run("a divergent space is rejected, naming the offenders", func(t *testing.T) {
+		err := domain.SameSpace([]*domain.Collection{mk("base", testSpace), mk("odd", other)})
+		if !errors.Is(err, domain.ErrSpaceMismatch) {
+			t.Fatalf("want ErrSpaceMismatch, got %v", err)
+		}
+		for _, want := range []string{"base", "odd", testSpace.String(), other.String()} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q should name %q", err, want)
+			}
+		}
+	})
+}
+
 func TestCollectionAcceptsChunker(t *testing.T) {
 	c, err := domain.NewCollection("docs", testSpace, testSpec, time.Now())
 	if err != nil {

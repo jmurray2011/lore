@@ -40,6 +40,27 @@ func NewCollection(name string, space EmbeddingSpace, chunker ChunkerSpec, now t
 	return &Collection{Name: name, Space: space, Chunker: chunker, CreatedAt: now}, nil
 }
 
+// SameSpace enforces invariant 1 across a set of collections: their vectors are
+// directly comparable only if every collection shares one EmbeddingSpace. It is
+// the precondition for any cross-collection retrieval — feeding one collection's
+// vectors into another (query --from-collection) or merging hits from several
+// (multi-collection ask/query) — and returns ErrSpaceMismatch naming the first
+// offending collection (and both spaces) on a divergence. Zero or one collection
+// trivially shares a space.
+func SameSpace(colls []*Collection) error {
+	if len(colls) < 2 {
+		return nil
+	}
+	base := colls[0]
+	for _, c := range colls[1:] {
+		if !c.Space.Equal(base.Space) {
+			return fmt.Errorf("collections %q (%s) and %q (%s) are in different embedding spaces; their vectors are not comparable: %w",
+				base.Name, base.Space, c.Name, c.Space, ErrSpaceMismatch)
+		}
+	}
+	return nil
+}
+
 // AcceptsSpace enforces invariant 1 (space coherence): vectors may enter the
 // collection only if they were produced in the collection's own space.
 func (c *Collection) AcceptsSpace(s EmbeddingSpace) error {
