@@ -40,7 +40,7 @@ func newSynthesizeCmd(deps *Deps) *cobra.Command {
 			}
 			citations := make([]citationView, len(ans.Citations))
 			for i, c := range ans.Citations {
-				citations[i] = citationView{ChunkID: string(c.ChunkID), Source: c.Source, Seq: c.Seq}
+				citations[i] = citationView{ChunkID: string(c.ChunkID), Source: c.Source, Seq: c.Seq, Collection: c.Collection}
 			}
 			view := answerView{Text: ans.Text, Citations: citations, Grounded: ans.Grounded}
 			return render(cmd, view, answerMarkdown(ans))
@@ -69,9 +69,10 @@ func readHits(r io.Reader) ([]domain.ChunkHit, error) {
 	hits := make([]domain.ChunkHit, len(views))
 	for i, v := range views {
 		hits[i] = domain.ChunkHit{
-			Chunk:  domain.Chunk{ID: domain.ChunkID(v.ChunkID), Seq: v.Seq, Text: v.Text},
-			Score:  v.Score,
-			Source: v.Source,
+			Chunk:      domain.Chunk{ID: domain.ChunkID(v.ChunkID), Seq: v.Seq, Text: v.Text},
+			Score:      v.Score,
+			Source:     v.Source,
+			Collection: v.Collection,
 		}
 	}
 	return hits, nil

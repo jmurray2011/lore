@@ -163,6 +163,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			Rerank:  reranker,
 			Remove:  remover,
 			Tokens:  counter,
+			Export:  app.NewExporter(store.collections, store.docs, store.index),
+			Import:  app.NewImporter(store.collections, store.docs, store.index, remover),
 		}, nil
 	}
 

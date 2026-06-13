@@ -290,7 +290,7 @@ func groundingSet(hits []domain.ChunkHit) []domain.Citation {
 // citation builds a Citation carrying a hit's chunk identity and source
 // provenance.
 func citation(h domain.ChunkHit) domain.Citation {
-	return domain.Citation{ChunkID: h.Chunk.ID, Source: h.Source, Seq: h.Chunk.Seq}
+	return domain.Citation{ChunkID: h.Chunk.ID, Source: h.Source, Seq: h.Chunk.Seq, Collection: h.Collection}
 }
 
 func userPrompt(question string, hits []domain.ChunkHit) string {

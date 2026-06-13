@@ -168,6 +168,19 @@ func (f *fakeIndex) Search(_ context.Context, collection string, query []float32
 	return f.matches[collection], nil
 }
 
+func (f *fakeIndex) Entries(_ context.Context, collection string) ([]app.VectorEntry, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.searchErr != nil {
+		return nil, f.searchErr
+	}
+	out := make([]app.VectorEntry, 0, len(f.upserted[collection]))
+	for id, vec := range f.upserted[collection] {
+		out = append(out, app.VectorEntry{ChunkID: id, Vector: vec})
+	}
+	return out, nil
+}
+
 func (f *fakeIndex) Delete(_ context.Context, collection string, ids []domain.ChunkID) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

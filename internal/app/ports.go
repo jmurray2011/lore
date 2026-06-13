@@ -105,6 +105,11 @@ type VectorEntry struct {
 type VectorIndex interface {
 	Upsert(ctx context.Context, collection string, entries []VectorEntry) error
 	Search(ctx context.Context, collection string, query []float32, k int) ([]domain.VectorMatch, error)
+	// Entries returns every stored (ChunkID, Vector) for the collection, in
+	// unspecified order, as copies the caller may retain. An unknown collection
+	// yields no entries and no error (mirrors Search). It feeds a collection's
+	// own vectors back as queries (query --from-collection) without re-embedding.
+	Entries(ctx context.Context, collection string) ([]VectorEntry, error)
 	Delete(ctx context.Context, collection string, ids []domain.ChunkID) error
 }
 

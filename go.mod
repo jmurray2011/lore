@@ -5,16 +5,18 @@ go 1.25.11
 require golang.org/x/sync v0.19.0
 
 require (
+	filippo.io/age v1.3.1
 	github.com/BurntSushi/toml v1.6.0
 	github.com/charmbracelet/glamour v1.0.0
 	github.com/ledongthuc/pdf v0.0.0-20250511090121-5959a4027728
 	github.com/spf13/cobra v1.10.2
 	github.com/tiktoken-go/tokenizer v0.7.0
-	golang.org/x/term v0.36.0
+	golang.org/x/term v0.37.0
 	modernc.org/sqlite v1.46.2
 )
 
 require (
+	filippo.io/hpke v0.4.0 // indirect
 	github.com/alecthomas/chroma/v2 v2.20.0 // indirect
 	github.com/aymanbagabas/go-osc52/v2 v2.0.1 // indirect
 	github.com/aymerick/douceur v0.2.0 // indirect
@@ -42,9 +44,10 @@ require (
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	github.com/yuin/goldmark v1.7.13 // indirect
 	github.com/yuin/goldmark-emoji v1.0.6 // indirect
-	golang.org/x/net v0.38.0 // indirect
+	golang.org/x/crypto v0.45.0 // indirect
+	golang.org/x/net v0.47.0 // indirect
 	golang.org/x/sys v0.42.0 // indirect
-	golang.org/x/text v0.30.0 // indirect
+	golang.org/x/text v0.31.0 // indirect
 	modernc.org/libc v1.70.0 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -23,20 +24,33 @@ func newQueryCmd(deps *Deps) *cobra.Command {
 		rerank     bool
 		candidates int
 		budget     int
+		fromColl   string
+		collFlags  []string
 	)
 	cmd := &cobra.Command{
-		Use:   "query <collection> <query>",
+		Use:   "query [collection] <query>",
 		Short: "Retrieve the most similar chunks",
+		Long: "Retrieve the chunks most similar to <query> from one or more collections.\n\n" +
+			"Target several same-space collections with repeatable -c/--collection; their hits " +
+			"merge into one ranked top-k, each tagged with its origin collection.\n\n" +
+			"With --from-collection, the named collection's own stored vectors are used as the " +
+			"queries (no re-embedding) and results are grouped by source chunk — for finding where " +
+			"two collections overlap or diverge.",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if len(args) != 2 {
-				return fmt.Errorf("%w: query takes <collection> and a query string", domain.ErrInvalidArgument)
+			if fromColl != "" {
+				return runQueryFrom(cmd, deps, args, fromColl, collFlags, k, source)
 			}
-			queryText, err := argOrStdin(cmd, args[1])
+
+			collections, queryText, err := resolveCollectionArgs(args, collFlags, "query", "query string")
+			if err != nil {
+				return err
+			}
+			queryText, err = argOrStdin(cmd, queryText)
 			if err != nil {
 				return err
 			}
 
-			hits, runnerUp, err := resolveHits(cmd, deps, args[0], queryText, k, candidates, source, rerank, explain)
+			hits, runnerUp, err := resolveHits(cmd, deps, collections, queryText, k, candidates, source, rerank, explain)
 			if err != nil {
 				return err
 			}
@@ -63,7 +77,27 @@ func newQueryCmd(deps *Deps) *cobra.Command {
 	cmd.Flags().BoolVar(&rerank, "rerank", false, "two-stage retrieval: vector-search a wide pool, then rerank to the top -k")
 	cmd.Flags().IntVar(&candidates, "rerank-candidates", 50, "size of the pre-rerank vector candidate pool (must be >= -k)")
 	cmd.Flags().IntVar(&budget, "budget", 0, "cap the returned set to this many tokens (after ranking; trims within -k)")
+	cmd.Flags().StringVar(&fromColl, "from-collection", "", "use this collection's stored vectors as the queries (no re-embedding), grouping hits by source chunk")
+	cmd.Flags().StringArrayVarP(&collFlags, "collection", "c", nil, "additional collection to search; repeatable (results merge across same-space collections)")
 	return cmd
+}
+
+// runQueryFrom handles `query <target> --from-collection <source>`: the target
+// is the sole positional, there is no query text (and no stdin), and -c is not
+// allowed — the source collection's stored vectors are the queries.
+func runQueryFrom(cmd *cobra.Command, deps *Deps, args []string, fromColl string, collFlags []string, k int, source string) error {
+	if len(collFlags) > 0 {
+		return fmt.Errorf("%w: --from-collection cannot be combined with -c/--collection", domain.ErrInvalidArgument)
+	}
+	if len(args) != 1 {
+		return fmt.Errorf("%w: query --from-collection takes the target <collection> and no query text", domain.ErrInvalidArgument)
+	}
+	groups, err := deps.Query.QueryFrom(cmd.Context(), args[0], fromColl, k, source)
+	if err != nil {
+		return err
+	}
+	views, md := fromQueryViews(groups)
+	return render(cmd, views, md)
 }
 
 // budgetTrim limits ranked hits to a cumulative token budget, applied after
@@ -88,12 +122,14 @@ func budgetTrim(hits []domain.ChunkHit, budget int, counter app.TokenCounter) ([
 	return out, total
 }
 
-// resolveHits performs retrieval for query and ask: a plain top-k vector search,
-// or — with --rerank — two-stage retrieval (a wide vector candidate pool reranked
-// to the final top-k). It returns the hits plus, for --explain, the runner-up
+// resolveHits performs retrieval for query and ask, over one or many collections:
+// a plain top-k vector search, or — with --rerank — two-stage retrieval (a wide
+// vector candidate pool reranked to the final top-k). With more than one
+// collection the candidates are merged across them by score (each carrying its
+// origin collection). It returns the hits plus, for --explain, the runner-up
 // score (the best candidate just outside the returned set, by whichever ordering
 // is in effect — rerank score when reranking, similarity otherwise).
-func resolveHits(cmd *cobra.Command, deps *Deps, collection, queryText string, k, candidates int, source string, rerank, explain bool) ([]domain.ChunkHit, *float64, error) {
+func resolveHits(cmd *cobra.Command, deps *Deps, collections []string, queryText string, k, candidates int, source string, rerank, explain bool) ([]domain.ChunkHit, *float64, error) {
 	if rerank {
 		if deps.Rerank == nil {
 			return nil, nil, errRerankUnconfigured()
@@ -101,7 +137,7 @@ func resolveHits(cmd *cobra.Command, deps *Deps, collection, queryText string, k
 		if candidates < k {
 			return nil, nil, fmt.Errorf("%w: --rerank-candidates (%d) must be >= -k (%d)", domain.ErrInvalidArgument, candidates, k)
 		}
-		pool, err := deps.Query.Query(cmd.Context(), collection, queryText, candidates, source)
+		pool, err := queryHits(cmd, deps, collections, queryText, candidates, source)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -126,14 +162,67 @@ func resolveHits(cmd *cobra.Command, deps *Deps, collection, queryText string, k
 		return reranked, runnerUp, nil
 	}
 	if explain {
-		ret, err := deps.Query.Explain(cmd.Context(), collection, queryText, k, source)
+		ret, err := explainHits(cmd, deps, collections, queryText, k, source)
 		if err != nil {
 			return nil, nil, err
 		}
 		return ret.Hits, nextScorePtr(ret), nil
 	}
-	hits, err := deps.Query.Query(cmd.Context(), collection, queryText, k, source)
+	hits, err := queryHits(cmd, deps, collections, queryText, k, source)
 	return hits, nil, err
+}
+
+// queryHits retrieves the top-k hits for one collection (the byte-for-byte
+// legacy path) or merges across several same-space collections.
+func queryHits(cmd *cobra.Command, deps *Deps, collections []string, queryText string, k int, source string) ([]domain.ChunkHit, error) {
+	if len(collections) > 1 {
+		return deps.Query.QueryAcross(cmd.Context(), collections, queryText, k, source)
+	}
+	return deps.Query.Query(cmd.Context(), collections[0], queryText, k, source)
+}
+
+// explainHits is queryHits' --explain twin: it also surfaces the runner-up just
+// outside the returned top-k, single- or multi-collection.
+func explainHits(cmd *cobra.Command, deps *Deps, collections []string, queryText string, k int, source string) (app.Retrieval, error) {
+	if len(collections) > 1 {
+		return deps.Query.ExplainAcross(cmd.Context(), collections, queryText, k, source)
+	}
+	return deps.Query.Explain(cmd.Context(), collections[0], queryText, k, source)
+}
+
+// resolveCollectionArgs derives the target collection set and the query/question
+// text from the positional args and any repeatable -c flags. The legacy form is
+// `<collection> <text>` (two positionals, no -c); with -c the collection may be
+// omitted, leaving just `<text>`. The positional collection (if present) and the
+// -c values are unioned and deduplicated, so a single collection — whether a bare
+// positional or one -c — routes through the unchanged single-collection path.
+func resolveCollectionArgs(args, collFlags []string, cmdName, textName string) (collections []string, text string, err error) {
+	switch {
+	case len(args) == 2:
+		collections = append(collections, args[0])
+		text = args[1]
+	case len(args) == 1 && len(collFlags) > 0:
+		text = args[0]
+	default:
+		return nil, "", fmt.Errorf("%w: %s takes a %s and at least one collection (a positional <collection> or -c/--collection)", domain.ErrInvalidArgument, cmdName, textName)
+	}
+	collections = dedupStrings(append(collections, collFlags...))
+	return collections, text, nil
+}
+
+// dedupStrings returns the input with duplicates removed, preserving first-seen
+// order.
+func dedupStrings(in []string) []string {
+	seen := make(map[string]bool, len(in))
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		if seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	return out
 }
 
 // errRerankUnconfigured is the usage error (exit 2) for requesting reranking
@@ -149,7 +238,7 @@ func hitViews(hits []domain.ChunkHit) ([]hitView, string) {
 	views := make([]hitView, len(hits))
 	var b strings.Builder
 	for i, h := range hits {
-		views[i] = hitView{ChunkID: string(h.Chunk.ID), Source: h.Source, Seq: h.Chunk.Seq, Score: h.Score, RerankScore: h.RerankScore, Text: h.Chunk.Text}
+		views[i] = hitView{ChunkID: string(h.Chunk.ID), Source: h.Source, Seq: h.Chunk.Seq, Score: h.Score, RerankScore: h.RerankScore, Collection: h.Collection, Text: h.Chunk.Text}
 		if i > 0 {
 			b.WriteString("\n---\n\n")
 		}
@@ -160,6 +249,31 @@ func hitViews(hits []domain.ChunkHit) ([]hitView, string) {
 		fmt.Fprintf(&b, "**[%d]**  %s  ·  %s\n\n%s\n", i+1, hitLabel(h), score, h.Chunk.Text)
 	}
 	return views, strings.TrimRight(b.String(), "\n")
+}
+
+// fromQueryViews builds the JSON groups and human Markdown for query
+// --from-collection: one block per source chunk, headed by the source chunk's
+// provenance, with its target hits in the standard hit format.
+func fromQueryViews(groups []app.FromQuery) ([]fromGroupView, string) {
+	views := make([]fromGroupView, len(groups))
+	var b strings.Builder
+	for i, g := range groups {
+		hv, hmd := hitViews(g.Hits)
+		views[i] = fromGroupView{
+			From: fromRef{ChunkID: string(g.From.Chunk.ID), Source: g.From.Source, Seq: g.From.Chunk.Seq},
+			Hits: hv,
+		}
+		if i > 0 {
+			b.WriteString("\n\n")
+		}
+		fmt.Fprintf(&b, "**from** %s\n\n", fromLabel(g.From))
+		if hmd == "" {
+			b.WriteString("_no matching chunks_")
+		} else {
+			b.WriteString(hmd)
+		}
+	}
+	return views, b.String()
 }
 
 // writeQueryExplain emits the explain diagnostics to stderr: a JSON {explain:...}
@@ -199,22 +313,30 @@ func newAskCmd(deps *Deps) *cobra.Command {
 		rerank     bool
 		candidates int
 		budget     int
+		collFlags  []string
 	)
 	cmd := &cobra.Command{
-		Use:   "ask <collection> <question>",
+		Use:   "ask [collection] <question>",
 		Short: "Answer a question grounded in the collection's chunks",
+		Long: "Synthesize an answer to <question> grounded in retrieved chunks.\n\n" +
+			"Target several same-space collections with repeatable -c/--collection; their hits " +
+			"merge into one ranked grounding set and citations identify each chunk's origin " +
+			"collection. Composes with --rerank, --budget, and --explain over the merged set.",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if len(args) != 2 {
-				return fmt.Errorf("%w: ask takes <collection> and a question", domain.ErrInvalidArgument)
-			}
 			attachments, err := loadAttachments(attach)
 			if err != nil {
 				return err
 			}
-			question, err := argOrStdin(cmd, args[1])
+			collections, question, err := resolveCollectionArgs(args, collFlags, "ask", "question")
 			if err != nil {
 				return err
 			}
+			question, err = argOrStdin(cmd, question)
+			if err != nil {
+				return err
+			}
+			multi := len(collections) > 1
+			collLabel := strings.Join(collections, ", ")
 			var (
 				ans       app.Answer
 				ret       app.Retrieval
@@ -222,13 +344,13 @@ func newAskCmd(deps *Deps) *cobra.Command {
 				groundTok *int
 			)
 			switch {
-			case rerank || budget > 0:
-				// Interpose between retrieval and synthesis: resolve hits (optionally
-				// two-stage via --rerank), cap them to the token --budget, then
-				// synthesize. Uses Synthesize (the documented seam) and replicates
-				// Ask's strict guard, which Synthesize lacks.
+			case rerank || budget > 0 || multi:
+				// Interpose between retrieval and synthesis: resolve hits (across
+				// collections and/or two-stage via --rerank), cap them to the token
+				// --budget, then synthesize. Uses Synthesize (the documented seam) and
+				// replicates Ask's strict guard, which Synthesize lacks.
 				var hits []domain.ChunkHit
-				hits, runnerUp, err = resolveHits(cmd, deps, args[0], question, k, candidates, source, rerank, explain)
+				hits, runnerUp, err = resolveHits(cmd, deps, collections, question, k, candidates, source, rerank, explain)
 				if err != nil {
 					return err
 				}
@@ -238,15 +360,15 @@ func newAskCmd(deps *Deps) *cobra.Command {
 					groundTok = &tokens
 				}
 				if len(hits) == 0 && len(attachments) == 0 && strict {
-					return fmt.Errorf("ask %q: %w: no chunks matched and no attachments supplied", args[0], app.ErrNoGrounding)
+					return fmt.Errorf("ask %q: %w: no chunks matched and no attachments supplied", collLabel, app.ErrNoGrounding)
 				}
 				ans, err = deps.Ask.Synthesize(cmd.Context(), question, hits, attachments)
 				ret.Hits = hits
 			case explain:
-				ans, ret, err = deps.Ask.AskExplain(cmd.Context(), args[0], question, k, attachments, strict, source)
+				ans, ret, err = deps.Ask.AskExplain(cmd.Context(), collections[0], question, k, attachments, strict, source)
 				runnerUp = nextScorePtr(ret)
 			default:
-				ans, err = deps.Ask.Ask(cmd.Context(), args[0], question, k, attachments, strict, source)
+				ans, err = deps.Ask.Ask(cmd.Context(), collections[0], question, k, attachments, strict, source)
 			}
 			if err != nil {
 				return err // strict's ErrNoGrounding short-circuits here, before any expansion or explain output
@@ -256,11 +378,11 @@ func newAskCmd(deps *Deps) *cobra.Command {
 				// Warn on stderr so pipes keep clean stdout while a human or CI
 				// log still sees it. --strict turns this into an error instead.
 				_, _ = fmt.Fprintf(cmd.ErrOrStderr(),
-					"lore: warning: no chunks matched and no attachments; the answer for %q is not grounded (use --strict to fail instead)\n", args[0])
+					"lore: warning: no chunks matched and no attachments; the answer for %q is not grounded (use --strict to fail instead)\n", collLabel)
 			}
 			citations := make([]citationView, len(ans.Citations))
 			for i, c := range ans.Citations {
-				citations[i] = citationView{ChunkID: string(c.ChunkID), Source: c.Source, Seq: c.Seq}
+				citations[i] = citationView{ChunkID: string(c.ChunkID), Source: c.Source, Seq: c.Seq, Collection: c.Collection}
 			}
 			view := answerView{Text: ans.Text, Citations: citations, Grounded: ans.Grounded, GroundingTokens: groundTok}
 			if budget > 0 && groundTok != nil {
@@ -273,7 +395,7 @@ func newAskCmd(deps *Deps) *cobra.Command {
 			if expand {
 				textByChunk := map[domain.ChunkID]string{}
 				if ids := citedChunkIDs(ans); len(ids) > 0 {
-					chunks, err := deps.Catalog.ChunksByIDs(cmd.Context(), args[0], ids)
+					chunks, err := expansionChunks(cmd.Context(), deps.Catalog, ans.Citations, collections, multi)
 					if err != nil {
 						return err
 					}
@@ -316,7 +438,44 @@ func newAskCmd(deps *Deps) *cobra.Command {
 	cmd.Flags().BoolVar(&rerank, "rerank", false, "two-stage retrieval: vector-search a wide pool, then rerank to the top -k before synthesis")
 	cmd.Flags().IntVar(&candidates, "rerank-candidates", 50, "size of the pre-rerank vector candidate pool (must be >= -k)")
 	cmd.Flags().IntVar(&budget, "budget", 0, "cap grounding to this many tokens (after ranking/rerank; trims within -k)")
+	cmd.Flags().StringArrayVarP(&collFlags, "collection", "c", nil, "additional collection to ground on; repeatable (merges across same-space collections)")
 	return cmd
+}
+
+// expansionChunks fetches the text of the answer's cited chunks for --expand.
+// Single-collection answers query the one collection (byte-for-byte the prior
+// behavior); cross-collection answers group the citations by their origin
+// collection and query each, returning the chunks in citation order.
+func expansionChunks(ctx context.Context, cat *app.Catalog, citations []domain.Citation, collections []string, multi bool) ([]domain.Chunk, error) {
+	if !multi {
+		ids := make([]string, len(citations))
+		for i, c := range citations {
+			ids[i] = string(c.ChunkID)
+		}
+		return cat.ChunksByIDs(ctx, collections[0], ids)
+	}
+
+	byColl := map[string][]string{}
+	for _, c := range citations {
+		byColl[c.Collection] = append(byColl[c.Collection], string(c.ChunkID))
+	}
+	found := make(map[domain.ChunkID]domain.Chunk, len(citations))
+	for coll, ids := range byColl {
+		chunks, err := cat.ChunksByIDs(ctx, coll, ids)
+		if err != nil {
+			return nil, err
+		}
+		for _, ch := range chunks {
+			found[ch.ID] = ch
+		}
+	}
+	out := make([]domain.Chunk, 0, len(citations))
+	for _, c := range citations {
+		if ch, ok := found[c.ChunkID]; ok {
+			out = append(out, ch)
+		}
+	}
+	return out, nil
 }
 
 // argOrStdin returns arg unchanged, or the trimmed contents of stdin when arg is
@@ -333,12 +492,27 @@ func argOrStdin(cmd *cobra.Command, arg string) (string, error) {
 }
 
 // hitLabel renders a hit's provenance for human output: "file.docx · chunk 3"
-// when the source is known, falling back to the opaque chunk ID otherwise.
+// when the source is known, prefixed with the origin collection for
+// cross-collection results, falling back to the opaque chunk ID otherwise.
 func hitLabel(h domain.ChunkHit) string {
 	if h.Source == "" {
 		return string(h.Chunk.ID)
 	}
-	return fmt.Sprintf("%s · chunk %d", shortLabel(h.Source), h.Chunk.Seq)
+	label := fmt.Sprintf("%s · chunk %d", shortLabel(h.Source), h.Chunk.Seq)
+	if h.Collection != "" {
+		label = h.Collection + " · " + label
+	}
+	return label
+}
+
+// fromLabel renders the source chunk heading a query --from-collection group:
+// "source-basename#seq · chunkID", or the bare chunk ID when the source is
+// unknown.
+func fromLabel(h domain.ChunkHit) string {
+	if h.Source == "" {
+		return fmt.Sprintf("`%s`", h.Chunk.ID)
+	}
+	return fmt.Sprintf("`%s#%d`  ·  `%s`", shortLabel(h.Source), h.Chunk.Seq, h.Chunk.ID)
 }
 
 // loadAttachments reads each path into an Attachment, detecting its media type
