@@ -77,9 +77,14 @@ type VectorMatch struct {
 // means the hit was never reranked, so it serializes additively (rerank_score
 // omitted) and the original Score is always preserved alongside it.
 type ChunkHit struct {
-	Chunk       Chunk
-	Score       float64
-	Source      string // source URI of the chunk's document
+	Chunk  Chunk
+	Score  float64
+	Source string // source URI of the chunk's document
+	// Collection names the collection the chunk came from. It is empty for
+	// single-collection retrieval (where it is implied by the request) and set
+	// only for cross-collection results (multi-collection query/ask), so the
+	// merged hits stay attributable to their origin.
+	Collection  string
 	RerankScore *float64
 }
 
@@ -90,4 +95,8 @@ type Citation struct {
 	ChunkID ChunkID
 	Source  string // source URI of the chunk's document
 	Seq     int    // the chunk's position within that document
+	// Collection names the chunk's collection, set only for cross-collection
+	// answers (multi-collection ask) so a citation stays attributable to its
+	// origin; empty for single-collection answers.
+	Collection string
 }

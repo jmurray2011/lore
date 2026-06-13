@@ -32,6 +32,9 @@ type Deps struct {
 	Remove *app.Remover
 	// Tokens counts tokens for --budget token-bounded retrieval (query/ask).
 	Tokens app.TokenCounter
+	// Export and Import move a collection to/from a single portable artifact file.
+	Export *app.Exporter
+	Import *app.Importer
 }
 
 // GlobalOptions are the resolved global flags the composition root needs to
@@ -106,6 +109,8 @@ func NewRootCommand(build Builder, version string, out, errOut io.Writer) *cobra
 		newAskCmd(&deps),
 		newSynthesizeCmd(&deps),
 		newRerankCmd(&deps),
+		newExportCmd(&deps),
+		newImportCmd(&deps),
 		newRmCmd(&deps),
 	)
 	return root
@@ -206,7 +211,27 @@ type hitView struct {
 	// RerankScore is present only on hits that went through a reranker; omitempty
 	// keeps the schema additive for query/synthesize consumers that never rerank.
 	RerankScore *float64 `json:"rerank_score,omitempty"`
-	Text        string   `json:"text"`
+	// Collection names the hit's origin collection, set only for cross-collection
+	// (multi-collection) queries; omitempty keeps single-collection output
+	// byte-for-byte unchanged.
+	Collection string `json:"collection,omitempty"`
+	Text       string `json:"text"`
+}
+
+// fromRef identifies the source chunk a query --from-collection group was driven
+// by: its chunk ID, source URI, and position. It carries enough provenance to
+// trace each group back to the chunk whose vector produced it.
+type fromRef struct {
+	ChunkID string `json:"chunk_id"`
+	Source  string `json:"source"`
+	Seq     int    `json:"seq"`
+}
+
+// fromGroupView is one query --from-collection result: the source chunk and the
+// target hits its vector retrieved. The hits reuse the standard hit schema.
+type fromGroupView struct {
+	From fromRef   `json:"from"`
+	Hits []hitView `json:"hits"`
 }
 
 type chunkView struct {
@@ -222,6 +247,10 @@ type citationView struct {
 	ChunkID string `json:"chunk_id"`
 	Source  string `json:"source"`
 	Seq     int    `json:"seq"`
+	// Collection names the cited chunk's origin collection, set only for
+	// cross-collection answers; omitempty keeps single-collection output
+	// byte-for-byte unchanged.
+	Collection string `json:"collection,omitempty"`
 }
 
 type answerView struct {
@@ -274,6 +303,18 @@ type docView struct {
 	Source     string `json:"source"`
 	Hash       string `json:"hash"`
 	IngestedAt string `json:"ingested_at"`
+}
+
+// transferView is the export/import summary. Encrypted reports whether the
+// artifact was/is age-encrypted; Output (export only) is the destination path.
+type transferView struct {
+	Collection string `json:"collection"`
+	Model      string `json:"model"`
+	Dimensions int    `json:"dimensions"`
+	Documents  int    `json:"documents"`
+	Chunks     int    `json:"chunks"`
+	Encrypted  bool   `json:"encrypted"`
+	Output     string `json:"output,omitempty"`
 }
 
 type rmView struct {
