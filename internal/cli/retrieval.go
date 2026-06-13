@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"mime"
@@ -10,13 +11,15 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/jmurray2011/lore/internal/app"
 	"github.com/jmurray2011/lore/internal/domain"
 )
 
 func newQueryCmd(deps *Deps) *cobra.Command {
 	var (
-		k      int
-		source string
+		k       int
+		source  string
+		explain bool
 	)
 	cmd := &cobra.Command{
 		Use:   "query <collection> <query>",
@@ -29,10 +32,21 @@ func newQueryCmd(deps *Deps) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			hits, err := deps.Query.Query(cmd.Context(), args[0], queryText, k, source)
+
+			var (
+				hits []domain.ChunkHit
+				ret  app.Retrieval
+			)
+			if explain {
+				ret, err = deps.Query.Explain(cmd.Context(), args[0], queryText, k, source)
+				hits = ret.Hits
+			} else {
+				hits, err = deps.Query.Query(cmd.Context(), args[0], queryText, k, source)
+			}
 			if err != nil {
 				return err
 			}
+
 			views := make([]hitView, len(hits))
 			var b strings.Builder
 			for i, h := range hits {
@@ -42,12 +56,47 @@ func newQueryCmd(deps *Deps) *cobra.Command {
 				}
 				fmt.Fprintf(&b, "**[%d]**  %s  ·  `%.4f`\n\n%s\n", i+1, hitLabel(h), h.Score, h.Chunk.Text)
 			}
-			return render(cmd, views, strings.TrimRight(b.String(), "\n"))
+			if err := render(cmd, views, strings.TrimRight(b.String(), "\n")); err != nil {
+				return err
+			}
+			// query's stdout is the bare hit array (the synthesize contract), so
+			// --explain diagnostics go to stderr — JSON when --json, else text.
+			if explain {
+				return writeQueryExplain(cmd, buildExplain(hits, nextScorePtr(ret), nil))
+			}
+			return nil
 		},
 	}
 	cmd.Flags().IntVarP(&k, "top-k", "k", 8, "number of chunks to retrieve")
 	cmd.Flags().StringVar(&source, "source", "", "restrict to documents whose source matches this glob (e.g. '*.pdf')")
+	cmd.Flags().BoolVar(&explain, "explain", false, "print the score distribution (top-k + the best rejected candidate) to stderr")
 	return cmd
+}
+
+// writeQueryExplain emits the explain diagnostics to stderr: a JSON {explain:...}
+// object under --json, otherwise the human text block. Stderr keeps query's
+// stdout (the hit array) clean for the synthesize pipe.
+func writeQueryExplain(cmd *cobra.Command, ev explainView) error {
+	w := cmd.ErrOrStderr()
+	if asJSON, _ := cmd.Flags().GetBool("json"); asJSON {
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(struct {
+			Explain explainView `json:"explain"`
+		}{ev})
+	}
+	_, err := io.WriteString(w, explainText(ev))
+	return err
+}
+
+// nextScorePtr returns the runner-up score as a pointer, or nil when there was
+// no further candidate (so --json renders next_score: null).
+func nextScorePtr(ret app.Retrieval) *float64 {
+	if !ret.HasNext {
+		return nil
+	}
+	s := ret.NextScore
+	return &s
 }
 
 func newAskCmd(deps *Deps) *cobra.Command {
@@ -74,7 +123,15 @@ func newAskCmd(deps *Deps) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			ans, hits, err := deps.Ask.AskExplain(cmd.Context(), args[0], question, k, attachments, strict, source)
+			var (
+				ans app.Answer
+				ret app.Retrieval
+			)
+			if explain {
+				ans, ret, err = deps.Ask.AskExplain(cmd.Context(), args[0], question, k, attachments, strict, source)
+			} else {
+				ans, err = deps.Ask.Ask(cmd.Context(), args[0], question, k, attachments, strict, source)
+			}
 			if err != nil {
 				return err // strict's ErrNoGrounding short-circuits here, before any expansion or explain output
 			}
@@ -110,16 +167,22 @@ func newAskCmd(deps *Deps) *cobra.Command {
 				md = expandedSources(ans, textByChunk)
 			}
 
-			// --explain: report the chunks that grounded the answer, their scores,
-			// and which the answer cited — orthogonal to --expand and --source.
+			// --explain: report the score distribution of the chunks that grounded
+			// the answer, plus the runner-up, annotated with which were cited.
+			// Orthogonal to --expand and --source. JSON carries it inside the
+			// answer object; human output puts it on stderr so a piped answer
+			// (stdout) stays clean.
 			if explain {
-				cited := citedSet(ans)
-				rows := make([]retrievalHitView, len(hits)) // non-nil → json "[]" when empty
-				for i, h := range hits {
-					rows[i] = retrievalHitView{Rank: i + 1, ChunkID: string(h.Chunk.ID), Source: h.Source, Seq: h.Chunk.Seq, Score: h.Score, Cited: cited[h.Chunk.ID]}
+				ev := buildExplain(ret.Hits, nextScorePtr(ret), citedSet(ans))
+				if asJSON, _ := cmd.Flags().GetBool("json"); asJSON {
+					view.Explain = &ev
+					return render(cmd, view, md)
 				}
-				view.Retrieval = &rows
-				md += "\n\n" + retrievalMarkdown(hits, cited)
+				if err := render(cmd, view, md); err != nil {
+					return err
+				}
+				_, err := io.WriteString(cmd.ErrOrStderr(), explainText(ev))
+				return err
 			}
 
 			return render(cmd, view, md)

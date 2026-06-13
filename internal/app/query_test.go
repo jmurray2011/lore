@@ -195,4 +195,49 @@ func TestQuerier(t *testing.T) {
 			t.Errorf("want ErrSpaceMismatch, got %v", err)
 		}
 	})
+
+	c2 := mustChunk(t, docID, 2, "gamma text")
+
+	t.Run("Explain surfaces the runner-up (k+1th) score and fetches one extra", func(t *testing.T) {
+		idx := &fakeIndex{matches: map[string][]domain.VectorMatch{
+			"docs": {{ChunkID: c1.ID, Score: 0.9}, {ChunkID: c0.ID, Score: 0.5}, {ChunkID: c2.ID, Score: 0.3}},
+		}}
+		docs := &fakeDocs{chunks: map[domain.ChunkID]domain.Chunk{c0.ID: c0, c1.ID: c1, c2.ID: c2}}
+		emb := &fakeEmbedder{space: space, byText: map[string][]float32{"q": {1, 0, 0}}}
+		q := newQuerier(idx, docs, emb)
+
+		ret, err := q.Explain(ctx, "docs", "q", 2, "")
+		if err != nil {
+			t.Fatalf("Explain: %v", err)
+		}
+		if len(ret.Hits) != 2 || ret.Hits[0].Chunk.ID != c1.ID || ret.Hits[1].Chunk.ID != c0.ID {
+			t.Fatalf("returned hits wrong: %+v", ret.Hits)
+		}
+		if !ret.HasNext || ret.NextScore != 0.3 {
+			t.Errorf("want runner-up 0.3, got HasNext=%v NextScore=%v", ret.HasNext, ret.NextScore)
+		}
+		if idx.gotK != 3 {
+			t.Errorf("Explain should fetch k+1=3, searched k=%d", idx.gotK)
+		}
+	})
+
+	t.Run("Explain reports no runner-up when there is no further candidate", func(t *testing.T) {
+		idx := &fakeIndex{matches: map[string][]domain.VectorMatch{
+			"docs": {{ChunkID: c1.ID, Score: 0.9}, {ChunkID: c0.ID, Score: 0.5}},
+		}}
+		docs := &fakeDocs{chunks: map[domain.ChunkID]domain.Chunk{c0.ID: c0, c1.ID: c1}}
+		emb := &fakeEmbedder{space: space, byText: map[string][]float32{"q": {1, 0, 0}}}
+		q := newQuerier(idx, docs, emb)
+
+		ret, err := q.Explain(ctx, "docs", "q", 2, "")
+		if err != nil {
+			t.Fatalf("Explain: %v", err)
+		}
+		if len(ret.Hits) != 2 {
+			t.Fatalf("want 2 hits, got %d", len(ret.Hits))
+		}
+		if ret.HasNext {
+			t.Errorf("want no runner-up, got NextScore=%v", ret.NextScore)
+		}
+	})
 }

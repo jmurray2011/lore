@@ -656,9 +656,9 @@ func TestCLIAsk(t *testing.T) {
 	if strings.Contains(out, "expansions") {
 		t.Errorf("--json without --expand must not include an expansions key: %s", out)
 	}
-	// Likewise --explain off: no retrieval key.
-	if strings.Contains(out, "retrieval") {
-		t.Errorf("--json without --explain must not include a retrieval key: %s", out)
+	// Likewise --explain off: no explain key.
+	if strings.Contains(out, "explain") {
+		t.Errorf("--json without --explain must not include an explain key: %s", out)
 	}
 }
 
@@ -843,26 +843,9 @@ func TestCLIAskExplain(t *testing.T) {
 		return deps
 	}
 
-	t.Run("human output appends a Retrieval section with scores and a cited mark", func(t *testing.T) {
+	t.Run("--json carries explain inside the answer object, with cited + runner-up", func(t *testing.T) {
 		deps := seed(t, 1) // model cites only the first (highest-scoring) hit
-		out, code := exec(deps, "ask", "docs", "anything", "-k", "2", "--explain")
-		if code != 0 {
-			t.Fatalf("exit %d, out %q", code, out)
-		}
-		if !strings.Contains(out, "Retrieval") {
-			t.Errorf("missing Retrieval section:\n%s", out)
-		}
-		if !strings.Contains(out, "d0.md") || !strings.Contains(out, "d1.md") {
-			t.Errorf("Retrieval should list both retrieved chunks' sources:\n%s", out)
-		}
-		if !strings.Contains(out, "✓") {
-			t.Errorf("the cited hit should carry a cited mark:\n%s", out)
-		}
-	})
-
-	t.Run("--json carries a retrieval array with rank/score/cited, fields intact", func(t *testing.T) {
-		deps := seed(t, 1)
-		out, code := exec(deps, "ask", "docs", "anything", "-k", "2", "--explain", "--json")
+		out, code := exec(deps, "ask", "docs", "anything", "-k", "1", "--explain", "--json")
 		if code != 0 {
 			t.Fatalf("exit %d, out %q", code, out)
 		}
@@ -873,59 +856,190 @@ func TestCLIAskExplain(t *testing.T) {
 		if ans.Text != "the answer" || len(ans.Citations) != 1 || !ans.Grounded {
 			t.Errorf("existing fields disturbed: %+v", ans)
 		}
-		if len(ans.Retrieval) != 2 {
-			t.Fatalf("want 2 retrieval rows, got %d (%+v)", len(ans.Retrieval), ans.Retrieval)
+		if ans.Explain == nil || len(ans.Explain.Returned) != 1 {
+			t.Fatalf("want explain with 1 returned hit, got %+v", ans.Explain)
 		}
-		if ans.Retrieval[0].Rank != 1 || ans.Retrieval[1].Rank != 2 {
-			t.Errorf("ranks should be 1,2 best-first: %+v", ans.Retrieval)
+		if c := ans.Explain.Returned[0].Cited; c == nil || !*c {
+			t.Errorf("the single returned hit was cited; want cited=true, got %v", c)
 		}
-		if ans.Retrieval[0].Score <= ans.Retrieval[1].Score {
-			t.Errorf("scores should descend by rank: %+v", ans.Retrieval)
+		if ans.Explain.NextScore == nil {
+			t.Errorf("with 2 chunks and -k 1 there is a runner-up; next_score should be set")
 		}
-		if !ans.Retrieval[0].Cited || ans.Retrieval[1].Cited {
-			t.Errorf("only the first (cited) hit should be marked cited: %+v", ans.Retrieval)
-		}
-		if ans.Retrieval[0].ChunkID == "" || !strings.Contains(ans.Retrieval[0].Source, "d0.md") {
-			t.Errorf("retrieval row missing provenance: %+v", ans.Retrieval[0])
+		if !strings.Contains(ans.Explain.Returned[0].Source, "d0.md") {
+			t.Errorf("returned provenance wrong: %+v", ans.Explain.Returned[0])
 		}
 	})
 
-	t.Run("composes with --expand: both Sources and Retrieval appear", func(t *testing.T) {
+	t.Run("human puts the explain block on stderr, keeping stdout the answer only", func(t *testing.T) {
+		deps := seed(t, 1)
+		out, errOut, code := execErr(deps, "ask", "docs", "anything", "-k", "2", "--explain")
+		if code != 0 {
+			t.Fatalf("exit %d", code)
+		}
+		if !strings.Contains(out, "the answer") || strings.Contains(out, "retrieval:") {
+			t.Errorf("stdout should be just the answer, no explain block:\n%s", out)
+		}
+		if !strings.Contains(errOut, "retrieval:") || !strings.Contains(errOut, "d0.md") {
+			t.Errorf("explain block should be on stderr:\n%s", errOut)
+		}
+		// d0 cited, d1 not (citeFirst=1) — both annotations present.
+		if !strings.Contains(errOut, "cited") || !strings.Contains(errOut, "uncited") {
+			t.Errorf("stderr should mark cited vs uncited hits:\n%s", errOut)
+		}
+	})
+
+	t.Run("composes with --expand: Sources on stdout, explain on stderr", func(t *testing.T) {
 		deps := seed(t, 0) // cite all
-		out, code := exec(deps, "ask", "docs", "anything", "-k", "2", "--expand", "--explain")
+		out, errOut, code := execErr(deps, "ask", "docs", "anything", "-k", "1", "--expand", "--explain")
 		if code != 0 {
 			t.Fatalf("exit %d, out %q", code, out)
 		}
-		if !strings.Contains(out, "Sources:") || !strings.Contains(out, "Retrieval") {
-			t.Errorf("expand+explain should show both blocks:\n%s", out)
+		if !strings.Contains(out, "Sources:") {
+			t.Errorf("expand block should be on stdout:\n%s", out)
+		}
+		if !strings.Contains(errOut, "retrieval:") {
+			t.Errorf("explain block should be on stderr:\n%s", errOut)
 		}
 	})
 
-	t.Run("ungrounded question reports an empty retrieval array, not absent", func(t *testing.T) {
-		deps, _, _, _ := newDeps(stubEmbedder{space: testSpace(), vec: qvec}, stubGenerator{text: "guess"})
-		if _, code := exec(deps, "init", "empty"); code != 0 {
-			t.Fatal("init failed")
-		}
-		out, _, code := execErr(deps, "ask", "empty", "anything", "--explain", "--json")
+	t.Run("composes with --source: explain scoped to the matching document", func(t *testing.T) {
+		deps := seed(t, 0)
+		out, code := exec(deps, "ask", "docs", "anything", "-k", "2", "--source", "d0.md", "--explain", "--json")
 		if code != 0 {
-			t.Fatalf("non-strict ungrounded should exit 0, got %d", code)
+			t.Fatalf("exit %d, out %q", code, out)
 		}
-		if !strings.Contains(out, "\"retrieval\": []") {
-			t.Errorf("--explain with no hits should emit an explicit empty retrieval array:\n%s", out)
+		var ans answerViewJSON
+		if err := json.Unmarshal([]byte(out), &ans); err != nil {
+			t.Fatalf("bad JSON %q: %v", out, err)
+		}
+		if ans.Explain == nil || len(ans.Explain.Returned) != 1 || !strings.Contains(ans.Explain.Returned[0].Source, "d0.md") {
+			t.Errorf("--source should scope explain to d0.md: %+v", ans.Explain)
 		}
 	})
 
-	t.Run("--strict still errors before explain", func(t *testing.T) {
+	t.Run("--strict still errors before any explain output", func(t *testing.T) {
 		deps, _, _, _ := newDeps(stubEmbedder{space: testSpace(), vec: qvec}, stubGenerator{text: "x"})
 		if _, code := exec(deps, "init", "empty"); code != 0 {
 			t.Fatal("init failed")
 		}
-		out, code := exec(deps, "ask", "empty", "anything", "--strict", "--explain")
+		out, errOut, code := execErr(deps, "ask", "empty", "anything", "--strict", "--explain")
 		if code != 1 {
 			t.Errorf("strict + ungrounded should exit 1, got %d", code)
 		}
-		if strings.Contains(out, "Retrieval") {
-			t.Errorf("strict must error before any explain output:\n%s", out)
+		if strings.Contains(out, "explain") || strings.Contains(errOut, "retrieval:") {
+			t.Errorf("strict must error before any explain output:\nstdout=%s\nstderr=%s", out, errOut)
+		}
+	})
+}
+
+func TestCLIQueryExplain(t *testing.T) {
+	qvec := []float32{1, 0, 0}
+
+	// d0 (alpha) cosine-matches the query; d1 (beta) is orthogonal — so order is
+	// deterministic and there's a clear runner-up at -k 1.
+	seed := func(t *testing.T) cli.Deps {
+		t.Helper()
+		deps, _, docs, index := newDeps(stubEmbedder{space: testSpace(), vec: qvec}, stubGenerator{})
+		if _, code := exec(deps, "init", "docs"); code != 0 {
+			t.Fatal("init failed")
+		}
+		ctx := context.Background()
+		for i, spec := range []struct {
+			body string
+			vec  []float32
+		}{
+			{"alpha chunk body", []float32{1, 0, 0}},
+			{"beta chunk body", []float32{0, 1, 0}},
+		} {
+			uri := fmt.Sprintf("file:///d%d.md", i)
+			did := domain.DeriveDocumentID("docs", uri)
+			doc, err := domain.NewDocument("docs", uri, domain.HashContent([]byte(uri)), time.Now())
+			if err != nil {
+				t.Fatal(err)
+			}
+			ch, err := domain.NewChunk(did, 0, spec.body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := docs.Upsert(ctx, doc, []domain.Chunk{ch}); err != nil {
+				t.Fatal(err)
+			}
+			if err := index.Upsert(ctx, "docs", []app.VectorEntry{{ChunkID: ch.ID, Vector: spec.vec}}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return deps
+	}
+
+	t.Run("human: hits on stdout, score distribution on stderr with a runner-up", func(t *testing.T) {
+		deps := seed(t)
+		out, errOut, code := execErr(deps, "query", "docs", "anything", "-k", "1", "--explain")
+		if code != 0 {
+			t.Fatalf("exit %d", code)
+		}
+		if !strings.Contains(out, "alpha chunk body") || strings.Contains(out, "retrieval:") {
+			t.Errorf("stdout should be the hits only:\n%s", out)
+		}
+		if !strings.Contains(errOut, "retrieval:") || !strings.Contains(errOut, "next candidate") {
+			t.Errorf("explain distribution should be on stderr:\n%s", errOut)
+		}
+	})
+
+	t.Run("--json: stdout stays the bare hit array; explain JSON on stderr", func(t *testing.T) {
+		deps := seed(t)
+		out, errOut, code := execErr(deps, "query", "docs", "anything", "-k", "1", "--explain", "--json")
+		if code != 0 {
+			t.Fatalf("exit %d", code)
+		}
+		// stdout must remain exactly the hit-array contract (synthesize reads it).
+		var hits []hitViewJSON
+		if err := json.Unmarshal([]byte(out), &hits); err != nil {
+			t.Fatalf("stdout is not the bare hit array: %v\n%s", err, out)
+		}
+		if len(hits) != 1 || strings.Contains(out, "explain") {
+			t.Errorf("stdout should be 1 hit and carry no explain key: %s", out)
+		}
+		// stderr carries the explain object with a runner-up next_score.
+		var env struct {
+			Explain explainViewJSON `json:"explain"`
+		}
+		if err := json.Unmarshal([]byte(errOut), &env); err != nil {
+			t.Fatalf("stderr is not an explain JSON object: %v\n%s", err, errOut)
+		}
+		if len(env.Explain.Returned) != 1 || env.Explain.NextScore == nil {
+			t.Errorf("explain should have 1 returned hit and a runner-up: %+v", env.Explain)
+		}
+		// query explain omits cited (no answer to cite from).
+		if env.Explain.Returned[0].Cited != nil {
+			t.Errorf("query explain must not carry a cited flag: %+v", env.Explain.Returned[0])
+		}
+	})
+
+	t.Run("no runner-up when k covers every candidate", func(t *testing.T) {
+		deps := seed(t)
+		_, errOut, code := execErr(deps, "query", "docs", "anything", "-k", "5", "--explain", "--json")
+		if code != 0 {
+			t.Fatalf("exit %d", code)
+		}
+		var env struct {
+			Explain explainViewJSON `json:"explain"`
+		}
+		if err := json.Unmarshal([]byte(errOut), &env); err != nil {
+			t.Fatalf("bad explain JSON: %v\n%s", err, errOut)
+		}
+		if env.Explain.NextScore != nil {
+			t.Errorf("k=5 over 2 chunks: no runner-up, want next_score null, got %v", *env.Explain.NextScore)
+		}
+	})
+
+	t.Run("no --explain: nothing on stderr", func(t *testing.T) {
+		deps := seed(t)
+		_, errOut, code := execErr(deps, "query", "docs", "anything", "-k", "1")
+		if code != 0 {
+			t.Fatalf("exit %d", code)
+		}
+		if strings.Contains(errOut, "retrieval:") || strings.Contains(errOut, "explain") {
+			t.Errorf("without --explain stderr should be clean:\n%s", errOut)
 		}
 	})
 }
@@ -1422,18 +1536,24 @@ type answerViewJSON struct {
 		Source  string `json:"source"`
 		Seq     int    `json:"seq"`
 	} `json:"citations"`
-	Grounded   bool                   `json:"grounded"`
-	Expansions []chunkViewJSON        `json:"expansions"`
-	Retrieval  []retrievalHitViewJSON `json:"retrieval"`
+	Grounded   bool             `json:"grounded"`
+	Expansions []chunkViewJSON  `json:"expansions"`
+	Explain    *explainViewJSON `json:"explain"`
 }
 
-type retrievalHitViewJSON struct {
-	Rank    int     `json:"rank"`
-	ChunkID string  `json:"chunk_id"`
-	Source  string  `json:"source"`
-	Seq     int     `json:"seq"`
-	Score   float64 `json:"score"`
-	Cited   bool    `json:"cited"`
+type explainViewJSON struct {
+	Returned []struct {
+		Score  float64 `json:"score"`
+		Source string  `json:"source"`
+		Seq    int     `json:"seq"`
+		Cited  *bool   `json:"cited"`
+	} `json:"returned"`
+	NextScore *float64 `json:"next_score"`
+	Stats     struct {
+		Min  float64 `json:"min"`
+		Max  float64 `json:"max"`
+		Mean float64 `json:"mean"`
+	} `json:"stats"`
 }
 
 type ingestViewJSON struct {

@@ -97,22 +97,11 @@ lore cat notes --chunk 3f2a…9c --json        # same {chunk_id, seq, text} shap
 # numbered with the same [n] the answer used
 lore ask notes "what is our key rotation policy?" --expand
 lore ask notes "…" --expand --json           # answer object gains an "expansions": [...] array
-
-# explain why the answer looks the way it does: list the chunks that grounded
-# it, their similarity scores, and which the answer cited
-lore ask notes "what is our key rotation policy?" --explain
-lore ask notes "…" --explain --json           # answer object gains a "retrieval": [...] array
 ```
-
-When an answer disappoints, `--explain` tells you which failure you're looking
-at: uniformly low scores mean retrieval found nothing relevant (raise `-k`,
-re-scope `--source`, or ingest more), while a high-scoring chunk left uncited
-means the model ignored good context (a synthesis problem). It reports scores,
-not chunk text — pair it with `--expand` to see both.
 
 `cat --chunk` and `cat --doc` are mutually exclusive. A malformed chunk ID is a
 usage error (exit 2); a well-formed but absent one warns on stderr, still prints
-the chunks that were found, and exits 3. `--expand` and `--explain` are
+the chunks that were found, and exits 3. `--expand` (and `--explain`, below) are
 orthogonal to each other, to `--source`, and to `--strict` (strict still
 hard-errors on an ungrounded question before either runs).
 
@@ -133,6 +122,37 @@ its vector from the index, **not** from the source document — re-ingesting tha
 source (`add`/`sync`) re-chunks it and brings the text back. For permanent
 redaction, also remove or edit the source, or drop the whole document with
 `rm --doc`.
+
+## Retrieval diagnostics (`--explain`)
+
+When an answer is bad, `--explain` tells you *whose* fault it is — retrieval or
+synthesis — by surfacing the similarity-score distribution: the scores of the
+returned chunks plus the score of the best candidate you *didn't* return (the
+k+1th runner-up).
+
+```bash
+lore query notes "key rotation" -k 5 --explain     # distribution → stderr
+lore ask   notes "key rotation policy?" --explain   # distribution → stderr, annotated with which chunks the answer cited
+lore query notes "key rotation" -k 5 --explain --json   # stderr: { "explain": {returned, next_score, stats} }
+lore ask   notes "…" --explain --json                   # answer object gains an "explain" key
+```
+
+How to read it:
+
+- **Every score is low** (and the runner-up is no better) → *retrieval is
+  starving*: nothing in the corpus is relevant. Fix retrieval — raise `-k`,
+  re-scope `--source`, improve chunking, or reach for `--rerank` (below).
+- **A chunk scores high but the answer ignored it** (`ask --explain` marks it
+  `uncited`) → *synthesis problem*: the model had the context and didn't use it.
+  Fix the prompt or model, not retrieval.
+- **The runner-up (`next_score`) is nearly as high as the last returned hit** →
+  your `-k` cutoff is arbitrary; you're likely dropping relevant chunks.
+
+Diagnostics always go to **stderr** (as text, or JSON with `--json`) for
+`query`, so stdout stays the bare hit array that `synthesize` consumes; for
+`ask`, the JSON `explain` rides inside the answer object while the human block
+goes to stderr — either way a piped answer or hit list stays clean. `--explain`
+adds no model calls; it only fetches one extra candidate (k+1) for the runner-up.
 
 ## Supported document formats
 
