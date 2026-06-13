@@ -139,6 +139,17 @@ type Generator interface {
 	Synthesize(ctx context.Context, question string, hits []domain.ChunkHit, attachments []domain.Attachment) (Answer, error)
 }
 
+// StreamingGenerator is an optional capability a Generator may implement: it
+// emits the answer's prose incrementally via onDelta (called in order, once per
+// token or chunk) while still returning the complete Answer — the full text and
+// citations a caller needs for the post-answer sources, --json, and caching. A
+// generator that cannot stream a given request (structured-output mode, or a
+// cache hit) may call onDelta once with the whole text. Callers detect support
+// with a type assertion; the CLI uses it only for interactive streaming.
+type StreamingGenerator interface {
+	SynthesizeStream(ctx context.Context, question string, hits []domain.ChunkHit, attachments []domain.Attachment, onDelta func(string)) (Answer, error)
+}
+
 // AnswerCache stores synthesized answers keyed by an opaque content hash, for
 // reuse across runs (each lore invocation is a fresh process, so this must be
 // persistent to pay off). It is deliberately time-explicit: the TTL policy lives

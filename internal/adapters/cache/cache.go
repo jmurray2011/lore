@@ -31,8 +31,11 @@ type Generator struct {
 	now   func() time.Time
 }
 
-// compile-time port check
-var _ app.Generator = (*Generator)(nil)
+// compile-time port checks
+var (
+	_ app.Generator          = (*Generator)(nil)
+	_ app.StreamingGenerator = (*Generator)(nil)
+)
 
 // NewGenerator wraps inner so its answers are cached in store. salt scopes the
 // cache to a model/prompt identity; ttl bounds how long an entry stays fresh;
@@ -62,6 +65,45 @@ func (g *Generator) Synthesize(ctx context.Context, question string, hits []doma
 	// Best-effort: a cache write/prune failure must not fail the answer.
 	_ = g.cache.Put(ctx, key, ans, now)
 	_ = g.cache.Prune(ctx, now.Add(-g.ttl))
+	return ans, nil
+}
+
+// SynthesizeStream serves a cached answer in one whole-text delta when one
+// exists for the same question and grounding within the TTL (a hit is instant —
+// nothing to stream); otherwise it streams from the inner generator and caches
+// the result. Attachment-bearing requests bypass the cache, like Synthesize.
+func (g *Generator) SynthesizeStream(ctx context.Context, question string, hits []domain.ChunkHit, attachments []domain.Attachment, onDelta func(string)) (app.Answer, error) {
+	if len(attachments) > 0 {
+		return g.streamInner(ctx, question, hits, attachments, onDelta)
+	}
+
+	now := g.now()
+	key := g.key(question, hits)
+	if ans, ok, err := g.cache.Get(ctx, key, now.Add(-g.ttl)); err == nil && ok {
+		onDelta(ans.Text) // instant: the whole cached answer at once
+		return ans, nil
+	}
+
+	ans, err := g.streamInner(ctx, question, hits, attachments, onDelta)
+	if err != nil {
+		return ans, err
+	}
+	_ = g.cache.Put(ctx, key, ans, now)
+	_ = g.cache.Prune(ctx, now.Add(-g.ttl))
+	return ans, nil
+}
+
+// streamInner streams from the inner generator when it supports streaming, else
+// buffers a single Synthesize and emits the whole answer in one delta.
+func (g *Generator) streamInner(ctx context.Context, question string, hits []domain.ChunkHit, attachments []domain.Attachment, onDelta func(string)) (app.Answer, error) {
+	if s, ok := g.inner.(app.StreamingGenerator); ok {
+		return s.SynthesizeStream(ctx, question, hits, attachments, onDelta)
+	}
+	ans, err := g.inner.Synthesize(ctx, question, hits, attachments)
+	if err != nil {
+		return app.Answer{}, err
+	}
+	onDelta(ans.Text)
 	return ans, nil
 }
 

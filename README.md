@@ -213,6 +213,28 @@ lore query kb "controls" -k 20 --budget 1500 --json       # top-20, capped to 15
 - `ask --json` reports the grounding set's token count as `grounding_tokens`;
   `query` reports it on stderr (its stdout stays the bare hit array).
 
+## Streaming answers
+
+On an interactive terminal `lore ask` streams the answer's tokens as they
+arrive, so a slow (cache-missing) synthesis feels live instead of dead. Piped or
+with `--json` it buffers and emits the whole answer at once — the same
+TTY-vs-pipe split the color rendering uses, so scripts and the JSON contract are
+unaffected.
+
+```bash
+lore ask kb "how do we deploy?"               # streams on a TTY
+lore ask kb "how do we deploy?" --no-stream   # buffered + rich Markdown instead
+lore ask kb "how do we deploy?" --stream | …  # force streaming even when piped
+```
+
+Because tokens print as they arrive, a streamed answer is raw text: it keeps the
+model's own inline `[n]` markers, followed by a `Sources` list keyed to those
+numbers — rather than the glamour-rendered, re-numbered form the buffered path
+produces (you can't restyle text already printed). `--no-stream` restores the
+buffered, rich-rendered output. Cached answers and `--json` are never streamed (a
+cache hit is already instant), and with provider structured-output enabled the
+answer is delivered whole (its JSON can't stream as prose).
+
 ## Cross-collection retrieval
 
 Collections are independent corpora, but vectors from collections that share an

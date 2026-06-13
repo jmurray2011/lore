@@ -8,6 +8,7 @@ import (
 	"mime"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -304,16 +305,18 @@ func nextScorePtr(ret app.Retrieval) *float64 {
 
 func newAskCmd(deps *Deps) *cobra.Command {
 	var (
-		k          int
-		attach     []string
-		strict     bool
-		source     string
-		expand     bool
-		explain    bool
-		rerank     bool
-		candidates int
-		budget     int
-		collFlags  []string
+		k            int
+		attach       []string
+		strict       bool
+		source       string
+		expand       bool
+		explain      bool
+		rerank       bool
+		candidates   int
+		budget       int
+		collFlags    []string
+		streamFlag   bool
+		noStreamFlag bool
 	)
 	cmd := &cobra.Command{
 		Use:   "ask [collection] <question>",
@@ -335,20 +338,26 @@ func newAskCmd(deps *Deps) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			stream, err := wantStream(cmd, streamFlag, noStreamFlag)
+			if err != nil {
+				return err
+			}
 			multi := len(collections) > 1
 			collLabel := strings.Join(collections, ", ")
 			var (
-				ans       app.Answer
-				ret       app.Retrieval
-				runnerUp  *float64
-				groundTok *int
+				ans         app.Answer
+				ret         app.Retrieval
+				runnerUp    *float64
+				groundTok   *int
+				streamed    bool
+				streamedRaw string
 			)
 			switch {
-			case rerank || budget > 0 || multi:
+			case rerank || budget > 0 || multi || stream:
 				// Interpose between retrieval and synthesis: resolve hits (across
 				// collections and/or two-stage via --rerank), cap them to the token
-				// --budget, then synthesize. Uses Synthesize (the documented seam) and
-				// replicates Ask's strict guard, which Synthesize lacks.
+				// --budget, then synthesize — streaming the prose when enabled. Uses
+				// the Synthesize seam and replicates Ask's strict guard, which it lacks.
 				var hits []domain.ChunkHit
 				hits, runnerUp, err = resolveHits(cmd, deps, collections, question, k, candidates, source, rerank, explain)
 				if err != nil {
@@ -362,7 +371,18 @@ func newAskCmd(deps *Deps) *cobra.Command {
 				if len(hits) == 0 && len(attachments) == 0 && strict {
 					return fmt.Errorf("ask %q: %w: no chunks matched and no attachments supplied", collLabel, app.ErrNoGrounding)
 				}
-				ans, err = deps.Ask.Synthesize(cmd.Context(), question, hits, attachments)
+				if stream {
+					var raw strings.Builder
+					w := cmd.OutOrStdout()
+					ans, err = deps.Ask.SynthesizeStream(cmd.Context(), question, hits, attachments, func(tok string) {
+						raw.WriteString(tok)
+						_, _ = io.WriteString(w, tok)
+					})
+					streamed = true
+					streamedRaw = raw.String()
+				} else {
+					ans, err = deps.Ask.Synthesize(cmd.Context(), question, hits, attachments)
+				}
 				ret.Hits = hits
 			case explain:
 				ans, ret, err = deps.Ask.AskExplain(cmd.Context(), collections[0], question, k, attachments, strict, source)
@@ -379,6 +399,12 @@ func newAskCmd(deps *Deps) *cobra.Command {
 				// log still sees it. --strict turns this into an error instead.
 				_, _ = fmt.Fprintf(cmd.ErrOrStderr(),
 					"lore: warning: no chunks matched and no attachments; the answer for %q is not grounded (use --strict to fail instead)\n", collLabel)
+			}
+			if streamed {
+				// The prose is already on stdout; append the sources (and, under
+				// --explain, the stderr diagnostics) and we are done. --json never
+				// streams, so there is no JSON view to build here.
+				return finishStreamed(cmd, ans, ret.Hits, streamedRaw, expand, explain, runnerUp)
 			}
 			citations := make([]citationView, len(ans.Citations))
 			for i, c := range ans.Citations {
@@ -439,7 +465,82 @@ func newAskCmd(deps *Deps) *cobra.Command {
 	cmd.Flags().IntVar(&candidates, "rerank-candidates", 50, "size of the pre-rerank vector candidate pool (must be >= -k)")
 	cmd.Flags().IntVar(&budget, "budget", 0, "cap grounding to this many tokens (after ranking/rerank; trims within -k)")
 	cmd.Flags().StringArrayVarP(&collFlags, "collection", "c", nil, "additional collection to ground on; repeatable (merges across same-space collections)")
+	cmd.Flags().BoolVar(&streamFlag, "stream", false, "stream the answer's tokens as they arrive (forced on; the default on an interactive terminal)")
+	cmd.Flags().BoolVar(&noStreamFlag, "no-stream", false, "disable streaming; buffer and render the full answer (restores rich Markdown output)")
 	return cmd
+}
+
+// wantStream decides whether to stream the answer: never under --json (it is
+// structured data) or --no-stream; forced by --stream; otherwise on by default
+// when stdout is an interactive terminal — mirroring the TTY detection used for
+// rich rendering. --stream and --no-stream together is a usage error.
+func wantStream(cmd *cobra.Command, stream, noStream bool) (bool, error) {
+	if stream && noStream {
+		return false, fmt.Errorf("%w: --stream and --no-stream are mutually exclusive", domain.ErrInvalidArgument)
+	}
+	if noStream {
+		return false, nil
+	}
+	if asJSON, _ := cmd.Flags().GetBool("json"); asJSON {
+		return false, nil
+	}
+	if stream {
+		return true, nil
+	}
+	return isTerminal(cmd.OutOrStdout()), nil
+}
+
+// finishStreamed completes a streamed answer. The prose is already on stdout, so
+// it appends a Sources block keyed to the model's inline [n] ordinals (the
+// streamed text keeps them — the buffered path's appearance-renumbering cannot
+// apply to text already printed), optionally with each cited chunk's full text
+// under --expand, and the --explain diagnostics on stderr.
+func finishStreamed(cmd *cobra.Command, ans app.Answer, hits []domain.ChunkHit, raw string, expand, explain bool, runnerUp *float64) error {
+	out := cmd.OutOrStdout()
+	if src := streamSourcesBlock(raw, hits, expand); src != "" {
+		_, _ = fmt.Fprintf(out, "\n\n%s\n", src)
+	} else {
+		_, _ = io.WriteString(out, "\n")
+	}
+	if explain {
+		ev := buildExplain(hits, runnerUp, citedSet(ans))
+		_, err := io.WriteString(cmd.ErrOrStderr(), explainText(ev))
+		return err
+	}
+	return nil
+}
+
+// streamSourcesBlock renders the Sources for a streamed answer by mapping the
+// model's inline [n] ordinals (1-based into hits, first-appearance order) to
+// their sources — the streamed prose keeps those numbers. With expand it also
+// prints each cited chunk's full text (taken from the hits, which carry it).
+func streamSourcesBlock(raw string, hits []domain.ChunkHit, expand bool) string {
+	seen := make(map[int]bool)
+	var order []int
+	for _, m := range citeRefRE.FindAllStringSubmatch(raw, -1) {
+		for _, part := range strings.Split(m[1], ",") {
+			n, err := strconv.Atoi(strings.TrimSpace(part))
+			if err != nil || n < 1 || n > len(hits) || seen[n] {
+				continue
+			}
+			seen[n] = true
+			order = append(order, n)
+		}
+	}
+	if len(order) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("## Sources\n")
+	for _, n := range order {
+		h := hits[n-1]
+		if expand {
+			fmt.Fprintf(&b, "\n[%d] (%s) — %s#%d\n\n%s\n", n, shortLabel(h.Source), h.Source, h.Chunk.Seq, h.Chunk.Text)
+		} else {
+			fmt.Fprintf(&b, "[%d] %s · chunk %d\n", n, shortLabel(h.Source), h.Chunk.Seq)
+		}
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 // expansionChunks fetches the text of the answer's cited chunks for --expand.

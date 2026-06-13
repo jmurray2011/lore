@@ -65,6 +65,84 @@ func (s stubGenerator) Synthesize(_ context.Context, _ string, hits []domain.Chu
 	return app.Answer{Text: s.text, Citations: cites}, nil
 }
 
+// stubStreamingGen implements app.StreamingGenerator, emitting its answer
+// word-by-word so a CLI test can observe streamed tokens reach stdout.
+type stubStreamingGen struct{ text string }
+
+func (s stubStreamingGen) Synthesize(_ context.Context, _ string, _ []domain.ChunkHit, _ []domain.Attachment) (app.Answer, error) {
+	return app.Answer{Text: s.text}, nil
+}
+
+func (s stubStreamingGen) SynthesizeStream(_ context.Context, _ string, _ []domain.ChunkHit, _ []domain.Attachment, onDelta func(string)) (app.Answer, error) {
+	for i, w := range strings.Fields(s.text) {
+		if i > 0 {
+			onDelta(" ")
+		}
+		onDelta(w)
+	}
+	return app.Answer{Text: s.text}, nil
+}
+
+func TestCLIAskStream(t *testing.T) {
+	qvec := []float32{1, 0, 0}
+	seed := func(t *testing.T, gen app.Generator) cli.Deps {
+		t.Helper()
+		deps, _, docs, index := newDeps(stubEmbedder{space: testSpace(), vec: qvec}, gen)
+		if _, code := exec(deps, "init", "kb"); code != 0 {
+			t.Fatal("init failed")
+		}
+		seedChunk(t, docs, index, "kb", "file:///a.md", 0, "the grounded passage", qvec)
+		return deps
+	}
+
+	t.Run("--stream emits tokens then a Sources block", func(t *testing.T) {
+		deps := seed(t, stubStreamingGen{text: "the grounded answer [1] indeed"})
+		out, code := exec(deps, "ask", "kb", "why?", "-k", "1", "--stream")
+		if code != 0 {
+			t.Fatalf("exit %d, out %q", code, out)
+		}
+		if !strings.Contains(out, "the grounded answer [1] indeed") {
+			t.Errorf("streamed prose missing from stdout: %q", out)
+		}
+		if !strings.Contains(out, "## Sources") || !strings.Contains(out, "[1] a.md · chunk 0") {
+			t.Errorf("Sources block (keyed to the model's [1]) missing: %q", out)
+		}
+	})
+
+	t.Run("--stream and --no-stream together is a usage error", func(t *testing.T) {
+		deps := seed(t, stubStreamingGen{text: "x [1]"})
+		if _, code := exec(deps, "ask", "kb", "q", "--stream", "--no-stream"); code != 2 {
+			t.Errorf("want exit 2, got %d", code)
+		}
+	})
+
+	t.Run("--json suppresses streaming and returns a buffered answer object", func(t *testing.T) {
+		deps := seed(t, stubStreamingGen{text: "buffered [1]"})
+		out, code := exec(deps, "ask", "kb", "q", "-k", "1", "--stream", "--json")
+		if code != 0 {
+			t.Fatalf("exit %d, out %q", code, out)
+		}
+		var ans answerViewJSON
+		if err := json.Unmarshal([]byte(out), &ans); err != nil {
+			t.Fatalf("--json should still emit a JSON answer, got %q: %v", out, err)
+		}
+		if ans.Text != "buffered [1]" {
+			t.Errorf("answer text = %q", ans.Text)
+		}
+	})
+
+	t.Run("a non-streaming generator falls back to one whole-text emission", func(t *testing.T) {
+		deps := seed(t, stubGenerator{text: "fallback answer [1]"})
+		out, code := exec(deps, "ask", "kb", "q", "-k", "1", "--stream")
+		if code != 0 {
+			t.Fatalf("exit %d, out %q", code, out)
+		}
+		if !strings.Contains(out, "fallback answer [1]") || !strings.Contains(out, "## Sources") {
+			t.Errorf("fallback streamed output wrong: %q", out)
+		}
+	})
+}
+
 // stubRerankProvider reverses the input order (last document = most relevant,
 // descending scores), so reranking is visibly distinct from vector order.
 type stubRerankProvider struct {

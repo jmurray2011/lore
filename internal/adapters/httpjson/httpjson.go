@@ -86,6 +86,42 @@ func (c *Client) Post(ctx context.Context, path string, in, out any) error {
 	}
 }
 
+// PostStream marshals in as JSON and returns the raw body of a 2xx response for
+// the caller to stream (e.g. server-sent events). It applies the same auth and
+// transient-retry policy as Post — but only up to the point a response status is
+// known; once streaming begins the body is the caller's, who MUST Close it. A
+// non-2xx response is drained and returned as an error carrying a body snippet.
+func (c *Client) PostStream(ctx context.Context, path string, in any) (io.ReadCloser, error) {
+	body, err := json.Marshal(in)
+	if err != nil {
+		return nil, fmt.Errorf("httpjson: encode %s request: %w", path, err)
+	}
+
+	for attempt := 0; ; attempt++ {
+		resp, err := c.do(ctx, path, body)
+		if err != nil {
+			return nil, err
+		}
+		if retryable(resp.StatusCode) && attempt < maxRetries {
+			wait := retryWait(resp, attempt)
+			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 2048))
+			_ = resp.Body.Close()
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(wait):
+				continue
+			}
+		}
+		if resp.StatusCode/100 != 2 {
+			snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+			_ = resp.Body.Close()
+			return nil, fmt.Errorf("httpjson: %s: status %d: %s", path, resp.StatusCode, bytes.TrimSpace(snippet))
+		}
+		return resp.Body, nil
+	}
+}
+
 func (c *Client) do(ctx context.Context, path string, body []byte) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(body))
 	if err != nil {

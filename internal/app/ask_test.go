@@ -3,11 +3,84 @@ package app_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/jmurray2011/lore/internal/app"
 	"github.com/jmurray2011/lore/internal/domain"
 )
+
+// fakeStreamingGenerator implements app.StreamingGenerator, emitting its answer
+// text in space-separated word deltas so a test can see streaming actually
+// happen (not one whole-text delta).
+type fakeStreamingGenerator struct {
+	answer app.Answer
+	err    error
+}
+
+func (f *fakeStreamingGenerator) Synthesize(context.Context, string, []domain.ChunkHit, []domain.Attachment) (app.Answer, error) {
+	return f.answer, f.err
+}
+
+func (f *fakeStreamingGenerator) SynthesizeStream(_ context.Context, _ string, _ []domain.ChunkHit, _ []domain.Attachment, onDelta func(string)) (app.Answer, error) {
+	if f.err != nil {
+		return app.Answer{}, f.err
+	}
+	for i, w := range strings.Fields(f.answer.Text) {
+		if i > 0 {
+			onDelta(" ")
+		}
+		onDelta(w)
+	}
+	return f.answer, nil
+}
+
+func TestAskerSynthesizeStream(t *testing.T) {
+	ctx := context.Background()
+	hits := []domain.ChunkHit{{Chunk: mustChunk(t, domain.DeriveDocumentID("docs", "file:///a.md"), 0, "alpha")}}
+
+	t.Run("streams deltas and returns the full answer", func(t *testing.T) {
+		gen := &fakeStreamingGenerator{answer: app.Answer{Text: "the full answer"}}
+		a := app.NewAsker(nil, gen)
+		var got strings.Builder
+		var deltas int
+		ans, err := a.SynthesizeStream(ctx, "q", hits, nil, func(s string) { got.WriteString(s); deltas++ })
+		if err != nil {
+			t.Fatalf("SynthesizeStream: %v", err)
+		}
+		if got.String() != "the full answer" || ans.Text != "the full answer" {
+			t.Errorf("streamed %q / returned %q", got.String(), ans.Text)
+		}
+		if deltas < 3 {
+			t.Errorf("expected multiple deltas (word-by-word), got %d", deltas)
+		}
+		if !ans.Grounded {
+			t.Error("answer with hits should be Grounded")
+		}
+	})
+
+	t.Run("falls back to one whole-text delta for a non-streaming generator", func(t *testing.T) {
+		gen := &fakeGenerator{answer: app.Answer{Text: "buffered answer"}}
+		a := app.NewAsker(nil, gen)
+		var got strings.Builder
+		var deltas int
+		ans, err := a.SynthesizeStream(ctx, "q", hits, nil, func(s string) { got.WriteString(s); deltas++ })
+		if err != nil {
+			t.Fatalf("SynthesizeStream: %v", err)
+		}
+		if got.String() != "buffered answer" || ans.Text != "buffered answer" || deltas != 1 {
+			t.Errorf("fallback: streamed %q in %d deltas, returned %q", got.String(), deltas, ans.Text)
+		}
+	})
+
+	t.Run("propagates the generator error", func(t *testing.T) {
+		gen := &fakeStreamingGenerator{err: errors.New("boom")}
+		a := app.NewAsker(nil, gen)
+		if _, err := a.SynthesizeStream(ctx, "q", hits, nil, func(string) {}); err == nil {
+			t.Error("want error")
+		}
+	})
+}
 
 func TestAsker(t *testing.T) {
 	ctx := context.Background()
