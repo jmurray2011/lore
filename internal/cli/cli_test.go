@@ -55,7 +55,7 @@ func (s stubGenerator) Synthesize(_ context.Context, _ string, hits []domain.Chu
 	}
 	cites := make([]domain.Citation, n)
 	for i := 0; i < n; i++ {
-		cites[i] = domain.Citation{ChunkID: hits[i].Chunk.ID, Source: hits[i].Source, Seq: hits[i].Chunk.Seq}
+		cites[i] = domain.Citation{ChunkID: hits[i].Chunk.ID, Source: hits[i].Source, Seq: hits[i].Chunk.Seq, Collection: hits[i].Collection}
 	}
 	return app.Answer{Text: s.text, Citations: cites}, nil
 }
@@ -1869,6 +1869,266 @@ func TestCLIAskRerank(t *testing.T) {
 	})
 }
 
+// seedChunk ingests one chunk + its vector into a collection through the ports,
+// for cross-collection retrieval tests.
+func seedChunk(t *testing.T, docs *memstore.DocumentRepository, index *memstore.VectorIndex, collection, uri string, seq int, text string, vec []float32) domain.Chunk {
+	t.Helper()
+	ctx := context.Background()
+	did := domain.DeriveDocumentID(collection, uri)
+	doc, err := domain.NewDocument(collection, uri, domain.HashContent([]byte(uri+text)), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ch, err := domain.NewChunk(did, seq, text)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := docs.Upsert(ctx, doc, []domain.Chunk{ch}); err != nil {
+		t.Fatal(err)
+	}
+	if err := index.Upsert(ctx, collection, []app.VectorEntry{{ChunkID: ch.ID, Vector: vec}}); err != nil {
+		t.Fatal(err)
+	}
+	return ch
+}
+
+// seedDoc ingests one document with several chunks (one per text/vec pair) into
+// a collection, so chunks sharing a source URI live under one document rather
+// than colliding on document ID.
+func seedDoc(t *testing.T, docs *memstore.DocumentRepository, index *memstore.VectorIndex, collection, uri string, texts []string, vecs [][]float32) []domain.Chunk {
+	t.Helper()
+	ctx := context.Background()
+	did := domain.DeriveDocumentID(collection, uri)
+	doc, err := domain.NewDocument(collection, uri, domain.HashContent([]byte(uri)), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	chunks := make([]domain.Chunk, len(texts))
+	entries := make([]app.VectorEntry, len(texts))
+	for i := range texts {
+		ch, err := domain.NewChunk(did, i, texts[i])
+		if err != nil {
+			t.Fatal(err)
+		}
+		chunks[i] = ch
+		entries[i] = app.VectorEntry{ChunkID: ch.ID, Vector: vecs[i]}
+	}
+	if err := docs.Upsert(ctx, doc, chunks); err != nil {
+		t.Fatal(err)
+	}
+	if err := index.Upsert(ctx, collection, entries); err != nil {
+		t.Fatal(err)
+	}
+	return chunks
+}
+
+func TestCLIQueryFromCollection(t *testing.T) {
+	// Source v1 and target v2 share the embedder's space. The stub embedder is
+	// never consulted on this path (vectors come from the index), so its vec is
+	// irrelevant.
+	deps, _, docs, index := newDeps(stubEmbedder{space: testSpace(), vec: []float32{1, 0, 0}}, stubGenerator{})
+	for _, c := range []string{"v1", "v2"} {
+		if _, code := exec(deps, "init", c); code != 0 {
+			t.Fatalf("init %s exit %d", c, code)
+		}
+	}
+	src := seedDoc(t, docs, index, "v1", "file:///v1.md",
+		[]string{"source zero", "source one"}, [][]float32{{1, 0, 0}, {0, 1, 0}})
+	sc0, sc1 := src[0], src[1]
+	tgt := seedDoc(t, docs, index, "v2", "file:///v2.md",
+		[]string{"target zero", "target one"}, [][]float32{{1, 0, 0}, {0, 1, 0}})
+	tc0, tc1 := tgt[0], tgt[1]
+
+	t.Run("groups each source chunk's target hits as JSON", func(t *testing.T) {
+		out, code := exec(deps, "query", "v2", "--from-collection", "v1", "--json")
+		if code != 0 {
+			t.Fatalf("exit %d, out %q", code, out)
+		}
+		var groups []fromGroupViewJSON
+		if err := json.Unmarshal([]byte(out), &groups); err != nil {
+			t.Fatalf("bad JSON %q: %v", out, err)
+		}
+		if len(groups) != 2 {
+			t.Fatalf("want 2 groups, got %d: %+v", len(groups), groups)
+		}
+		if groups[0].From.ChunkID != string(sc0.ID) || groups[0].From.Source != "file:///v1.md" {
+			t.Errorf("group[0].from = %+v, want %s", groups[0].From, sc0.ID)
+		}
+		if len(groups[0].Hits) == 0 || groups[0].Hits[0].ChunkID != string(tc0.ID) {
+			t.Errorf("group[0] best hit = %+v, want %s", groups[0].Hits, tc0.ID)
+		}
+		if groups[1].From.ChunkID != string(sc1.ID) || groups[1].Hits[0].ChunkID != string(tc1.ID) {
+			t.Errorf("group[1] = from %s hits %+v, want from %s best %s", groups[1].From.ChunkID, groups[1].Hits, sc1.ID, tc1.ID)
+		}
+	})
+
+	t.Run("-k bounds the hits per group", func(t *testing.T) {
+		out, code := exec(deps, "query", "v2", "--from-collection", "v1", "-k", "1", "--json")
+		if code != 0 {
+			t.Fatalf("exit %d, out %q", code, out)
+		}
+		var groups []fromGroupViewJSON
+		if err := json.Unmarshal([]byte(out), &groups); err != nil {
+			t.Fatal(err)
+		}
+		for _, g := range groups {
+			if len(g.Hits) != 1 {
+				t.Errorf("-k 1 should bound each group to one hit, got %d", len(g.Hits))
+			}
+		}
+	})
+
+	t.Run("--from-collection with positional query text is a usage error", func(t *testing.T) {
+		if _, code := exec(deps, "query", "v2", "extra text", "--from-collection", "v1"); code != 2 {
+			t.Errorf("want exit 2, got %d", code)
+		}
+	})
+
+	t.Run("--from-collection with stdin - is a usage error", func(t *testing.T) {
+		if _, code := execStdin(deps, "piped", "query", "v2", "-", "--from-collection", "v1"); code != 2 {
+			t.Errorf("want exit 2, got %d", code)
+		}
+	})
+
+	t.Run("unknown source or target collection exits 3", func(t *testing.T) {
+		if _, code := exec(deps, "query", "v2", "--from-collection", "ghost"); code != 3 {
+			t.Errorf("unknown source: want exit 3, got %d", code)
+		}
+		if _, code := exec(deps, "query", "ghost", "--from-collection", "v1"); code != 3 {
+			t.Errorf("unknown target: want exit 3, got %d", code)
+		}
+	})
+
+	t.Run("mismatched source/target spaces exits 4", func(t *testing.T) {
+		deps, colls, docs, index := newDeps(stubEmbedder{space: testSpace()}, stubGenerator{})
+		v2, err := domain.NewCollection("v2", testSpace(), testChunkerSpec(), time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		v1, err := domain.NewCollection("v1", domain.EmbeddingSpace{Model: "other", Dimensions: 9}, testChunkerSpec(), time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx := context.Background()
+		if err := colls.Create(ctx, v1); err != nil {
+			t.Fatal(err)
+		}
+		if err := colls.Create(ctx, v2); err != nil {
+			t.Fatal(err)
+		}
+		_ = docs
+		_ = index
+		if _, code := exec(deps, "query", "v2", "--from-collection", "v1"); code != 4 {
+			t.Errorf("want exit 4 (invariant), got %d", code)
+		}
+	})
+}
+
+func TestCLIMultiCollection(t *testing.T) {
+	qvec := []float32{1, 0, 0}
+	setup := func(t *testing.T) (cli.Deps, domain.Chunk, domain.Chunk) {
+		t.Helper()
+		deps, _, docs, index := newDeps(stubEmbedder{space: testSpace(), vec: qvec}, stubGenerator{text: "merged answer"})
+		for _, c := range []string{"a", "b"} {
+			if _, code := exec(deps, "init", c); code != 0 {
+				t.Fatalf("init %s failed", c)
+			}
+		}
+		// a0 is a perfect match for the query; b0 is a weaker match — so the merge
+		// orders a0 above b0 across collections.
+		a0 := seedChunk(t, docs, index, "a", "file:///a.md", 0, "alpha", []float32{1, 0, 0})
+		b0 := seedChunk(t, docs, index, "b", "file:///b.md", 0, "beta", []float32{0.8, 0.2, 0})
+		return deps, a0, b0
+	}
+
+	t.Run("query -c a -c b merges and tags each hit's collection", func(t *testing.T) {
+		deps, a0, b0 := setup(t)
+		out, code := exec(deps, "query", "-c", "a", "-c", "b", "anything", "--json")
+		if code != 0 {
+			t.Fatalf("exit %d, out %q", code, out)
+		}
+		var hits []hitViewJSON
+		if err := json.Unmarshal([]byte(out), &hits); err != nil {
+			t.Fatalf("bad JSON %q: %v", out, err)
+		}
+		if len(hits) != 2 {
+			t.Fatalf("want 2 merged hits, got %d", len(hits))
+		}
+		if hits[0].ChunkID != string(a0.ID) || hits[0].Collection != "a" {
+			t.Errorf("hit[0] = %+v, want %s from a", hits[0], a0.ID)
+		}
+		if hits[1].ChunkID != string(b0.ID) || hits[1].Collection != "b" {
+			t.Errorf("hit[1] = %+v, want %s from b", hits[1], b0.ID)
+		}
+	})
+
+	t.Run("ask -c a -c b answers with per-collection citations", func(t *testing.T) {
+		deps, _, _ := setup(t)
+		out, code := exec(deps, "ask", "-c", "a", "-c", "b", "how?", "--json")
+		if code != 0 {
+			t.Fatalf("exit %d, out %q", code, out)
+		}
+		var ans answerViewJSON
+		if err := json.Unmarshal([]byte(out), &ans); err != nil {
+			t.Fatalf("bad JSON %q: %v", out, err)
+		}
+		if !ans.Grounded || len(ans.Citations) != 2 {
+			t.Fatalf("want 2 grounded citations, got %+v", ans)
+		}
+		got := map[string]bool{}
+		for _, c := range ans.Citations {
+			got[c.Collection] = true
+		}
+		if !got["a"] || !got["b"] {
+			t.Errorf("citations should span both collections, got %+v", ans.Citations)
+		}
+	})
+
+	t.Run("a single -c behaves like the positional (no collection tag)", func(t *testing.T) {
+		deps, a0, _ := setup(t)
+		out, code := exec(deps, "query", "-c", "a", "anything", "--json")
+		if code != 0 {
+			t.Fatalf("exit %d, out %q", code, out)
+		}
+		var hits []hitViewJSON
+		if err := json.Unmarshal([]byte(out), &hits); err != nil {
+			t.Fatal(err)
+		}
+		if len(hits) != 1 || hits[0].ChunkID != string(a0.ID) {
+			t.Fatalf("want a0 only, got %+v", hits)
+		}
+		if hits[0].Collection != "" {
+			t.Errorf("single-collection query should not tag a collection, got %q", hits[0].Collection)
+		}
+	})
+
+	t.Run("mismatched spaces across collections exits 4 with no retrieval", func(t *testing.T) {
+		deps, colls, _, _ := newDeps(stubEmbedder{space: testSpace()}, stubGenerator{})
+		a, _ := domain.NewCollection("a", testSpace(), testChunkerSpec(), time.Now())
+		b, _ := domain.NewCollection("b", domain.EmbeddingSpace{Model: "other", Dimensions: 9}, testChunkerSpec(), time.Now())
+		ctx := context.Background()
+		if err := colls.Create(ctx, a); err != nil {
+			t.Fatal(err)
+		}
+		if err := colls.Create(ctx, b); err != nil {
+			t.Fatal(err)
+		}
+		if _, code := exec(deps, "query", "-c", "a", "-c", "b", "q"); code != 4 {
+			t.Errorf("query: want exit 4, got %d", code)
+		}
+		if _, code := exec(deps, "ask", "-c", "a", "-c", "b", "q"); code != 4 {
+			t.Errorf("ask: want exit 4, got %d", code)
+		}
+	})
+
+	t.Run("--from-collection combined with -c is a usage error", func(t *testing.T) {
+		deps, _, _ := setup(t)
+		if _, code := exec(deps, "query", "v2", "--from-collection", "a", "-c", "b"); code != 2 {
+			t.Errorf("want exit 2, got %d", code)
+		}
+	})
+}
+
 // mustInitDeps builds deps with an initialized "docs" collection, for rerank
 // command tests that only need stdin hits (no seeded vectors).
 func mustInitDeps(t *testing.T, qvec []float32) cli.Deps {
@@ -1924,15 +2184,26 @@ type hitViewJSON struct {
 	Seq         int      `json:"seq"`
 	Score       float64  `json:"score"`
 	RerankScore *float64 `json:"rerank_score"`
+	Collection  string   `json:"collection"`
 	Text        string   `json:"text"`
+}
+
+type fromGroupViewJSON struct {
+	From struct {
+		ChunkID string `json:"chunk_id"`
+		Source  string `json:"source"`
+		Seq     int    `json:"seq"`
+	} `json:"from"`
+	Hits []hitViewJSON `json:"hits"`
 }
 
 type answerViewJSON struct {
 	Text      string `json:"text"`
 	Citations []struct {
-		ChunkID string `json:"chunk_id"`
-		Source  string `json:"source"`
-		Seq     int    `json:"seq"`
+		ChunkID    string `json:"chunk_id"`
+		Source     string `json:"source"`
+		Seq        int    `json:"seq"`
+		Collection string `json:"collection"`
 	} `json:"citations"`
 	Grounded        bool             `json:"grounded"`
 	Expansions      []chunkViewJSON  `json:"expansions"`

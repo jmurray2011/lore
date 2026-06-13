@@ -206,7 +206,27 @@ type hitView struct {
 	// RerankScore is present only on hits that went through a reranker; omitempty
 	// keeps the schema additive for query/synthesize consumers that never rerank.
 	RerankScore *float64 `json:"rerank_score,omitempty"`
-	Text        string   `json:"text"`
+	// Collection names the hit's origin collection, set only for cross-collection
+	// (multi-collection) queries; omitempty keeps single-collection output
+	// byte-for-byte unchanged.
+	Collection string `json:"collection,omitempty"`
+	Text       string `json:"text"`
+}
+
+// fromRef identifies the source chunk a query --from-collection group was driven
+// by: its chunk ID, source URI, and position. It carries enough provenance to
+// trace each group back to the chunk whose vector produced it.
+type fromRef struct {
+	ChunkID string `json:"chunk_id"`
+	Source  string `json:"source"`
+	Seq     int    `json:"seq"`
+}
+
+// fromGroupView is one query --from-collection result: the source chunk and the
+// target hits its vector retrieved. The hits reuse the standard hit schema.
+type fromGroupView struct {
+	From fromRef   `json:"from"`
+	Hits []hitView `json:"hits"`
 }
 
 type chunkView struct {
@@ -222,6 +242,10 @@ type citationView struct {
 	ChunkID string `json:"chunk_id"`
 	Source  string `json:"source"`
 	Seq     int    `json:"seq"`
+	// Collection names the cited chunk's origin collection, set only for
+	// cross-collection answers; omitempty keeps single-collection output
+	// byte-for-byte unchanged.
+	Collection string `json:"collection,omitempty"`
 }
 
 type answerView struct {
