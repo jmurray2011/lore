@@ -247,3 +247,224 @@ func TestQuerier(t *testing.T) {
 		}
 	})
 }
+
+func TestQuerierQueryFrom(t *testing.T) {
+	ctx := context.Background()
+	space := testSpace()
+
+	// Source collection v1: two chunks whose vectors are already stored.
+	v1DocID := domain.DeriveDocumentID("v1", "file:///v1.md")
+	sc0 := mustChunk(t, v1DocID, 0, "source chunk zero")
+	sc1 := mustChunk(t, v1DocID, 1, "source chunk one")
+	v1Doc, _ := domain.NewDocument("v1", "file:///v1.md", domain.HashContent([]byte("v1")), time.Unix(0, 0).UTC())
+
+	// Target collection v2: two chunks the search returns.
+	v2DocID := domain.DeriveDocumentID("v2", "file:///v2.md")
+	tc0 := mustChunk(t, v2DocID, 0, "target chunk zero")
+	tc1 := mustChunk(t, v2DocID, 1, "target chunk one")
+	v2Doc, _ := domain.NewDocument("v2", "file:///v2.md", domain.HashContent([]byte("v2")), time.Unix(0, 0).UTC())
+
+	newFrom := func(idx *fakeIndex, docs *fakeDocs, emb *fakeEmbedder, sourceSpace domain.EmbeddingSpace) *app.Querier {
+		v2 := mustCollection(t, "v2", space)
+		v1 := mustCollection(t, "v1", sourceSpace)
+		return app.NewQuerier(newFakeCollections(v1, v2), idx, docs, emb)
+	}
+
+	setup := func() (*fakeIndex, *fakeDocs, *fakeEmbedder) {
+		idx := &fakeIndex{
+			upserted: map[string]map[domain.ChunkID][]float32{
+				"v1": {sc0.ID: {1, 0, 0}, sc1.ID: {0, 1, 0}},
+			},
+			matches: map[string][]domain.VectorMatch{
+				"v2": {{ChunkID: tc0.ID, Score: 0.9}, {ChunkID: tc1.ID, Score: 0.5}},
+			},
+		}
+		docs := &fakeDocs{
+			docs: map[domain.DocumentID]domain.Document{v1Doc.ID: *v1Doc, v2Doc.ID: *v2Doc},
+			chunks: map[domain.ChunkID]domain.Chunk{
+				sc0.ID: sc0, sc1.ID: sc1, tc0.ID: tc0, tc1.ID: tc1,
+			},
+		}
+		emb := &fakeEmbedder{space: space}
+		return idx, docs, emb
+	}
+
+	t.Run("groups each source chunk's target hits, without re-embedding", func(t *testing.T) {
+		idx, docs, emb := setup()
+		q := newFrom(idx, docs, emb, space)
+
+		groups, err := q.QueryFrom(ctx, "v2", "v1", 2, "")
+		if err != nil {
+			t.Fatalf("QueryFrom: %v", err)
+		}
+		if len(groups) != 2 {
+			t.Fatalf("want 2 groups (one per source chunk), got %d", len(groups))
+		}
+		// Groups are ordered by source provenance (URI, then seq).
+		if groups[0].From.Chunk.ID != sc0.ID || groups[1].From.Chunk.ID != sc1.ID {
+			t.Errorf("group order = %s, %s; want %s, %s", groups[0].From.Chunk.ID, groups[1].From.Chunk.ID, sc0.ID, sc1.ID)
+		}
+		for _, g := range groups {
+			if g.From.Source != "file:///v1.md" {
+				t.Errorf("from.Source = %q, want file:///v1.md", g.From.Source)
+			}
+			if len(g.Hits) != 2 || g.Hits[0].Chunk.ID != tc0.ID || g.Hits[1].Chunk.ID != tc1.ID {
+				t.Errorf("hits = %+v, want [%s %s]", g.Hits, tc0.ID, tc1.ID)
+			}
+			if g.Hits[0].Source != "file:///v2.md" {
+				t.Errorf("target hit Source = %q, want file:///v2.md", g.Hits[0].Source)
+			}
+		}
+		if n := emb.embedCalls.Load(); n != 0 {
+			t.Errorf("QueryFrom must not embed; embedder was called %d times", n)
+		}
+		if idx.gotCollection != "v2" || idx.gotK != 2 {
+			t.Errorf("search target = %q k=%d, want v2 k=2", idx.gotCollection, idx.gotK)
+		}
+	})
+
+	t.Run("mismatched spaces is ErrSpaceMismatch, with no search and no embed", func(t *testing.T) {
+		idx, docs, emb := setup()
+		q := newFrom(idx, docs, emb, domain.EmbeddingSpace{Model: "other", Dimensions: 7})
+
+		_, err := q.QueryFrom(ctx, "v2", "v1", 2, "")
+		if !errors.Is(err, domain.ErrSpaceMismatch) {
+			t.Fatalf("want ErrSpaceMismatch, got %v", err)
+		}
+		if idx.gotCollection != "" {
+			t.Errorf("no search should run on a space mismatch; searched %q", idx.gotCollection)
+		}
+		if n := emb.embedCalls.Load(); n != 0 {
+			t.Errorf("no embed should run; embedder called %d times", n)
+		}
+	})
+
+	t.Run("unknown source or target collection is ErrNotFound", func(t *testing.T) {
+		idx, docs, emb := setup()
+		q := newFrom(idx, docs, emb, space)
+		if _, err := q.QueryFrom(ctx, "v2", "ghost", 2, ""); !errors.Is(err, app.ErrNotFound) {
+			t.Errorf("unknown source: want ErrNotFound, got %v", err)
+		}
+		if _, err := q.QueryFrom(ctx, "ghost", "v1", 2, ""); !errors.Is(err, app.ErrNotFound) {
+			t.Errorf("unknown target: want ErrNotFound, got %v", err)
+		}
+	})
+
+	t.Run("empty source collection yields no groups", func(t *testing.T) {
+		idx, docs, emb := setup()
+		idx.upserted["v1"] = map[domain.ChunkID][]float32{} // no stored vectors
+		q := newFrom(idx, docs, emb, space)
+		groups, err := q.QueryFrom(ctx, "v2", "v1", 2, "")
+		if err != nil || len(groups) != 0 {
+			t.Errorf("want no groups, nil; got %d groups, %v", len(groups), err)
+		}
+	})
+}
+
+func TestQuerierAcross(t *testing.T) {
+	ctx := context.Background()
+	space := testSpace()
+
+	aDocID := domain.DeriveDocumentID("a", "file:///a.md")
+	bDocID := domain.DeriveDocumentID("b", "file:///b.md")
+	a0 := mustChunk(t, aDocID, 0, "alpha zero")
+	a1 := mustChunk(t, aDocID, 1, "alpha one")
+	b0 := mustChunk(t, bDocID, 0, "beta zero")
+	b1 := mustChunk(t, bDocID, 1, "beta one")
+	aDoc, _ := domain.NewDocument("a", "file:///a.md", domain.HashContent([]byte("a")), time.Unix(0, 0).UTC())
+	bDoc, _ := domain.NewDocument("b", "file:///b.md", domain.HashContent([]byte("b")), time.Unix(0, 0).UTC())
+
+	newAcross := func(idx *fakeIndex, docs *fakeDocs, emb *fakeEmbedder, bSpace domain.EmbeddingSpace) *app.Querier {
+		a := mustCollection(t, "a", space)
+		b := mustCollection(t, "b", bSpace)
+		return app.NewQuerier(newFakeCollections(a, b), idx, docs, emb)
+	}
+
+	setup := func() (*fakeIndex, *fakeDocs, *fakeEmbedder) {
+		idx := &fakeIndex{matches: map[string][]domain.VectorMatch{
+			"a": {{ChunkID: a0.ID, Score: 0.9}, {ChunkID: a1.ID, Score: 0.3}},
+			"b": {{ChunkID: b0.ID, Score: 0.7}, {ChunkID: b1.ID, Score: 0.2}},
+		}}
+		docs := &fakeDocs{
+			docs:   map[domain.DocumentID]domain.Document{aDoc.ID: *aDoc, bDoc.ID: *bDoc},
+			chunks: map[domain.ChunkID]domain.Chunk{a0.ID: a0, a1.ID: a1, b0.ID: b0, b1.ID: b1},
+		}
+		emb := &fakeEmbedder{space: space, byText: map[string][]float32{"q": {1, 0, 0}}}
+		return idx, docs, emb
+	}
+
+	t.Run("merges hits across collections by score, tagging each with its origin", func(t *testing.T) {
+		idx, docs, emb := setup()
+		q := newAcross(idx, docs, emb, space)
+
+		hits, err := q.QueryAcross(ctx, []string{"a", "b"}, "q", 2, "")
+		if err != nil {
+			t.Fatalf("QueryAcross: %v", err)
+		}
+		if len(hits) != 2 {
+			t.Fatalf("want top-2 merged, got %d", len(hits))
+		}
+		if hits[0].Chunk.ID != a0.ID || hits[0].Collection != "a" {
+			t.Errorf("hit[0] = %+v, want a0 from collection a", hits[0])
+		}
+		if hits[1].Chunk.ID != b0.ID || hits[1].Collection != "b" {
+			t.Errorf("hit[1] = %+v, want b0 from collection b", hits[1])
+		}
+		if n := emb.embedCalls.Load(); n != 1 {
+			t.Errorf("the query should be embedded exactly once, got %d", n)
+		}
+	})
+
+	t.Run("ExplainAcross surfaces the merged runner-up", func(t *testing.T) {
+		idx, docs, emb := setup()
+		q := newAcross(idx, docs, emb, space)
+
+		ret, err := q.ExplainAcross(ctx, []string{"a", "b"}, "q", 2, "")
+		if err != nil {
+			t.Fatalf("ExplainAcross: %v", err)
+		}
+		if len(ret.Hits) != 2 {
+			t.Fatalf("want 2 hits, got %d", len(ret.Hits))
+		}
+		if !ret.HasNext || ret.NextScore != 0.3 {
+			t.Errorf("want merged runner-up 0.3, got HasNext=%v NextScore=%v", ret.HasNext, ret.NextScore)
+		}
+	})
+
+	t.Run("mismatched spaces is ErrSpaceMismatch, with no embed and no search", func(t *testing.T) {
+		idx, docs, emb := setup()
+		q := newAcross(idx, docs, emb, domain.EmbeddingSpace{Model: "other", Dimensions: 7})
+
+		_, err := q.QueryAcross(ctx, []string{"a", "b"}, "q", 2, "")
+		if !errors.Is(err, domain.ErrSpaceMismatch) {
+			t.Fatalf("want ErrSpaceMismatch, got %v", err)
+		}
+		if n := emb.embedCalls.Load(); n != 0 {
+			t.Errorf("no embed on space mismatch, got %d", n)
+		}
+		if idx.gotCollection != "" {
+			t.Errorf("no search on space mismatch, searched %q", idx.gotCollection)
+		}
+	})
+
+	t.Run("unknown collection is ErrNotFound", func(t *testing.T) {
+		idx, docs, emb := setup()
+		q := newAcross(idx, docs, emb, space)
+		if _, err := q.QueryAcross(ctx, []string{"a", "ghost"}, "q", 2, ""); !errors.Is(err, app.ErrNotFound) {
+			t.Errorf("want ErrNotFound, got %v", err)
+		}
+	})
+
+	t.Run("duplicate collection names are deduplicated", func(t *testing.T) {
+		idx, docs, emb := setup()
+		q := newAcross(idx, docs, emb, space)
+		hits, err := q.QueryAcross(ctx, []string{"a", "a"}, "q", 2, "")
+		if err != nil {
+			t.Fatalf("QueryAcross: %v", err)
+		}
+		// Only collection a's two chunks, not doubled.
+		if len(hits) != 2 || hits[0].Chunk.ID != a0.ID || hits[1].Chunk.ID != a1.ID {
+			t.Errorf("dedup failed: %+v", hits)
+		}
+	})
+}
