@@ -28,9 +28,10 @@ func NewAsker(querier *Querier, generator Generator) *Asker {
 // nothing to ground on: in strict mode this is ErrNoGrounding (the generator is
 // not called, saving the request); otherwise the answer is still produced but
 // marked Grounded=false so the caller can warn that it rests on model knowledge
-// alone.
-func (a *Asker) Ask(ctx context.Context, collection, question string, k int, attachments []domain.Attachment, strict bool) (Answer, error) {
-	hits, err := a.querier.Query(ctx, collection, question, k)
+// alone. A non-empty source restricts retrieval to documents matching that glob
+// (see Querier.Query).
+func (a *Asker) Ask(ctx context.Context, collection, question string, k int, attachments []domain.Attachment, strict bool, source string) (Answer, error) {
+	hits, err := a.querier.Query(ctx, collection, question, k, source)
 	if err != nil {
 		return Answer{}, err
 	}

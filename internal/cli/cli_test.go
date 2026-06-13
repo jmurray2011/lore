@@ -475,6 +475,44 @@ func TestCLIQuery(t *testing.T) {
 	})
 }
 
+func TestCLIQuerySourceFilter(t *testing.T) {
+	qvec := []float32{1, 0, 0}
+	deps, _, docs, index := newDeps(stubEmbedder{space: testSpace(), vec: qvec}, stubGenerator{})
+	if _, code := exec(deps, "init", "docs"); code != 0 {
+		t.Fatal("init failed")
+	}
+	ctx := context.Background()
+	for _, uri := range []string{"file:///a.md", "file:///b.pdf"} {
+		did := domain.DeriveDocumentID("docs", uri)
+		doc, err := domain.NewDocument("docs", uri, domain.HashContent([]byte(uri)), time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		ch, err := domain.NewChunk(did, 0, "content of "+uri)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := docs.Upsert(ctx, doc, []domain.Chunk{ch}); err != nil {
+			t.Fatal(err)
+		}
+		if err := index.Upsert(ctx, "docs", []app.VectorEntry{{ChunkID: ch.ID, Vector: qvec}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	out, code := exec(deps, "query", "docs", "anything", "--source", "*.pdf", "--json")
+	if code != 0 {
+		t.Fatalf("query exit %d, out %q", code, out)
+	}
+	var hits []hitViewJSON
+	if err := json.Unmarshal([]byte(out), &hits); err != nil {
+		t.Fatalf("bad JSON %q: %v", out, err)
+	}
+	if len(hits) != 1 || !strings.Contains(hits[0].Source, "b.pdf") {
+		t.Errorf("--source *.pdf should keep only the pdf hit, got %+v", hits)
+	}
+}
+
 func TestCLISpaceMismatchExits4(t *testing.T) {
 	// Collection pinned to one space; embedder reports a different one.
 	deps, colls, _, _ := newDeps(stubEmbedder{space: domain.EmbeddingSpace{Model: "other", Dimensions: 9}}, stubGenerator{})

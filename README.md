@@ -45,6 +45,7 @@ lore sync notes --prune --dry-run   # preview exactly what --prune would remove
 
 # 3. retrieve the most similar chunks
 lore query notes "rotation policy for signing keys" -k 5
+lore query notes "rotation policy" --source '*.pdf'   # scope to matching documents
 
 # 4. ask a grounded question (retrieval + synthesis with citations)
 lore ask notes "what is our key rotation policy?"

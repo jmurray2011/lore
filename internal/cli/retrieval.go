@@ -13,7 +13,10 @@ import (
 )
 
 func newQueryCmd(deps *Deps) *cobra.Command {
-	var k int
+	var (
+		k      int
+		source string
+	)
 	cmd := &cobra.Command{
 		Use:   "query <collection> <query>",
 		Short: "Retrieve the most similar chunks",
@@ -21,7 +24,7 @@ func newQueryCmd(deps *Deps) *cobra.Command {
 			if len(args) != 2 {
 				return fmt.Errorf("%w: query takes <collection> and a query string", domain.ErrInvalidArgument)
 			}
-			hits, err := deps.Query.Query(cmd.Context(), args[0], args[1], k)
+			hits, err := deps.Query.Query(cmd.Context(), args[0], args[1], k, source)
 			if err != nil {
 				return err
 			}
@@ -38,6 +41,7 @@ func newQueryCmd(deps *Deps) *cobra.Command {
 		},
 	}
 	cmd.Flags().IntVarP(&k, "top-k", "k", 8, "number of chunks to retrieve")
+	cmd.Flags().StringVar(&source, "source", "", "restrict to documents whose source matches this glob (e.g. '*.pdf')")
 	return cmd
 }
 
@@ -46,6 +50,7 @@ func newAskCmd(deps *Deps) *cobra.Command {
 		k      int
 		attach []string
 		strict bool
+		source string
 	)
 	cmd := &cobra.Command{
 		Use:   "ask <collection> <question>",
@@ -58,7 +63,7 @@ func newAskCmd(deps *Deps) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			ans, err := deps.Ask.Ask(cmd.Context(), args[0], args[1], k, attachments, strict)
+			ans, err := deps.Ask.Ask(cmd.Context(), args[0], args[1], k, attachments, strict, source)
 			if err != nil {
 				return err
 			}
@@ -80,6 +85,7 @@ func newAskCmd(deps *Deps) *cobra.Command {
 	cmd.Flags().IntVarP(&k, "top-k", "k", 8, "number of chunks to ground on (0 to ground on attachments only)")
 	cmd.Flags().StringArrayVar(&attach, "attach", nil, "file to send to the model as an attachment (repeatable)")
 	cmd.Flags().BoolVar(&strict, "strict", false, "fail (exit 1) instead of answering when nothing grounds the question")
+	cmd.Flags().StringVar(&source, "source", "", "restrict grounding to documents whose source matches this glob (e.g. '*.pdf')")
 	return cmd
 }
 
