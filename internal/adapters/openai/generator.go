@@ -1,6 +1,7 @@
 package openai
 
 import (
+	"bufio"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -16,8 +17,11 @@ import (
 	"github.com/jmurray2011/lore/internal/domain"
 )
 
-// compile-time port check
-var _ app.Generator = (*Generator)(nil)
+// compile-time port checks
+var (
+	_ app.Generator          = (*Generator)(nil)
+	_ app.StreamingGenerator = (*Generator)(nil)
+)
 
 const systemPrompt = "You are a precise assistant. Answer the question using only the provided context chunks. " +
 	"Each chunk is labeled with a bracketed number and its source document. " +
@@ -111,6 +115,17 @@ type chatRequest struct {
 	Model          string          `json:"model"`
 	Messages       []chatMessage   `json:"messages"`
 	ResponseFormat *responseFormat `json:"response_format,omitempty"`
+	Stream         bool            `json:"stream,omitempty"`
+}
+
+// streamChunk is one server-sent chunk of a streamed chat completion: the token
+// delta is in choices[0].delta.content.
+type streamChunk struct {
+	Choices []struct {
+		Delta struct {
+			Content string `json:"content"`
+		} `json:"delta"`
+	} `json:"choices"`
 }
 
 type responseFormat struct {
@@ -209,6 +224,76 @@ func resolveCitations(text string, hits []domain.ChunkHit) (string, []domain.Cit
 		return "[" + strings.Join(ids, ", ") + "]"
 	})
 	return rewritten, citations
+}
+
+// SynthesizeStream is the streaming form of Synthesize: it emits the model's
+// prose to onDelta as server-sent chunks arrive, then returns the same canonical
+// Answer Synthesize would (the model's inline [n] rewritten to [chunkID], with
+// citations). Structured-output mode cannot stream prose (the response is JSON),
+// so it degrades to a buffered Synthesize and emits the whole answer once.
+func (g *Generator) SynthesizeStream(ctx context.Context, question string, hits []domain.ChunkHit, attachments []domain.Attachment, onDelta func(string)) (app.Answer, error) {
+	if g.caps.StructuredOutput {
+		ans, err := g.Synthesize(ctx, question, hits, attachments)
+		if err != nil {
+			return app.Answer{}, err
+		}
+		onDelta(ans.Text)
+		return ans, nil
+	}
+
+	userContent, err := g.userContent(question, hits, attachments)
+	if err != nil {
+		return app.Answer{}, err
+	}
+	req := chatRequest{
+		Model:  g.model,
+		Stream: true,
+		Messages: []chatMessage{
+			{Role: "system", Content: systemPrompt},
+			{Role: "user", Content: userContent},
+		},
+	}
+	body, err := g.client.PostStream(ctx, "/chat/completions", req)
+	if err != nil {
+		return app.Answer{}, err
+	}
+	defer func() { _ = body.Close() }()
+
+	var raw strings.Builder
+	sc := bufio.NewScanner(body)
+	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024) // tolerate large SSE lines
+	for sc.Scan() {
+		line := sc.Text()
+		data, ok := strings.CutPrefix(line, "data:")
+		if !ok {
+			continue // blank lines, comments, other SSE fields
+		}
+		data = strings.TrimSpace(data)
+		if data == "[DONE]" {
+			break
+		}
+		var chunk streamChunk
+		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+			continue // skip keep-alives / non-JSON frames
+		}
+		if len(chunk.Choices) > 0 {
+			if tok := chunk.Choices[0].Delta.Content; tok != "" {
+				raw.WriteString(tok)
+				onDelta(tok)
+			}
+		}
+	}
+	if err := sc.Err(); err != nil {
+		return app.Answer{}, fmt.Errorf("openai: read stream: %w", err)
+	}
+
+	// Same canonical post-processing as the non-streaming path, so --json,
+	// caching, and the post-answer sources see identical citations.
+	text, citations := resolveCitations(strings.TrimSpace(raw.String()), hits)
+	if len(citations) == 0 {
+		citations = groundingSet(hits)
+	}
+	return app.Answer{Text: text, Citations: citations}, nil
 }
 
 // userContent builds the user message: a plain string when there are no

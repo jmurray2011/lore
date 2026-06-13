@@ -322,3 +322,74 @@ func TestNewGeneratorValidation(t *testing.T) {
 		t.Errorf("empty model: want ErrInvalidArgument, got %v", err)
 	}
 }
+
+func TestGeneratorSynthesizeStream(t *testing.T) {
+	ctx := context.Background()
+	chunk, _ := domain.NewChunk(domain.DeriveDocumentID("docs", "file:///a.md"), 0, "the sky is blue")
+	hits := []domain.ChunkHit{{Chunk: chunk, Score: 0.9, Source: "file:///a.md"}}
+
+	t.Run("streams SSE deltas and returns the canonical answer", func(t *testing.T) {
+		var gotStream bool
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var req struct {
+				Stream bool `json:"stream"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			gotStream = req.Stream
+			w.Header().Set("Content-Type", "text/event-stream")
+			for _, tok := range []string{"The sky ", "is blue ", "[1]."} {
+				_, _ = io.WriteString(w, `data: {"choices":[{"delta":{"content":`+jsonStr(tok)+`}}]}`+"\n\n")
+			}
+			_, _ = io.WriteString(w, "data: [DONE]\n\n")
+		}))
+		defer srv.Close()
+
+		g, _ := openai.NewGenerator(srv.URL, "k", "gpt-test", openai.Capabilities{}, openai.AuthBearer, srv.Client())
+		var streamed strings.Builder
+		ans, err := g.SynthesizeStream(ctx, "what color?", hits, nil, func(s string) { streamed.WriteString(s) })
+		if err != nil {
+			t.Fatalf("SynthesizeStream: %v", err)
+		}
+		if !gotStream {
+			t.Error("request should set stream:true")
+		}
+		// Streamed text is the raw model prose, with its own [1] ordinal intact.
+		if streamed.String() != "The sky is blue [1]." {
+			t.Errorf("streamed = %q", streamed.String())
+		}
+		// The returned Answer is canonical: [1] rewritten to the chunk ID, cited.
+		if len(ans.Citations) != 1 || ans.Citations[0].ChunkID != chunk.ID {
+			t.Errorf("citations = %v", ans.Citations)
+		}
+		if !strings.Contains(ans.Text, string(chunk.ID)) {
+			t.Errorf("returned text should carry the canonical [chunkID]: %q", ans.Text)
+		}
+	})
+
+	t.Run("structured output falls back to one whole-text delta", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Non-streaming JSON response (structured path does a normal POST).
+			_, _ = io.WriteString(w, `{"choices":[{"message":{"content":"{\"answer\":\"Blue.\",\"citations\":[1]}"}}]}`)
+		}))
+		defer srv.Close()
+
+		g, _ := openai.NewGenerator(srv.URL, "k", "gpt-test", openai.Capabilities{StructuredOutput: true}, openai.AuthBearer, srv.Client())
+		var streamed strings.Builder
+		var deltas int
+		ans, err := g.SynthesizeStream(ctx, "what color?", hits, nil, func(s string) { streamed.WriteString(s); deltas++ })
+		if err != nil {
+			t.Fatalf("SynthesizeStream structured: %v", err)
+		}
+		if streamed.String() != "Blue." || deltas != 1 {
+			t.Errorf("structured fallback: streamed %q in %d deltas", streamed.String(), deltas)
+		}
+		if ans.Text != "Blue." || len(ans.Citations) != 1 {
+			t.Errorf("structured answer = %+v", ans)
+		}
+	})
+}
+
+func jsonStr(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
+}
