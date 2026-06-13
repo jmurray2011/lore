@@ -244,7 +244,7 @@ func TestIngestor(t *testing.T) {
 		}
 	})
 
-	t.Run("skips unsupported content types", func(t *testing.T) {
+	t.Run("counts unsupported content types separately from skips", func(t *testing.T) {
 		coll := mustCollection(t, "docs", space)
 		src := &fakeSource{items: []app.SourceItem{
 			{URI: "file:///img.png", ContentType: "image/png", Open: func() ([]byte, error) { return []byte{0x89}, nil }},
@@ -257,8 +257,10 @@ func TestIngestor(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Ingest: %v", err)
 		}
-		if sum.Added != 1 || sum.Skipped != 1 {
-			t.Errorf("summary = %+v, want Added 1 Skipped 1", sum)
+		// An unsupported type is never ingested — it must not hide under Skipped
+		// (which means "ingested before, unchanged"); it's a distinct outcome.
+		if sum.Added != 1 || sum.Unsupported != 1 || sum.Skipped != 0 {
+			t.Errorf("summary = %+v, want Added 1 Unsupported 1 Skipped 0", sum)
 		}
 	})
 

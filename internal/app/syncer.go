@@ -9,10 +9,11 @@ import (
 
 // SyncSummary reports the outcome of a sync run.
 type SyncSummary struct {
-	Added   int // documents ingested (new or changed)
-	Skipped int // unchanged, unsupported, or empty documents
-	Chunks  int // chunks embedded and stored
-	Pruned  int // documents removed because their source no longer exists
+	Added       int // documents ingested (new or changed)
+	Skipped     int // unchanged or empty documents (idempotent no-ops)
+	Unsupported int // documents whose content type no extractor handles
+	Chunks      int // chunks embedded and stored
+	Pruned      int // documents removed because their source no longer exists
 }
 
 // Syncer brings a collection into line with its source(s). It re-ingests
@@ -55,6 +56,7 @@ func (s *Syncer) Sync(ctx context.Context, collection string, paths []string, pr
 		}
 		sum.Added += is.Added
 		sum.Skipped += is.Skipped
+		sum.Unsupported += is.Unsupported
 		sum.Chunks += is.Chunks
 	}
 

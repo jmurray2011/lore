@@ -73,8 +73,10 @@ colorized on an interactive terminal and plain everywhere else; force it off wit
 | Excel | `.xlsx` | one line per row, cells tab-joined |
 | PDF | `.pdf` | best-effort text (no layout/tables; image-only PDFs yield nothing) |
 
-Unsupported files are skipped. Hidden files and directories (`.git`, etc.) are
-never ingested.
+Unsupported files are reported as a separate `unsupported` count (distinct from
+`skipped`, which means already-ingested and unchanged), so a folder of mixed
+types never hides files that were silently never ingested. Hidden files and
+directories (`.git`, etc.) are never ingested.
 
 ## Configuration
 

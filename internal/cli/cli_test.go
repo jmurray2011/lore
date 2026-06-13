@@ -483,6 +483,32 @@ func TestCLIAddThenQuery(t *testing.T) {
 	}
 }
 
+func TestCLIAddCountsUnsupportedSeparately(t *testing.T) {
+	deps, _, _, _ := newDeps(stubEmbedder{space: testSpace(), vec: []float32{1, 0, 0}}, stubGenerator{})
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("hello grounded world"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "b.bin"), []byte{0, 1, 2, 3}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, code := exec(deps, "init", "docs"); code != 0 {
+		t.Fatal("init failed")
+	}
+
+	out, code := exec(deps, "add", "docs", dir, "--json")
+	if code != 0 {
+		t.Fatalf("add exit %d, out %q", code, out)
+	}
+	var sum ingestViewJSON
+	if err := json.Unmarshal([]byte(out), &sum); err != nil {
+		t.Fatalf("bad JSON %q: %v", out, err)
+	}
+	if sum.Added != 1 || sum.Unsupported != 1 || sum.Skipped != 0 {
+		t.Errorf("want Added 1 Unsupported 1 Skipped 0, got %+v", sum)
+	}
+}
+
 func TestCLIRemove(t *testing.T) {
 	t.Run("rm collection removes it", func(t *testing.T) {
 		deps, _, _, _ := newDeps(stubEmbedder{space: testSpace(), vec: []float32{1, 0, 0}}, stubGenerator{})
@@ -552,10 +578,11 @@ type docViewJSON struct {
 }
 
 type syncViewJSON struct {
-	Added   int `json:"added"`
-	Skipped int `json:"skipped"`
-	Chunks  int `json:"chunks"`
-	Pruned  int `json:"pruned"`
+	Added       int `json:"added"`
+	Skipped     int `json:"skipped"`
+	Unsupported int `json:"unsupported"`
+	Chunks      int `json:"chunks"`
+	Pruned      int `json:"pruned"`
 }
 
 type hitViewJSON struct {
@@ -576,7 +603,8 @@ type answerViewJSON struct {
 }
 
 type ingestViewJSON struct {
-	Added   int `json:"added"`
-	Skipped int `json:"skipped"`
-	Chunks  int `json:"chunks"`
+	Added       int `json:"added"`
+	Skipped     int `json:"skipped"`
+	Unsupported int `json:"unsupported"`
+	Chunks      int `json:"chunks"`
 }

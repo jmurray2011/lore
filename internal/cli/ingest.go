@@ -10,16 +10,27 @@ import (
 )
 
 type ingestView struct {
-	Added   int `json:"added"`
-	Skipped int `json:"skipped"`
-	Chunks  int `json:"chunks"`
+	Added       int `json:"added"`
+	Skipped     int `json:"skipped"`
+	Unsupported int `json:"unsupported"`
+	Chunks      int `json:"chunks"`
 }
 
 type syncView struct {
-	Added   int `json:"added"`
-	Skipped int `json:"skipped"`
-	Chunks  int `json:"chunks"`
-	Pruned  int `json:"pruned"`
+	Added       int `json:"added"`
+	Skipped     int `json:"skipped"`
+	Unsupported int `json:"unsupported"`
+	Chunks      int `json:"chunks"`
+	Pruned      int `json:"pruned"`
+}
+
+// unsupportedClause renders ", N unsupported" only when there are any, so the
+// common (zero) case stays quiet while a real data gap is surfaced inline.
+func unsupportedClause(n int) string {
+	if n == 0 {
+		return ""
+	}
+	return fmt.Sprintf(", **%d** unsupported", n)
 }
 
 func newAddCmd(deps *Deps) *cobra.Command {
@@ -40,11 +51,13 @@ func newAddCmd(deps *Deps) *cobra.Command {
 				}
 				total.Added += sum.Added
 				total.Skipped += sum.Skipped
+				total.Unsupported += sum.Unsupported
 				total.Chunks += sum.Chunks
 			}
 
-			view := ingestView{Added: total.Added, Skipped: total.Skipped, Chunks: total.Chunks}
-			human := fmt.Sprintf("Added **%d**, skipped **%d** — **%d** chunks.", total.Added, total.Skipped, total.Chunks)
+			view := ingestView{Added: total.Added, Skipped: total.Skipped, Unsupported: total.Unsupported, Chunks: total.Chunks}
+			human := fmt.Sprintf("Added **%d**, skipped **%d**%s — **%d** chunks.",
+				total.Added, total.Skipped, unsupportedClause(total.Unsupported), total.Chunks)
 			return render(cmd, view, human)
 		},
 	}
@@ -66,8 +79,9 @@ func newSyncCmd(deps *Deps) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			view := syncView{Added: sum.Added, Skipped: sum.Skipped, Chunks: sum.Chunks, Pruned: sum.Pruned}
-			human := fmt.Sprintf("Added **%d**, skipped **%d**, pruned **%d** — **%d** chunks.", sum.Added, sum.Skipped, sum.Pruned, sum.Chunks)
+			view := syncView{Added: sum.Added, Skipped: sum.Skipped, Unsupported: sum.Unsupported, Chunks: sum.Chunks, Pruned: sum.Pruned}
+			human := fmt.Sprintf("Added **%d**, skipped **%d**%s, pruned **%d** — **%d** chunks.",
+				sum.Added, sum.Skipped, unsupportedClause(sum.Unsupported), sum.Pruned, sum.Chunks)
 			return render(cmd, view, human)
 		},
 	}

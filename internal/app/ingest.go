@@ -17,9 +17,10 @@ const DefaultIngestConcurrency = 8
 
 // IngestSummary reports the outcome of an ingestion run.
 type IngestSummary struct {
-	Added   int // documents ingested (new or changed)
-	Skipped int // unchanged, unsupported, or empty documents
-	Chunks  int // chunks embedded and stored
+	Added       int // documents ingested (new or changed)
+	Skipped     int // unchanged or empty documents (idempotent no-ops)
+	Unsupported int // documents whose content type no extractor handles
+	Chunks      int // chunks embedded and stored
 }
 
 // Ingestor walks a Source, extracts and chunks each document, embeds the
@@ -89,7 +90,7 @@ func (i *Ingestor) Ingest(ctx context.Context, collection, root string) (IngestS
 		return IngestSummary{}, err
 	}
 
-	var added, skipped, chunks atomic.Int64
+	var added, skipped, unsupported, chunks atomic.Int64
 
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(i.concurrency)
@@ -100,11 +101,14 @@ func (i *Ingestor) Ingest(ctx context.Context, collection, root string) (IngestS
 			if err != nil {
 				return err
 			}
-			if out.skipped {
-				skipped.Add(1)
-			} else {
+			switch out.kind {
+			case kindAdded:
 				added.Add(1)
 				chunks.Add(int64(out.chunks))
+			case kindUnsupported:
+				unsupported.Add(1)
+			default: // kindSkipped
+				skipped.Add(1)
 			}
 			return nil
 		})
@@ -124,15 +128,25 @@ func (i *Ingestor) Ingest(ctx context.Context, collection, root string) (IngestS
 	}
 
 	return IngestSummary{
-		Added:   int(added.Load()),
-		Skipped: int(skipped.Load()),
-		Chunks:  int(chunks.Load()),
+		Added:       int(added.Load()),
+		Skipped:     int(skipped.Load()),
+		Unsupported: int(unsupported.Load()),
+		Chunks:      int(chunks.Load()),
 	}, nil
 }
 
+// ingestKind classifies a single document's outcome.
+type ingestKind int
+
+const (
+	kindAdded       ingestKind = iota // new or changed: chunks embedded and stored
+	kindSkipped                       // unchanged or empty: nothing to (re)ingest
+	kindUnsupported                   // content type handled by no extractor
+)
+
 type ingestOutcome struct {
-	chunks  int
-	skipped bool
+	chunks int
+	kind   ingestKind
 }
 
 // ingestItem processes a single source item: idempotency check, extract, chunk,
@@ -143,7 +157,7 @@ type ingestOutcome struct {
 // hydrate.
 func (i *Ingestor) ingestItem(ctx context.Context, coll *domain.Collection, item SourceItem) (ingestOutcome, error) {
 	if !i.extractor.Supports(item.ContentType) {
-		return ingestOutcome{skipped: true}, nil
+		return ingestOutcome{kind: kindUnsupported}, nil
 	}
 
 	var existing *domain.Document
@@ -153,7 +167,7 @@ func (i *Ingestor) ingestItem(ctx context.Context, coll *domain.Collection, item
 		// Fast path: a matching fingerprint means the source is unchanged, so we
 		// skip without reading, extracting, or embedding.
 		if item.Fingerprint != "" && existing.Fingerprint == item.Fingerprint {
-			return ingestOutcome{skipped: true}, nil
+			return ingestOutcome{kind: kindSkipped}, nil
 		}
 	case errors.Is(err, ErrNotFound):
 		// new document
@@ -182,11 +196,11 @@ func (i *Ingestor) ingestItem(ctx context.Context, coll *domain.Collection, item
 				return ingestOutcome{}, err
 			}
 		}
-		return ingestOutcome{skipped: true}, nil
+		return ingestOutcome{kind: kindSkipped}, nil
 	}
 
 	if len(texts) == 0 {
-		return ingestOutcome{skipped: true}, nil
+		return ingestOutcome{kind: kindSkipped}, nil
 	}
 
 	var prior *domain.Document
@@ -238,7 +252,7 @@ func (i *Ingestor) ingestItem(ctx context.Context, coll *domain.Collection, item
 		return ingestOutcome{}, fmt.Errorf("store %q: %w", item.URI, err)
 	}
 
-	return ingestOutcome{chunks: len(chunks)}, nil
+	return ingestOutcome{chunks: len(chunks), kind: kindAdded}, nil
 }
 
 // refreshFingerprint re-stores an unchanged document with a new fingerprint,
