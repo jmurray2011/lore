@@ -127,4 +127,36 @@ func TestAsker(t *testing.T) {
 			t.Error("attachments should ground the answer")
 		}
 	})
+
+	t.Run("Synthesize generates over given hits without retrieving", func(t *testing.T) {
+		gen := &fakeGenerator{answer: app.Answer{Text: "synthesized"}}
+		// The querier is empty — Synthesize must not consult it.
+		q := app.NewQuerier(newFakeCollections(), &fakeIndex{}, &fakeDocs{}, &fakeEmbedder{space: space})
+		a := app.NewAsker(q, gen)
+
+		hits := []domain.ChunkHit{{Chunk: c0, Score: 0.9, Source: "file:///a.md"}}
+		ans, err := a.Synthesize(ctx, "why", hits, nil)
+		if err != nil {
+			t.Fatalf("Synthesize: %v", err)
+		}
+		if ans.Text != "synthesized" || !ans.Grounded {
+			t.Errorf("answer = %+v", ans)
+		}
+		if len(gen.gotHits) != 1 || gen.gotHits[0].Chunk.ID != c0.ID {
+			t.Errorf("generator got hits %+v", gen.gotHits)
+		}
+	})
+
+	t.Run("Synthesize with no hits or attachments is ungrounded", func(t *testing.T) {
+		gen := &fakeGenerator{answer: app.Answer{Text: "from nothing"}}
+		a := app.NewAsker(app.NewQuerier(newFakeCollections(), &fakeIndex{}, &fakeDocs{}, &fakeEmbedder{space: space}), gen)
+
+		ans, err := a.Synthesize(ctx, "why", nil, nil)
+		if err != nil {
+			t.Fatalf("Synthesize: %v", err)
+		}
+		if ans.Grounded {
+			t.Error("no hits and no attachments must be ungrounded")
+		}
+	})
 }

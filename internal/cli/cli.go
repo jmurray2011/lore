@@ -96,6 +96,7 @@ func NewRootCommand(build Builder, version string, out, errOut io.Writer) *cobra
 		newCatCmd(&deps),
 		newQueryCmd(&deps),
 		newAskCmd(&deps),
+		newSynthesizeCmd(&deps),
 		newRmCmd(&deps),
 	)
 	return root

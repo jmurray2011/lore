@@ -93,6 +93,16 @@ func execErr(deps cli.Deps, args ...string) (stdout, stderr string, code int) {
 	return out.String(), errb.String(), code
 }
 
+// execStdin is exec with the given string fed to the command on stdin.
+func execStdin(deps cli.Deps, stdin string, args ...string) (string, int) {
+	var out bytes.Buffer
+	root := cli.NewRootCommand(depsBuilder(deps), "test", &out, io.Discard)
+	root.SetIn(strings.NewReader(stdin))
+	root.SetArgs(args)
+	code := cli.ExitCode(root.Execute())
+	return out.String(), code
+}
+
 func testSpace() domain.EmbeddingSpace {
 	return domain.EmbeddingSpace{Model: "test-embed", Dimensions: 3}
 }
@@ -602,6 +612,70 @@ func TestCLIAskGroundingGuard(t *testing.T) {
 		}
 		if !strings.Contains(errOut, "not grounded") {
 			t.Errorf("want an ungrounded warning on stderr, got %q", errOut)
+		}
+	})
+}
+
+func TestCLISynthesize(t *testing.T) {
+	qvec := []float32{1, 0, 0}
+	deps, _, docs, index := newDeps(stubEmbedder{space: testSpace(), vec: qvec}, stubGenerator{text: "the answer"})
+	if _, code := exec(deps, "init", "docs"); code != 0 {
+		t.Fatal("init failed")
+	}
+	ctx := context.Background()
+	doc, err := domain.NewDocument("docs", "file:///a.md", domain.HashContent([]byte("x")), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	chunk, err := domain.NewChunk(doc.ID, 0, "the grounded answer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := docs.Upsert(ctx, doc, []domain.Chunk{chunk}); err != nil {
+		t.Fatal(err)
+	}
+	if err := index.Upsert(ctx, "docs", []app.VectorEntry{{ChunkID: chunk.ID, Vector: qvec}}); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("query --json piped into synthesize round-trips hits", func(t *testing.T) {
+		hitsJSON, code := exec(deps, "query", "docs", "anything", "--json")
+		if code != 0 {
+			t.Fatalf("query exit %d", code)
+		}
+		out, code := execStdin(deps, hitsJSON, "synthesize", "why", "--json")
+		if code != 0 {
+			t.Fatalf("synthesize exit %d, out %q", code, out)
+		}
+		var ans answerViewJSON
+		if err := json.Unmarshal([]byte(out), &ans); err != nil {
+			t.Fatalf("bad JSON %q: %v", out, err)
+		}
+		if ans.Text != "the answer" || !ans.Grounded {
+			t.Errorf("answer = %+v", ans)
+		}
+		if len(ans.Citations) != 1 || ans.Citations[0].Source != "file:///a.md" || ans.Citations[0].Seq != 0 {
+			t.Errorf("citation should round-trip from the piped hit: %+v", ans.Citations)
+		}
+	})
+
+	t.Run("empty stdin yields an ungrounded answer", func(t *testing.T) {
+		out, code := execStdin(deps, "", "synthesize", "why", "--json")
+		if code != 0 {
+			t.Fatalf("synthesize exit %d, out %q", code, out)
+		}
+		var ans answerViewJSON
+		if err := json.Unmarshal([]byte(out), &ans); err != nil {
+			t.Fatal(err)
+		}
+		if ans.Grounded {
+			t.Error("no piped hits should be ungrounded")
+		}
+	})
+
+	t.Run("malformed stdin is a usage error", func(t *testing.T) {
+		if _, code := execStdin(deps, "{not valid", "synthesize", "why"); code != 2 {
+			t.Errorf("want exit 2, got %d", code)
 		}
 	})
 }

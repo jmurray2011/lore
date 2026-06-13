@@ -65,6 +65,16 @@ lore rm notes                                          # whole collection
 Query hits and answer citations are tagged with their source as `source#chunk`,
 so every result traces back to the document it came from.
 
+`ask` is retrieval + synthesis in one step. To get between them — filter,
+re-rank, threshold, or merge hits yourself — pipe `query --json` into
+`synthesize`, which reads hits on stdin and answers from exactly those:
+
+```bash
+lore query kb "tenant isolation" --json \
+  | jq 'map(select(.score > 0.3))' \
+  | lore synthesize "how is tenant isolation enforced?"
+```
+
 Add `--json` to any command for machine-readable output. Human output is
 colorized on an interactive terminal and plain everywhere else; force it off with
 `--no-color` or `NO_COLOR=1`.
