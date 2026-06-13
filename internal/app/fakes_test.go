@@ -249,6 +249,26 @@ func (f *fakeDocs) GetChunksByDocument(_ context.Context, collection string, id 
 	return out, nil
 }
 
+func (f *fakeDocs) GetChunksByIDs(_ context.Context, collection string, ids []string) ([]domain.Chunk, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.getErr != nil {
+		return nil, f.getErr
+	}
+	out := make([]domain.Chunk, 0, len(ids))
+	for _, id := range ids {
+		c, ok := f.chunks[domain.ChunkID(id)]
+		if !ok {
+			continue
+		}
+		if d, ok := f.docs[c.DocumentID]; !ok || d.Collection != collection {
+			continue
+		}
+		out = append(out, c)
+	}
+	return out, nil
+}
+
 func (f *fakeDocs) GetDocuments(_ context.Context, ids []domain.DocumentID) ([]*domain.Document, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

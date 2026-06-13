@@ -135,6 +135,45 @@ func RunDocumentRepositorySuite(t *testing.T, factory func(t *testing.T) app.Doc
 		}
 	})
 
+	t.Run("get chunks by IDs returns input order, omitting absent and cross-collection IDs", func(t *testing.T) {
+		repo := factory(t)
+		docA, chunksA := newDoc(t, "docs", "file:///a.md", "alpha", 3)
+		other, chunksOther := newDoc(t, "notes", "file:///b.md", "beta", 1) // a different collection
+		mustUpsert(t, repo, docA, chunksA)
+		mustUpsert(t, repo, other, chunksOther)
+
+		ids := []string{
+			string(chunksA[2].ID),
+			"no-such-chunk",
+			string(chunksA[0].ID),
+			string(chunksOther[0].ID), // belongs to "notes", not "docs"
+		}
+		got, err := repo.GetChunksByIDs(ctx, "docs", ids)
+		if err != nil {
+			t.Fatalf("GetChunksByIDs: %v", err)
+		}
+		if len(got) != 2 {
+			t.Fatalf("want 2 chunks (absent + cross-collection omitted), got %d", len(got))
+		}
+		if got[0].ID != chunksA[2].ID || got[1].ID != chunksA[0].ID {
+			t.Errorf("input order not preserved: got [%s %s]", got[0].ID, got[1].ID)
+		}
+	})
+
+	t.Run("get chunks by IDs is empty for an unknown collection, no error", func(t *testing.T) {
+		repo := factory(t)
+		doc, chunks := newDoc(t, "docs", "file:///a.md", "alpha", 1)
+		mustUpsert(t, repo, doc, chunks)
+
+		got, err := repo.GetChunksByIDs(ctx, "ghost", []string{string(chunks[0].ID)})
+		if err != nil {
+			t.Fatalf("GetChunksByIDs: %v", err)
+		}
+		if len(got) != 0 {
+			t.Errorf("want no chunks for an unknown collection, got %d", len(got))
+		}
+	})
+
 	t.Run("get documents by id preserves input order and skips missing IDs", func(t *testing.T) {
 		repo := factory(t)
 		docA, chunksA := newDoc(t, "docs", "file:///a.md", "alpha", 1)

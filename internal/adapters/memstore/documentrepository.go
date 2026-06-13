@@ -103,6 +103,27 @@ func (r *DocumentRepository) GetChunksByDocument(_ context.Context, collection s
 	return out, nil
 }
 
+// GetChunksByIDs returns the chunks with the given IDs that belong to the
+// collection, in input order. IDs absent from the collection (unknown, or owned
+// by another collection) are omitted. An unknown collection yields no chunks.
+func (r *DocumentRepository) GetChunksByIDs(_ context.Context, collection string, ids []string) ([]domain.Chunk, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	out := make([]domain.Chunk, 0, len(ids))
+	for _, id := range ids {
+		c, ok := r.byChunkID[domain.ChunkID(id)]
+		if !ok {
+			continue
+		}
+		if d, ok := r.docs[c.DocumentID]; !ok || d.Collection != collection {
+			continue // chunk belongs to another collection
+		}
+		out = append(out, c)
+	}
+	return out, nil
+}
+
 // GetDocuments hydrates documents by ID, preserving input order and skipping IDs
 // with no stored document (the result may be shorter than the input).
 func (r *DocumentRepository) GetDocuments(_ context.Context, ids []domain.DocumentID) ([]*domain.Document, error) {

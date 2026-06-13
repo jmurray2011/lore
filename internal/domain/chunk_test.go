@@ -2,10 +2,34 @@ package domain_test
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/jmurray2011/lore/internal/domain"
 )
+
+func TestChunkIDValid(t *testing.T) {
+	good := domain.DeriveChunkID(domain.DeriveDocumentID("docs", "file:///a.md"), 5)
+	if !good.Valid() {
+		t.Errorf("derived chunk ID %q should be valid", good)
+	}
+	hash := strings.Repeat("a", 64)
+	bad := []domain.ChunkID{
+		"",                           // empty
+		domain.ChunkID(hash),         // no seq
+		domain.ChunkID(hash + ":"),   // empty seq
+		domain.ChunkID(hash + ":x"),  // non-numeric seq
+		domain.ChunkID("deadbeef:0"), // hash too short
+		domain.ChunkID(strings.Repeat("g", 64) + ":0"), // non-hex
+		domain.ChunkID(strings.Repeat("A", 64) + ":0"), // uppercase (non-canonical)
+		"3f2a9c", // not even shaped like one
+	}
+	for _, id := range bad {
+		if id.Valid() {
+			t.Errorf("%q should be invalid", id)
+		}
+	}
+}
 
 func TestNewChunk(t *testing.T) {
 	docID := domain.DeriveDocumentID("docs", "file:///a.md")

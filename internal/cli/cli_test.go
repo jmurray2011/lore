@@ -230,6 +230,73 @@ func TestCLICat(t *testing.T) {
 			t.Errorf("want exit 2, got %d", code)
 		}
 	})
+
+	t.Run("--chunk prints chunks by ID in input order, as JSON", func(t *testing.T) {
+		out, code := exec(deps, "cat", "docs", "--chunk", string(c1.ID), "--chunk", string(c0.ID), "--json")
+		if code != 0 {
+			t.Fatalf("cat --chunk exit %d, out %q", code, out)
+		}
+		var got []chunkViewJSON
+		if err := json.Unmarshal([]byte(out), &got); err != nil {
+			t.Fatalf("bad JSON %q: %v", out, err)
+		}
+		if len(got) != 2 || got[0].ChunkID != string(c1.ID) || got[1].ChunkID != string(c0.ID) {
+			t.Errorf("chunks (input order) = %+v", got)
+		}
+	})
+
+	t.Run("--chunk human output reuses the per-chunk serializer", func(t *testing.T) {
+		out, code := exec(deps, "cat", "docs", "--chunk", string(c0.ID))
+		if code != 0 {
+			t.Fatalf("exit %d", code)
+		}
+		if !strings.Contains(out, "**chunk 0**") || !strings.Contains(out, "the first chunk") {
+			t.Errorf("human output = %q", out)
+		}
+	})
+
+	t.Run("--chunk and --doc together is a usage error", func(t *testing.T) {
+		if _, code := exec(deps, "cat", "docs", "--doc", "file:///a.md", "--chunk", string(c0.ID)); code != 2 {
+			t.Errorf("want exit 2, got %d", code)
+		}
+	})
+
+	t.Run("malformed chunk ID is a usage error", func(t *testing.T) {
+		if _, code := exec(deps, "cat", "docs", "--chunk", "not-a-valid-id"); code != 2 {
+			t.Errorf("want exit 2, got %d", code)
+		}
+	})
+
+	t.Run("partial miss prints found on stdout, warns on stderr, exits 3", func(t *testing.T) {
+		ghost := string(domain.DeriveChunkID(docID, 99))
+		out, errOut, code := execErr(deps, "cat", "docs", "--chunk", string(c0.ID), "--chunk", ghost, "--json")
+		if code != 3 {
+			t.Fatalf("want exit 3, got %d", code)
+		}
+		var got []chunkViewJSON
+		if err := json.Unmarshal([]byte(out), &got); err != nil {
+			t.Fatalf("bad JSON %q: %v", out, err)
+		}
+		if len(got) != 1 || got[0].ChunkID != string(c0.ID) {
+			t.Errorf("found chunk should still print: %+v", got)
+		}
+		if !strings.Contains(errOut, ghost) || !strings.Contains(errOut, "not found") {
+			t.Errorf("want a per-ID warning on stderr, got %q", errOut)
+		}
+	})
+
+	t.Run("all missing exits 3", func(t *testing.T) {
+		ghost := string(domain.DeriveChunkID(docID, 99))
+		if _, code := exec(deps, "cat", "docs", "--chunk", ghost); code != 3 {
+			t.Errorf("want exit 3, got %d", code)
+		}
+	})
+
+	t.Run("unknown collection exits 3", func(t *testing.T) {
+		if _, code := exec(deps, "cat", "ghostcoll", "--chunk", string(c0.ID)); code != 3 {
+			t.Errorf("want exit 3, got %d", code)
+		}
+	})
 }
 
 func TestCLIStatusDocCount(t *testing.T) {
