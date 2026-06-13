@@ -7,70 +7,70 @@ import (
 	"path"
 	"regexp"
 	"strings"
-	"text/tabwriter"
 	"time"
 
+	"github.com/charmbracelet/glamour"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 
 	"github.com/jmurray2011/lore/internal/app"
 	"github.com/jmurray2011/lore/internal/domain"
 )
 
-// style renders human (non-JSON) output. When color is false every helper is a
-// no-op passthrough, so the same code path produces plain text for pipes, tests,
-// and --no-color. ANSI is only ever emitted to an interactive terminal.
-type style struct{ color bool }
+// Human (non-JSON) output is built as Markdown and rendered for the terminal with
+// glamour (glow's engine) when stdout is an interactive TTY; otherwise the raw
+// Markdown is emitted, which stays clean for pipes, tests, and --no-color.
 
-// styleForCmd derives a style from the command's output: color is on only for an
-// interactive terminal, with --json and --no-color and the NO_COLOR convention
-// all forcing it off.
-func styleForCmd(cmd *cobra.Command) *style {
+// richEnabled reports whether to glamour-render: an interactive terminal not
+// suppressed by --json, --no-color, or the NO_COLOR convention.
+func richEnabled(cmd *cobra.Command) bool {
 	if asJSON, _ := cmd.Flags().GetBool("json"); asJSON {
-		return &style{}
+		return false
 	}
 	if noColor, _ := cmd.Flags().GetBool("no-color"); noColor {
-		return &style{}
+		return false
 	}
-	return &style{color: isTerminal(cmd.OutOrStdout())}
-}
-
-// isTerminal reports whether w is an interactive terminal, honoring NO_COLOR.
-// It uses the stdlib char-device check (no x/term dependency): good enough to
-// decide coloring, and false for the *bytes.Buffer used in tests.
-func isTerminal(w io.Writer) bool {
 	if os.Getenv("NO_COLOR") != "" {
 		return false
 	}
+	return isTerminal(cmd.OutOrStdout())
+}
+
+func isTerminal(w io.Writer) bool {
 	f, ok := w.(*os.File)
-	if !ok {
-		return false
-	}
-	info, err := f.Stat()
-	return err == nil && info.Mode()&os.ModeCharDevice != 0
+	return ok && term.IsTerminal(int(f.Fd()))
 }
 
-func (s *style) wrap(code, text string) string {
-	if !s.color || text == "" {
-		return text
+// renderMarkdown styles Markdown for the terminal via glamour, auto-detecting the
+// light/dark theme and wrapping to the terminal width.
+func renderMarkdown(w io.Writer, md string) (string, error) {
+	r, err := glamour.NewTermRenderer(glamour.WithAutoStyle(), glamour.WithWordWrap(termWidth(w)))
+	if err != nil {
+		return "", err
 	}
-	return "\x1b[" + code + "m" + text + "\x1b[0m"
+	return r.Render(md)
 }
 
-func (s *style) bold(t string) string  { return s.wrap("1", t) }
-func (s *style) faint(t string) string { return s.wrap("2", t) }
-func (s *style) cyan(t string) string  { return s.wrap("36", t) }
-func (s *style) green(t string) string { return s.wrap("32", t) }
+// termWidth is the terminal column count, or a sensible default off-terminal.
+func termWidth(w io.Writer) int {
+	if f, ok := w.(*os.File); ok {
+		if cols, _, err := term.GetSize(int(f.Fd())); err == nil && cols > 0 {
+			return cols
+		}
+	}
+	return 100
+}
 
 // citeRefRE matches bracketed citations like [<chunkID>] (possibly several
 // comma-separated IDs) in answer prose.
 var citeRefRE = regexp.MustCompile(`\[([^\[\]]+)\]`)
 
-// answer formats a grounded answer: the model's inline [chunkID] references
-// become compact numbered [n] markers (numbered by first appearance, deduped),
-// followed by a numbered Sources list of short, readable labels. Citations the
-// prose never referenced inline (e.g. from structured-output JSON) are appended
-// to the list. Unknown bracketed tokens are left untouched.
-func (s *style) answer(ans app.Answer) string {
+// answerMarkdown formats a grounded answer as Markdown: the model's inline
+// [chunkID] references become compact numbered [n] markers (numbered by first
+// appearance, deduped), followed by a "## Sources" ordered list of short,
+// readable labels. Citations the prose never referenced inline (e.g. from
+// structured-output JSON) are appended. Unknown bracketed tokens are untouched.
+func answerMarkdown(ans app.Answer) string {
 	byID := make(map[domain.ChunkID]domain.Citation, len(ans.Citations))
 	for _, c := range ans.Citations {
 		byID[c.ChunkID] = c
@@ -93,7 +93,7 @@ func (s *style) answer(ans app.Answer) string {
 		for _, part := range strings.Split(m[1:len(m)-1], ",") {
 			if c, ok := byID[domain.ChunkID(strings.TrimSpace(part))]; ok {
 				matched = true
-				b.WriteString(s.cyan(fmt.Sprintf("[%d]", assign(c))))
+				fmt.Fprintf(&b, "[%d]", assign(c))
 			}
 		}
 		if matched {
@@ -102,7 +102,7 @@ func (s *style) answer(ans app.Answer) string {
 		return m
 	})
 
-	for _, c := range ans.Citations { // any cited but not referenced inline
+	for _, c := range ans.Citations { // cited but not referenced inline
 		assign(c)
 	}
 
@@ -111,10 +111,9 @@ func (s *style) answer(ans app.Answer) string {
 	}
 	var b strings.Builder
 	b.WriteString(text)
-	b.WriteString("\n\n")
-	b.WriteString(s.bold("Sources"))
+	b.WriteString("\n\n## Sources\n\n")
 	for i, c := range order {
-		fmt.Fprintf(&b, "\n  %s %s", s.cyan(fmt.Sprintf("[%d]", i+1)), s.faint(citationLabel(c)))
+		fmt.Fprintf(&b, "%d. %s\n", i+1, citationLabel(c))
 	}
 	return b.String()
 }
@@ -137,26 +136,31 @@ func shortLabel(uri string) string {
 	return path.Base(uri)
 }
 
-// table renders header + rows as aligned columns. Color, when on, bolds only the
-// whole header line — never individual cells, whose ANSI bytes would defeat the
-// tabwriter's width calculation and misalign the columns.
-func (s *style) table(header []string, rows [][]string) string {
-	var buf strings.Builder
-	tw := tabwriter.NewWriter(&buf, 0, 0, 2, ' ', 0)
-	_, _ = fmt.Fprintln(tw, strings.Join(header, "\t"))
+// mdTable renders header + rows as a GitHub-flavored Markdown table (pipes in
+// cells escaped). glamour draws it with a styled header and borders.
+func mdTable(header []string, rows [][]string) string {
+	var b strings.Builder
+	writeRow := func(cells []string) {
+		b.WriteByte('|')
+		for _, c := range cells {
+			b.WriteString(" " + strings.ReplaceAll(c, "|", "\\|") + " |")
+		}
+		b.WriteByte('\n')
+	}
+	writeRow(header)
+	b.WriteByte('|')
+	for range header {
+		b.WriteString(" --- |")
+	}
+	b.WriteByte('\n')
 	for _, r := range rows {
-		_, _ = fmt.Fprintln(tw, strings.Join(r, "\t"))
+		writeRow(r)
 	}
-	_ = tw.Flush()
-	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
-	if len(lines) > 0 {
-		lines[0] = s.bold(lines[0])
-	}
-	return strings.Join(lines, "\n")
+	return b.String()
 }
 
-// humanTime renders an RFC3339 timestamp as "2006-01-02 15:04" (local-agnostic,
-// UTC), falling back to the raw value if it doesn't parse.
+// humanTime renders an RFC3339 timestamp as "2006-01-02 15:04" (UTC), falling
+// back to the raw value if it doesn't parse.
 func humanTime(rfc3339 string) string {
 	t, err := time.Parse(time.RFC3339, rfc3339)
 	if err != nil {
