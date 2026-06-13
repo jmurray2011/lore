@@ -169,6 +169,8 @@ config file is TOML at `<user-config-dir>/lore/config.toml`.
 | `LORE_STORAGE_BACKEND` | `storage.backend` | `sqlite` | `sqlite` or `memory` |
 | `LORE_DB_PATH` | `storage.path` | `<user-config-dir>/lore/lore.db` | SQLite database file |
 | `LORE_INGEST_CONCURRENCY` | `ingest.concurrency` | `8` | parallel embeds during ingest (lower for tight rate limits) |
+| `LORE_CACHE` | `cache.enabled` | `false` | reuse synthesized `ask`/`synthesize` answers across runs |
+| `LORE_CACHE_TTL` | `cache.ttl` | `720h` (30d) | max age of a reusable cached answer (Go duration) |
 | `LORE_LOG_LEVEL` | `log.level` | `info` | `debug`/`info`/`warn`/`error` |
 | `LORE_LOG_FORMAT` | `log.format` | `text` | `text` or `json` |
 
@@ -180,9 +182,32 @@ Global flags override env, file, and defaults for the current command:
 | `--log-level <level>` | `log.level` | `debug`/`info`/`warn`/`error` |
 | `--log-format <fmt>` | `log.format` | `text` or `json` |
 | `-v`, `--verbose` | `log.level` | shorthand for `--log-level debug` |
+| `--no-cache` | `cache.enabled` | bypass the answer cache for this run (`ask`/`synthesize`) |
 
 The transient `429`/`503` responses of rate-limited providers are retried
 automatically (honoring `Retry-After`).
+
+### Answer cache
+
+`ask` and `synthesize` can reuse a previously synthesized answer instead of
+calling the model again — useful for repeated questions in scripts and CI. It is
+**opt-in** (off by default); enable it once:
+
+```bash
+export LORE_CACHE=true          # or [cache] enabled = true in config.toml
+lore ask notes "what is our key rotation policy?"   # first run: calls the model, caches
+lore ask notes "what is our key rotation policy?"   # repeat: served from the cache, no model call
+lore ask notes "…" --no-cache                        # force a fresh answer this run
+```
+
+The cache is keyed on the question, the exact text of the chunks that ground the
+answer, and the model + prompt identity — so it **self-invalidates**: edit a
+source document (changing its chunk text), switch models, or change `-k`/
+`--source` enough to retrieve different chunks, and the next ask re-synthesizes.
+Entries expire after `LORE_CACHE_TTL` (default 30 days). Requests with `--attach`
+are never cached. The cache is stored in the SQLite database, so it persists
+across invocations (it does nothing for the `memory` storage backend, which is
+per-process).
 
 ### Azure OpenAI
 

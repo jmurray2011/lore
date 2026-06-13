@@ -6,6 +6,7 @@ package app
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/jmurray2011/lore/internal/domain"
 )
@@ -131,6 +132,23 @@ type Answer struct {
 // ephemeral context, not part of the collection.
 type Generator interface {
 	Synthesize(ctx context.Context, question string, hits []domain.ChunkHit, attachments []domain.Attachment) (Answer, error)
+}
+
+// AnswerCache stores synthesized answers keyed by an opaque content hash, for
+// reuse across runs (each lore invocation is a fresh process, so this must be
+// persistent to pay off). It is deliberately time-explicit: the TTL policy lives
+// in the caller, not the store, which keeps the store a dumb time-indexed KV and
+// the conformance suite deterministic.
+//
+// Semantics (verified by conformance.RunAnswerCacheSuite):
+//   - Get returns a hit only when an entry exists AND was stored at or after
+//     notBefore; an older entry is a miss (expired), as is an unknown key.
+//   - Put replaces any existing entry for key.
+//   - Prune deletes every entry stored before cutoff.
+type AnswerCache interface {
+	Get(ctx context.Context, key string, notBefore time.Time) (Answer, bool, error)
+	Put(ctx context.Context, key string, answer Answer, storedAt time.Time) error
+	Prune(ctx context.Context, cutoff time.Time) error
 }
 
 // SourceItem is one raw document yielded by a Source. Content is read lazily via

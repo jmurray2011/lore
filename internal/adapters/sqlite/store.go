@@ -50,6 +50,12 @@ var schemaStmts = []string{
 		vector BLOB NOT NULL
 	)`,
 	`CREATE INDEX IF NOT EXISTS vectors_by_collection ON vectors(collection)`,
+	`CREATE TABLE IF NOT EXISTS answer_cache (
+		key TEXT PRIMARY KEY,
+		answer TEXT NOT NULL,
+		stored_at TEXT NOT NULL
+	)`,
+	`CREATE INDEX IF NOT EXISTS answer_cache_by_stored_at ON answer_cache(stored_at)`,
 }
 
 // Store is a SQLite-backed persistence engine.
@@ -125,6 +131,9 @@ func (s *Store) Documents() *DocumentRepository { return &DocumentRepository{db:
 
 // Vectors returns the VectorIndex view of the store.
 func (s *Store) Vectors() *VectorIndex { return &VectorIndex{db: s.db} }
+
+// Cache returns the AnswerCache view of the store.
+func (s *Store) Cache() *AnswerCache { return &AnswerCache{db: s.db} }
 
 func encodeVector(v []float32) []byte {
 	b := make([]byte, 4*len(v))

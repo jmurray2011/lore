@@ -37,6 +37,7 @@ type GlobalOptions struct {
 	LogLevel   string // --log-level; empty means unset
 	LogFormat  string // --log-format; empty means unset
 	Verbose    bool   // -v/--verbose
+	NoCache    bool   // --no-cache; bypass the answer cache for this run
 }
 
 // Builder constructs the runtime dependencies from the resolved global options.
@@ -70,6 +71,7 @@ func NewRootCommand(build Builder, version string, out, errOut io.Writer) *cobra
 	pf.String("log-level", "", "log level: debug, info, warn, or error")
 	pf.String("log-format", "", "log format: text or json")
 	pf.BoolP("verbose", "v", false, "verbose logging (shorthand for --log-level debug)")
+	pf.Bool("no-cache", false, "bypass the answer cache for this run (ask/synthesize)")
 	root.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
 		return fmt.Errorf("%w: %v", domain.ErrInvalidArgument, err)
 	})
@@ -79,6 +81,7 @@ func NewRootCommand(build Builder, version string, out, errOut io.Writer) *cobra
 			LogLevel:   flagString(cmd, "log-level"),
 			LogFormat:  flagString(cmd, "log-format"),
 			Verbose:    flagBool(cmd, "verbose"),
+			NoCache:    flagBool(cmd, "no-cache"),
 		})
 		if err != nil {
 			return err
