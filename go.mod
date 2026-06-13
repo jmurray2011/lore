@@ -9,6 +9,7 @@ require (
 	github.com/charmbracelet/glamour v1.0.0
 	github.com/ledongthuc/pdf v0.0.0-20250511090121-5959a4027728
 	github.com/spf13/cobra v1.10.2
+	github.com/tiktoken-go/tokenizer v0.7.0
 	golang.org/x/term v0.36.0
 	modernc.org/sqlite v1.46.2
 )

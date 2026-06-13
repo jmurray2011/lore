@@ -90,10 +90,11 @@ func newDeps(emb app.Embedder, gen app.Generator) (cli.Deps, *memstore.Collectio
 	docs := memstore.NewDocumentRepository()
 	index := memstore.NewVectorIndex()
 	q := app.NewQuerier(colls, index, docs, emb)
-	chunker, _ := domain.NewChunker(domain.DefaultChunkSize, domain.DefaultChunkOverlap)
+	fixed, _ := domain.NewFixedChunker(domain.DefaultChunkSize, domain.DefaultChunkOverlap)
+	chunkers, _ := domain.NewRegistry(fixed, nil)
 	source := fs.NewSource()
 	catalog := app.NewCatalog(colls, docs, emb)
-	ingestor := app.NewIngestor(colls, docs, index, emb, extract.New(), source, chunker)
+	ingestor := app.NewIngestor(colls, docs, index, emb, extract.New(), source, chunkers)
 	remover := app.NewRemover(colls, docs, index)
 	deps := cli.Deps{
 		Catalog: catalog,

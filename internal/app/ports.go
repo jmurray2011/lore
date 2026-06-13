@@ -173,3 +173,13 @@ type Extractor interface {
 	Supports(contentType string) bool
 	Extract(contentType string, raw []byte) (string, error)
 }
+
+// TokenCounter approximates how many tokens a piece of text occupies in an
+// embedding/generation model's context window. It backs the entire
+// token-awareness story: chunk sizing (the domain chunkers take its Count as an
+// injected func, keeping the tokenizer dependency out of stdlib-only domain) and
+// budget-bounded retrieval. Counts are approximate-but-stable across models, not
+// exact per-model — enough to size windows predictably.
+type TokenCounter interface {
+	Count(text string) int
+}

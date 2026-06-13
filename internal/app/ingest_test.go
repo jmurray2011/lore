@@ -22,13 +22,19 @@ func words(n int) string {
 	return strings.Join(parts, " ")
 }
 
-func chunker41(t *testing.T) domain.Chunker {
+// chunker41 is a Registry whose default is a fixed 4/1-word chunker, the legacy
+// behavior the ingestion tests assert against.
+func chunker41(t *testing.T) domain.Registry {
 	t.Helper()
-	c, err := domain.NewChunker(4, 1)
+	c, err := domain.NewFixedChunker(4, 1)
 	if err != nil {
-		t.Fatalf("NewChunker: %v", err)
+		t.Fatalf("NewFixedChunker: %v", err)
 	}
-	return c
+	reg, err := domain.NewRegistry(c, nil)
+	if err != nil {
+		t.Fatalf("NewRegistry: %v", err)
+	}
+	return reg
 }
 
 // textItem builds a text SourceItem whose fingerprint tracks its content, so

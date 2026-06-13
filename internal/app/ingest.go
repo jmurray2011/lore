@@ -33,7 +33,7 @@ type Ingestor struct {
 	embedder    Embedder
 	extractor   Extractor
 	source      Source
-	chunker     domain.Chunker
+	chunkers    domain.Registry
 	concurrency int
 	now         func() time.Time
 }
@@ -52,8 +52,9 @@ func WithConcurrency(n int) IngestOption {
 	}
 }
 
-// NewIngestor wires an Ingestor from the ports and domain services it needs.
-func NewIngestor(collections CollectionRepository, docs DocumentRepository, index VectorIndex, embedder Embedder, extractor Extractor, source Source, chunker domain.Chunker, opts ...IngestOption) *Ingestor {
+// NewIngestor wires an Ingestor from the ports and domain services it needs. The
+// chunker Registry selects a per-format chunking strategy by content type.
+func NewIngestor(collections CollectionRepository, docs DocumentRepository, index VectorIndex, embedder Embedder, extractor Extractor, source Source, chunkers domain.Registry, opts ...IngestOption) *Ingestor {
 	ing := &Ingestor{
 		collections: collections,
 		docs:        docs,
@@ -61,7 +62,7 @@ func NewIngestor(collections CollectionRepository, docs DocumentRepository, inde
 		embedder:    embedder,
 		extractor:   extractor,
 		source:      source,
-		chunker:     chunker,
+		chunkers:    chunkers,
 		concurrency: DefaultIngestConcurrency,
 		now:         time.Now,
 	}
@@ -226,7 +227,14 @@ func (i *Ingestor) ingestItem(ctx context.Context, coll *domain.Collection, item
 		return ingestOutcome{}, fmt.Errorf("extract %q: %w", item.URI, err)
 	}
 	hash := domain.HashContent([]byte(text))
-	texts := i.chunker.Split(text)
+	results, err := i.chunkers.Chunk(domain.ParsedDoc{Text: text, ContentType: item.ContentType, SourceURI: item.URI})
+	if err != nil {
+		return ingestOutcome{}, fmt.Errorf("chunk %q: %w", item.URI, err)
+	}
+	texts := make([]string, len(results))
+	for j, r := range results {
+		texts[j] = r.Text
+	}
 
 	if existing != nil && existing.Unchanged(hash) {
 		// Content is unchanged but the fingerprint drifted (or was never recorded,

@@ -137,7 +137,11 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			reranker = app.NewReranker(provider)
 		}
 
-		chunker, err := domain.NewChunker(domain.DefaultChunkSize, domain.DefaultChunkOverlap)
+		fixed, err := domain.NewFixedChunker(domain.DefaultChunkSize, domain.DefaultChunkOverlap)
+		if err != nil {
+			return cli.Deps{}, err
+		}
+		chunkers, err := domain.NewRegistry(fixed, nil)
 		if err != nil {
 			return cli.Deps{}, err
 		}
@@ -146,7 +150,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		source := fs.NewSource()
 
 		catalog := app.NewCatalog(store.collections, store.docs, embedder)
-		ingestor := app.NewIngestor(store.collections, store.docs, store.index, embedder, extractor, source, chunker, app.WithConcurrency(cfg.Ingest.Concurrency))
+		ingestor := app.NewIngestor(store.collections, store.docs, store.index, embedder, extractor, source, chunkers, app.WithConcurrency(cfg.Ingest.Concurrency))
 		querier := app.NewQuerier(store.collections, store.index, store.docs, embedder)
 		remover := app.NewRemover(store.collections, store.docs, store.index)
 		return cli.Deps{
