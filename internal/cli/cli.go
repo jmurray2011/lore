@@ -30,6 +30,8 @@ type Deps struct {
 	// (rerank, query/ask --rerank) report a usage error in that case.
 	Rerank *app.Reranker
 	Remove *app.Remover
+	// Tokens counts tokens for --budget token-bounded retrieval (query/ask).
+	Tokens app.TokenCounter
 }
 
 // GlobalOptions are the resolved global flags the composition root needs to
@@ -129,7 +131,7 @@ func ExitCode(err error) int {
 		return 2
 	case errors.Is(err, app.ErrNotFound):
 		return 3
-	case errors.Is(err, domain.ErrSpaceMismatch):
+	case errors.Is(err, domain.ErrSpaceMismatch), errors.Is(err, domain.ErrChunkerMismatch):
 		return 4
 	default:
 		return 1
@@ -178,12 +180,22 @@ func viewCollection(c *domain.Collection) collectionView {
 	}
 }
 
-// statusView is the collection view plus the document count, shown only by
-// `status` (a single collection). ls deliberately omits the count — it would
-// cost one query per listed collection.
+// statusView is the collection view plus the document count and the pinned
+// chunker, shown only by `status` (a single collection). ls deliberately omits
+// the count — it would cost one query per listed collection.
 type statusView struct {
 	collectionView
-	Documents int `json:"documents"`
+	Documents int    `json:"documents"`
+	Chunker   string `json:"chunker"`
+}
+
+// chunkerLabel renders a collection's pinned chunker for display, naming the
+// read-only state of a collection that predates chunker pinning.
+func chunkerLabel(c *domain.Collection) string {
+	if c.Chunker.IsZero() {
+		return "unpinned (legacy; rebuild to ingest)"
+	}
+	return c.Chunker.String()
 }
 
 type hitView struct {
@@ -200,7 +212,10 @@ type hitView struct {
 type chunkView struct {
 	ChunkID string `json:"chunk_id"`
 	Seq     int    `json:"seq"`
-	Text    string `json:"text"`
+	// HeadingPath is the document section the chunk came from (structure-aware
+	// chunkers); omitempty keeps output unchanged for chunks without one.
+	HeadingPath string `json:"heading_path,omitempty"`
+	Text        string `json:"text"`
 }
 
 type citationView struct {
@@ -221,6 +236,10 @@ type answerView struct {
 	// a bare hit array — the synthesize contract — so its explain goes to stderr
 	// instead; see writeQueryExplain.)
 	Explain *explainView `json:"explain,omitempty"`
+	// GroundingTokens is the token count of the chunks that grounded the answer,
+	// reported only when --budget is set; omitempty keeps output unchanged
+	// otherwise.
+	GroundingTokens *int `json:"grounding_tokens,omitempty"`
 }
 
 // explainView is the --explain diagnostic: the returned hits' score

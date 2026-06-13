@@ -38,6 +38,11 @@ type Chunk struct {
 	DocumentID DocumentID
 	Seq        int
 	Text       string
+	// HeadingPath is the document section a chunk came from, joined with " > "
+	// (e.g. "Auth > Keys > Rotation"). Set by structure-aware chunkers; empty for
+	// formats or strategies without headings. It is provenance for display and
+	// inspection, not part of the chunk's identity.
+	HeadingPath string
 }
 
 // NewChunk constructs a Chunk with its deterministic ID.

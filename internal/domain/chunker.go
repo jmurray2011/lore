@@ -13,6 +13,11 @@ const (
 	DefaultChunkOverlap = 76
 )
 
+// FixedChunkerVersion is the algorithm version of the fixed (word-window)
+// strategy, recorded in a Collection's ChunkerSpec. Bump it if the fixed
+// chunker's output could change for the same input.
+const FixedChunkerVersion = 1
+
 // ParsedDoc is the input to a Chunker: the extracted text of one document plus
 // the context a strategy may need. ContentType lets the Registry dispatch to a
 // per-format strategy; SourceURI is carried for diagnostics.
@@ -22,12 +27,29 @@ type ParsedDoc struct {
 	SourceURI   string
 }
 
-// ChunkResult is one chunk a Chunker produced: the text to store and cite.
-// Identity (ChunkID, Seq) is assigned by the ingestor, not the chunker, since
-// only the ingestor knows the owning Document. Later strategies add embed-text
-// and section metadata; the type grows additively.
+// ChunkResult is one chunk a Chunker produced: the text to store and cite, plus
+// any section metadata. Identity (ChunkID, Seq) is assigned by the ingestor, not
+// the chunker, since only the ingestor knows the owning Document.
 type ChunkResult struct {
 	Text string
+	// EmbedText is the text to embed when it should differ from the stored Text —
+	// e.g. a heading-path context prefix prepended so the embedding captures the
+	// chunk's place in the document. Empty means embed Text as-is; either way the
+	// stored Text (what citations and inspection show) is the original, never the
+	// prefixed form.
+	EmbedText string
+	// HeadingPath is the document section the chunk came from (e.g.
+	// "Auth > Keys > Rotation"), set by structure-aware chunkers; empty otherwise.
+	HeadingPath string
+}
+
+// TextToEmbed returns the text that should be embedded for this chunk: the
+// EmbedText override when set, otherwise the stored Text.
+func (r ChunkResult) TextToEmbed() string {
+	if r.EmbedText != "" {
+		return r.EmbedText
+	}
+	return r.Text
 }
 
 // Chunker splits a parsed document into ordered chunks. Implementations are
@@ -43,17 +65,24 @@ type Chunker interface {
 // how per-format strategies (markdown, plain text, ...) plug in without the
 // ingestor knowing which is which; a future code-aware strategy is just another
 // registered entry (revisit decision 7 then — a tree-sitter strategy cannot be
-// pure-domain). Construct with NewRegistry; the zero value is not usable.
+// pure-domain). It also carries the ChunkerSpec the active configuration
+// corresponds to, so the use cases can pin it on new collections and refuse
+// re-ingest under a different one. Construct with NewRegistry; the zero value is
+// not usable.
 type Registry struct {
 	byType map[string]Chunker
 	def    Chunker
+	spec   ChunkerSpec
 }
 
 // NewRegistry builds a Registry routing each content type in byType to its
-// Chunker and everything else to def. It requires a non-nil default and rejects
-// nil entries; content-type keys are normalized so dispatch is case- and
-// parameter-insensitive.
-func NewRegistry(def Chunker, byType map[string]Chunker) (Registry, error) {
+// Chunker and everything else to def, identified by spec. It requires a valid
+// spec and a non-nil default, and rejects nil entries; content-type keys are
+// normalized so dispatch is case- and parameter-insensitive.
+func NewRegistry(spec ChunkerSpec, def Chunker, byType map[string]Chunker) (Registry, error) {
+	if err := spec.Validate(); err != nil {
+		return Registry{}, err
+	}
 	if def == nil {
 		return Registry{}, fmt.Errorf("chunker registry: %w: a default chunker is required", ErrInvalidArgument)
 	}
@@ -64,8 +93,12 @@ func NewRegistry(def Chunker, byType map[string]Chunker) (Registry, error) {
 		}
 		m[normalizeContentType(ct)] = c
 	}
-	return Registry{byType: m, def: def}, nil
+	return Registry{byType: m, def: def, spec: spec}, nil
 }
+
+// Spec returns the ChunkerSpec the registry's active configuration corresponds
+// to — what new collections are pinned to and re-ingest is checked against.
+func (r Registry) Spec() ChunkerSpec { return r.spec }
 
 // Chunk dispatches to the chunker registered for the document's content type, or
 // the default if none matches.

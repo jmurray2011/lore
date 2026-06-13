@@ -44,13 +44,19 @@ func TestRegistry(t *testing.T) {
 	md := recordingChunker{tag: "markdown"}
 
 	t.Run("requires a default", func(t *testing.T) {
-		if _, err := domain.NewRegistry(nil, nil); err == nil {
+		if _, err := domain.NewRegistry(testSpec, nil, nil); err == nil {
 			t.Fatal("want error for nil default")
 		}
 	})
 
+	t.Run("requires a valid spec", func(t *testing.T) {
+		if _, err := domain.NewRegistry(domain.ChunkerSpec{}, def, nil); err == nil {
+			t.Fatal("want error for zero spec")
+		}
+	})
+
 	t.Run("dispatches by content type, falls back to default", func(t *testing.T) {
-		reg, err := domain.NewRegistry(def, map[string]domain.Chunker{"text/markdown": md})
+		reg, err := domain.NewRegistry(testSpec, def, map[string]domain.Chunker{"text/markdown": md})
 		if err != nil {
 			t.Fatalf("NewRegistry: %v", err)
 		}

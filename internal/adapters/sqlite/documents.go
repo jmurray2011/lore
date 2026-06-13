@@ -34,8 +34,8 @@ func (r *DocumentRepository) Upsert(ctx context.Context, doc *domain.Document, c
 		}
 		for _, c := range chunks {
 			if _, err := tx.ExecContext(ctx,
-				`INSERT INTO chunks(id, document_id, seq, text) VALUES(?,?,?,?)`,
-				c.ID, c.DocumentID, c.Seq, c.Text); err != nil {
+				`INSERT INTO chunks(id, document_id, seq, text, heading_path) VALUES(?,?,?,?,?)`,
+				c.ID, c.DocumentID, c.Seq, c.Text, c.HeadingPath); err != nil {
 				return err
 			}
 		}
@@ -68,7 +68,7 @@ func (r *DocumentRepository) GetChunks(ctx context.Context, ids []domain.ChunkID
 	for i, id := range ids {
 		args[i] = id
 	}
-	query := `SELECT id, document_id, seq, text FROM chunks WHERE id IN (?` + strings.Repeat(",?", len(ids)-1) + `)`
+	query := `SELECT ` + chunkColumns + ` FROM chunks WHERE id IN (?` + strings.Repeat(",?", len(ids)-1) + `)`
 	rows, err := r.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: get chunks: %w", err)
@@ -77,8 +77,8 @@ func (r *DocumentRepository) GetChunks(ctx context.Context, ids []domain.ChunkID
 
 	byID := make(map[domain.ChunkID]domain.Chunk, len(ids))
 	for rows.Next() {
-		var c domain.Chunk
-		if err := rows.Scan(&c.ID, &c.DocumentID, &c.Seq, &c.Text); err != nil {
+		c, err := scanChunk(rows)
+		if err != nil {
 			return nil, fmt.Errorf("sqlite: scan chunk: %w", err)
 		}
 		byID[c.ID] = c
@@ -100,7 +100,7 @@ func (r *DocumentRepository) GetChunks(ctx context.Context, ids []domain.ChunkID
 // unknown document (or collection) yields no chunks and no error.
 func (r *DocumentRepository) GetChunksByDocument(ctx context.Context, collection string, id domain.DocumentID) ([]domain.Chunk, error) {
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT c.id, c.document_id, c.seq, c.text FROM chunks c
+		`SELECT `+chunkColumnsA+` FROM chunks c
 		 JOIN documents d ON c.document_id = d.id
 		 WHERE c.document_id = ? AND d.collection = ? ORDER BY c.seq`, id, collection)
 	if err != nil {
@@ -110,8 +110,8 @@ func (r *DocumentRepository) GetChunksByDocument(ctx context.Context, collection
 
 	var out []domain.Chunk
 	for rows.Next() {
-		var c domain.Chunk
-		if err := rows.Scan(&c.ID, &c.DocumentID, &c.Seq, &c.Text); err != nil {
+		c, err := scanChunk(rows)
+		if err != nil {
 			return nil, fmt.Errorf("sqlite: scan chunk: %w", err)
 		}
 		out = append(out, c)
@@ -131,7 +131,7 @@ func (r *DocumentRepository) GetChunksByIDs(ctx context.Context, collection stri
 		args = append(args, id)
 	}
 	args = append(args, collection)
-	query := `SELECT c.id, c.document_id, c.seq, c.text FROM chunks c
+	query := `SELECT ` + chunkColumnsA + ` FROM chunks c
 		 JOIN documents d ON c.document_id = d.id
 		 WHERE c.id IN (?` + strings.Repeat(",?", len(ids)-1) + `) AND d.collection = ?`
 	rows, err := r.db.QueryContext(ctx, query, args...)
@@ -142,8 +142,8 @@ func (r *DocumentRepository) GetChunksByIDs(ctx context.Context, collection stri
 
 	byID := make(map[domain.ChunkID]domain.Chunk, len(ids))
 	for rows.Next() {
-		var c domain.Chunk
-		if err := rows.Scan(&c.ID, &c.DocumentID, &c.Seq, &c.Text); err != nil {
+		c, err := scanChunk(rows)
+		if err != nil {
 			return nil, fmt.Errorf("sqlite: scan chunk: %w", err)
 		}
 		byID[c.ID] = c
@@ -222,6 +222,22 @@ func (r *DocumentRepository) ListDocuments(ctx context.Context, collection strin
 
 // docColumns is the document column list, in the order scanDoc expects.
 const docColumns = "id, collection, source_uri, hash, ingested_at, fingerprint"
+
+// chunkColumns (and chunkColumnsA, the c-aliased form for JOINs) is the chunk
+// column list in the order scanChunk expects.
+const (
+	chunkColumns  = "id, document_id, seq, text, heading_path"
+	chunkColumnsA = "c.id, c.document_id, c.seq, c.text, c.heading_path"
+)
+
+// scanChunk reads one chunk row in chunkColumns order.
+func scanChunk(s interface{ Scan(...any) error }) (domain.Chunk, error) {
+	var c domain.Chunk
+	if err := s.Scan(&c.ID, &c.DocumentID, &c.Seq, &c.Text, &c.HeadingPath); err != nil {
+		return domain.Chunk{}, err
+	}
+	return c, nil
+}
 
 // scanDoc reads one document row (docColumns order), parsing the stored
 // RFC3339Nano timestamp. It returns the raw Scan error (e.g. sql.ErrNoRows)

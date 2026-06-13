@@ -15,6 +15,11 @@ import (
 	"github.com/jmurray2011/lore/internal/app"
 )
 
+// EncodingName identifies the tiktoken encoding this adapter counts with. It is
+// recorded in a Collection's ChunkerSpec so a change of tokenizer (which alters
+// token counts and therefore chunk boundaries) is a chunker mismatch.
+const EncodingName = "o200k_base"
+
 // Counter counts tokens with a tiktoken codec. Construct with New; the zero value
 // is not usable.
 type Counter struct {

@@ -90,6 +90,9 @@ func (i *Ingestor) Ingest(ctx context.Context, collection, root string) (IngestS
 	if err := coll.AcceptsSpace(space); err != nil {
 		return IngestSummary{}, err
 	}
+	if err := coll.AcceptsChunker(i.chunkers.Spec()); err != nil {
+		return IngestSummary{}, err
+	}
 
 	var added, skipped, unsupported, chunks atomic.Int64
 
@@ -162,6 +165,9 @@ func (i *Ingestor) IngestContent(ctx context.Context, collection, uri, contentTy
 	if err := coll.AcceptsSpace(space); err != nil {
 		return IngestSummary{}, err
 	}
+	if err := coll.AcceptsChunker(i.chunkers.Spec()); err != nil {
+		return IngestSummary{}, err
+	}
 
 	// Empty fingerprint: stdin has no cheap source-side signature, so fast-skip
 	// is disabled; content-hash idempotency still applies once content is read.
@@ -231,25 +237,22 @@ func (i *Ingestor) ingestItem(ctx context.Context, coll *domain.Collection, item
 	if err != nil {
 		return ingestOutcome{}, fmt.Errorf("chunk %q: %w", item.URI, err)
 	}
-	texts := make([]string, len(results))
-	for j, r := range results {
-		texts[j] = r.Text
-	}
+	texts := embedTexts(results)
 
 	if existing != nil && existing.Unchanged(hash) {
 		// Content is unchanged but the fingerprint drifted (or was never recorded,
 		// e.g. a document ingested before fingerprints). Refresh it so the next
 		// sync fast-skips. The deterministic chunker yields the same chunks, so
 		// re-storing leaves the vectors valid and avoids re-embedding.
-		if item.Fingerprint != "" && existing.Fingerprint != item.Fingerprint && len(texts) > 0 {
-			if err := i.refreshFingerprint(ctx, coll, existing, item.Fingerprint, texts); err != nil {
+		if item.Fingerprint != "" && existing.Fingerprint != item.Fingerprint && len(results) > 0 {
+			if err := i.refreshFingerprint(ctx, coll, existing, item.Fingerprint, results); err != nil {
 				return ingestOutcome{}, err
 			}
 		}
 		return ingestOutcome{kind: kindSkipped}, nil
 	}
 
-	if len(texts) == 0 {
+	if len(results) == 0 {
 		return ingestOutcome{kind: kindSkipped}, nil
 	}
 
@@ -263,7 +266,7 @@ func (i *Ingestor) ingestItem(ctx context.Context, coll *domain.Collection, item
 		return ingestOutcome{}, fmt.Errorf("document %q: %w", item.URI, err)
 	}
 	doc.Fingerprint = item.Fingerprint
-	chunks, err := chunksFor(doc.ID, texts, item.URI)
+	chunks, err := chunksFor(doc.ID, results, item.URI)
 	if err != nil {
 		return ingestOutcome{}, err
 	}
@@ -309,13 +312,13 @@ func (i *Ingestor) ingestItem(ctx context.Context, coll *domain.Collection, item
 // preserving its hash, ingestion time, and (deterministically re-derived)
 // chunks, so the next sync can fast-skip it. Vectors are untouched: identical
 // text yields identical chunk IDs.
-func (i *Ingestor) refreshFingerprint(ctx context.Context, coll *domain.Collection, existing *domain.Document, fingerprint string, texts []string) error {
+func (i *Ingestor) refreshFingerprint(ctx context.Context, coll *domain.Collection, existing *domain.Document, fingerprint string, results []domain.ChunkResult) error {
 	doc, err := domain.NewDocument(coll.Name, existing.SourceURI, existing.Hash, existing.IngestedAt)
 	if err != nil {
 		return fmt.Errorf("refresh %q: %w", existing.SourceURI, err)
 	}
 	doc.Fingerprint = fingerprint
-	chunks, err := chunksFor(doc.ID, texts, existing.SourceURI)
+	chunks, err := chunksFor(doc.ID, results, existing.SourceURI)
 	if err != nil {
 		return err
 	}
@@ -325,14 +328,27 @@ func (i *Ingestor) refreshFingerprint(ctx context.Context, coll *domain.Collecti
 	return nil
 }
 
-// chunksFor builds the domain Chunks for a document's chunk texts.
-func chunksFor(docID domain.DocumentID, texts []string, uri string) ([]domain.Chunk, error) {
-	chunks := make([]domain.Chunk, len(texts))
-	for seq, t := range texts {
-		ch, err := domain.NewChunk(docID, seq, t)
+// embedTexts pulls the text to embed from each chunk result, in order. A chunk
+// may embed text that differs from what is stored (e.g. a heading-path context
+// prefix); the stored Text always remains the original (see chunksFor).
+func embedTexts(results []domain.ChunkResult) []string {
+	texts := make([]string, len(results))
+	for i, r := range results {
+		texts[i] = r.TextToEmbed()
+	}
+	return texts
+}
+
+// chunksFor builds the domain Chunks for a document's chunk results, carrying
+// each chunk's section metadata.
+func chunksFor(docID domain.DocumentID, results []domain.ChunkResult, uri string) ([]domain.Chunk, error) {
+	chunks := make([]domain.Chunk, len(results))
+	for seq, r := range results {
+		ch, err := domain.NewChunk(docID, seq, r.Text)
 		if err != nil {
 			return nil, fmt.Errorf("chunk %d of %q: %w", seq, uri, err)
 		}
+		ch.HeadingPath = r.HeadingPath
 		chunks[seq] = ch
 	}
 	return chunks, nil

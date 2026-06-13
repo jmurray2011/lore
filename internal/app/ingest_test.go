@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -23,14 +24,15 @@ func words(n int) string {
 }
 
 // chunker41 is a Registry whose default is a fixed 4/1-word chunker, the legacy
-// behavior the ingestion tests assert against.
+// behavior the ingestion tests assert against. Its spec is testChunkerSpec, so
+// collections built by mustCollection accept ingestion through it.
 func chunker41(t *testing.T) domain.Registry {
 	t.Helper()
 	c, err := domain.NewFixedChunker(4, 1)
 	if err != nil {
 		t.Fatalf("NewFixedChunker: %v", err)
 	}
-	reg, err := domain.NewRegistry(c, nil)
+	reg, err := domain.NewRegistry(testChunkerSpec(), c, nil)
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
@@ -46,6 +48,86 @@ func textItem(uri, content string) app.SourceItem {
 		ContentType: "text/plain",
 		Fingerprint: fmt.Sprintf("%d:%s", len(b), content),
 		Open:        func() ([]byte, error) { return b, nil },
+	}
+}
+
+func TestIngestorChunkerGuard(t *testing.T) {
+	ctx := context.Background()
+	space := testSpace()
+	src := &fakeSource{items: []app.SourceItem{textItem("file:///a.txt", words(10))}}
+
+	ingest := func(coll *domain.Collection) error {
+		ing := app.NewIngestor(newFakeCollections(coll), &fakeDocs{}, &fakeIndex{}, &fakeEmbedder{space: space}, &fakeExtractor{}, src, chunker41(t))
+		_, err := ing.Ingest(ctx, "docs", "/root")
+		return err
+	}
+
+	t.Run("re-ingest under a different chunker spec is refused", func(t *testing.T) {
+		// Pinned to a different size than the ingestor's chunker (chunker41 = 4/1).
+		other, err := domain.NewChunkerSpec("fixed", domain.FixedChunkerVersion, 8, 1, "words", false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		coll, err := domain.NewCollection("docs", space, other, time.Unix(0, 0).UTC())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := ingest(coll); !errors.Is(err, domain.ErrChunkerMismatch) {
+			t.Errorf("want ErrChunkerMismatch, got %v", err)
+		}
+	})
+
+	t.Run("legacy unpinned collection is refused", func(t *testing.T) {
+		legacy := &domain.Collection{Name: "docs", Space: space} // zero chunker spec, as loaded from a pre-pin DB
+		if err := ingest(legacy); !errors.Is(err, domain.ErrChunkerMismatch) {
+			t.Errorf("want ErrChunkerMismatch, got %v", err)
+		}
+	})
+}
+
+// prefixingChunker returns one chunk whose embedded text carries a context
+// prefix the stored text does not — the slice-5 embed/store split.
+type prefixingChunker struct{}
+
+func (prefixingChunker) Chunk(domain.ParsedDoc) ([]domain.ChunkResult, error) {
+	return []domain.ChunkResult{{
+		Text:        "body words here",
+		EmbedText:   "CTX\n\nbody words here",
+		HeadingPath: "CTX",
+	}}, nil
+}
+
+func TestIngestorEmbedsPrefixStoresOriginal(t *testing.T) {
+	ctx := context.Background()
+	space := testSpace()
+	coll := mustCollection(t, "docs", space)
+	reg, err := domain.NewRegistry(testChunkerSpec(), prefixingChunker{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	emb := &fakeEmbedder{space: space}
+	docs := &fakeDocs{}
+	src := &fakeSource{items: []app.SourceItem{textItem("file:///a.md", "anything")}}
+	ing := app.NewIngestor(newFakeCollections(coll), docs, &fakeIndex{}, emb, &fakeExtractor{}, src, reg)
+
+	if _, err := ing.Ingest(ctx, "docs", "/root"); err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+
+	// The embedder must have received the prefixed text...
+	if !slices.Contains(emb.embedded, "CTX\n\nbody words here") {
+		t.Errorf("embedder did not receive the prefixed text: %v", emb.embedded)
+	}
+	// ...but the stored chunk keeps the original (so citations/inspection are clean).
+	stored, err := docs.GetChunksByDocument(ctx, "docs", domain.DeriveDocumentID("docs", "file:///a.md"))
+	if err != nil {
+		t.Fatalf("GetChunksByDocument: %v", err)
+	}
+	if len(stored) != 1 || stored[0].Text != "body words here" {
+		t.Errorf("stored chunk should hold the original un-prefixed text, got %+v", stored)
+	}
+	if stored[0].HeadingPath != "CTX" {
+		t.Errorf("stored chunk heading path = %q, want CTX", stored[0].HeadingPath)
 	}
 }
 

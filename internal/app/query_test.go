@@ -15,9 +15,15 @@ func testSpace() domain.EmbeddingSpace {
 	return domain.EmbeddingSpace{Model: "test-embed", Dimensions: 3}
 }
 
+// testChunkerSpec is the spec the test chunker registry (chunker41) corresponds
+// to. Collections pinned to it accept ingestion through that registry.
+func testChunkerSpec() domain.ChunkerSpec {
+	return domain.ChunkerSpec{Strategy: "fixed", Version: domain.FixedChunkerVersion, Size: 4, Overlap: 1, Tokenizer: "words"}
+}
+
 func mustCollection(t *testing.T, name string, space domain.EmbeddingSpace) *domain.Collection {
 	t.Helper()
-	c, err := domain.NewCollection(name, space, time.Unix(0, 0).UTC())
+	c, err := domain.NewCollection(name, space, testChunkerSpec(), time.Unix(0, 0).UTC())
 	if err != nil {
 		t.Fatalf("NewCollection: %v", err)
 	}

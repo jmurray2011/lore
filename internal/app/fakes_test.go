@@ -90,6 +90,8 @@ type fakeEmbedder struct {
 	embedErr   error
 	embedCalls atomic.Int64
 	onEmbed    func() // optional hook invoked at the start of each Embed
+	mu         sync.Mutex
+	embedded   []string // every text Embed was asked to embed (guarded; Ingest is concurrent)
 }
 
 func (f *fakeEmbedder) Space(context.Context) (domain.EmbeddingSpace, error) {
@@ -98,6 +100,9 @@ func (f *fakeEmbedder) Space(context.Context) (domain.EmbeddingSpace, error) {
 
 func (f *fakeEmbedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
 	f.embedCalls.Add(1)
+	f.mu.Lock()
+	f.embedded = append(f.embedded, texts...)
+	f.mu.Unlock()
 	if f.onEmbed != nil {
 		f.onEmbed()
 	}

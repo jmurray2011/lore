@@ -122,6 +122,37 @@ func TestLoadIngestConcurrency(t *testing.T) {
 	}
 }
 
+func TestLoadChunk(t *testing.T) {
+	def := config.Defaults().Chunk
+	if def.Strategy != "structure" || def.Size != 512 || def.Overlap != 64 || !def.ContextPrefix {
+		t.Errorf("default chunk config = %+v, want structure/512/64/prefix-on", def)
+	}
+
+	cfg, err := config.Load("", env(map[string]string{
+		"LORE_CHUNK_STRATEGY":       "fixed",
+		"LORE_CHUNK_SIZE":           "256",
+		"LORE_CHUNK_OVERLAP":        "0",     // explicit zero must apply, not read as unset
+		"LORE_CHUNK_CONTEXT_PREFIX": "false", // default-true flag must be turn-off-able
+	}))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Chunk != (config.Chunk{Strategy: "fixed", Size: 256, Overlap: 0, ContextPrefix: false}) {
+		t.Errorf("chunk env overlay = %+v", cfg.Chunk)
+	}
+
+	bad := []map[string]string{
+		{"LORE_CHUNK_STRATEGY": "semantic"},                   // unknown strategy
+		{"LORE_CHUNK_SIZE": "0"},                              // non-positive size
+		{"LORE_CHUNK_SIZE": "10", "LORE_CHUNK_OVERLAP": "10"}, // overlap == size
+	}
+	for _, m := range bad {
+		if _, err := config.Load("", env(m)); !errors.Is(err, domain.ErrInvalidArgument) {
+			t.Errorf("%v: want ErrInvalidArgument, got %v", m, err)
+		}
+	}
+}
+
 func TestLoadAuth(t *testing.T) {
 	if got := config.Defaults().Provider.Auth; got != "bearer" {
 		t.Errorf("default auth = %q, want bearer", got)
