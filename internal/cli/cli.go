@@ -93,6 +93,7 @@ func NewRootCommand(build Builder, version string, out, errOut io.Writer) *cobra
 		newLsCmd(&deps),
 		newStatusCmd(&deps),
 		newDocsCmd(&deps),
+		newCatCmd(&deps),
 		newQueryCmd(&deps),
 		newAskCmd(&deps),
 		newRmCmd(&deps),
@@ -183,6 +184,12 @@ type hitView struct {
 	Seq     int     `json:"seq"`
 	Score   float64 `json:"score"`
 	Text    string  `json:"text"`
+}
+
+type chunkView struct {
+	ChunkID string `json:"chunk_id"`
+	Seq     int    `json:"seq"`
+	Text    string `json:"text"`
 }
 
 type citationView struct {

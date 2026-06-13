@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -111,6 +112,39 @@ func newDocsCmd(deps *Deps) *cobra.Command {
 			return render(cmd, views, human)
 		},
 	}
+}
+
+func newCatCmd(deps *Deps) *cobra.Command {
+	var docURI string
+	cmd := &cobra.Command{
+		Use:   "cat <collection> --doc <uri>",
+		Short: "Print a document's stored chunks (the extracted, chunked text as indexed)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) != 1 {
+				return fmt.Errorf("%w: cat takes exactly one collection name", domain.ErrInvalidArgument)
+			}
+			if docURI == "" {
+				return fmt.Errorf("%w: cat requires --doc <source-uri>", domain.ErrInvalidArgument)
+			}
+			chunks, err := deps.Catalog.DocumentChunks(cmd.Context(), args[0], docURI)
+			if err != nil {
+				return err
+			}
+			views := make([]chunkView, len(chunks))
+			var b strings.Builder
+			fmt.Fprintf(&b, "## %s\n\n", shortLabel(docURI))
+			for i, c := range chunks {
+				views[i] = chunkView{ChunkID: string(c.ID), Seq: c.Seq, Text: c.Text}
+				if i > 0 {
+					b.WriteString("\n---\n\n")
+				}
+				fmt.Fprintf(&b, "**chunk %d**\n\n%s\n", c.Seq, c.Text)
+			}
+			return render(cmd, views, strings.TrimRight(b.String(), "\n"))
+		},
+	}
+	cmd.Flags().StringVar(&docURI, "doc", "", "source URI of the document to print (required)")
+	return cmd
 }
 
 func newStatusCmd(deps *Deps) *cobra.Command {

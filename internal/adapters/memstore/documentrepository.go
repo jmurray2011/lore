@@ -3,6 +3,7 @@ package memstore
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 
 	"github.com/jmurray2011/lore/internal/app"
@@ -79,6 +80,26 @@ func (r *DocumentRepository) GetChunks(_ context.Context, ids []domain.ChunkID) 
 			out = append(out, c)
 		}
 	}
+	return out, nil
+}
+
+// GetChunksByDocument returns all chunks of one document in seq order. An
+// unknown document yields no chunks and no error.
+func (r *DocumentRepository) GetChunksByDocument(_ context.Context, collection string, id domain.DocumentID) ([]domain.Chunk, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	if d, ok := r.docs[id]; !ok || d.Collection != collection {
+		return nil, nil
+	}
+	ids := r.docChunks[id]
+	out := make([]domain.Chunk, 0, len(ids))
+	for _, cid := range ids {
+		if c, ok := r.byChunkID[cid]; ok {
+			out = append(out, c)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Seq < out[j].Seq })
 	return out, nil
 }
 

@@ -56,6 +56,7 @@ lore ask notes "unrelated question" --strict
 lore ls
 lore status notes
 lore docs notes                                        # list ingested documents
+lore cat notes --doc file:///abs/path/to/report.pdf  # print a document's stored chunks
 lore rm notes --doc file:///abs/path/to/report.pdf   # one document
 lore rm notes                                          # whole collection
 ```

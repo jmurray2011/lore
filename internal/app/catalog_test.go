@@ -114,3 +114,36 @@ func TestCatalogListDocuments(t *testing.T) {
 		}
 	})
 }
+
+func TestCatalogDocumentChunks(t *testing.T) {
+	ctx := context.Background()
+	space := testSpace()
+
+	docID := domain.DeriveDocumentID("docs", "file:///a.md")
+	doc, err := domain.NewDocument("docs", "file:///a.md", domain.HashContent([]byte("a")), time.Unix(0, 0).UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	chunks := []domain.Chunk{mustChunk(t, docID, 0, "first"), mustChunk(t, docID, 1, "second")}
+	docs := &fakeDocs{}
+	if err := docs.Upsert(ctx, doc, chunks); err != nil {
+		t.Fatal(err)
+	}
+	cat := app.NewCatalog(newFakeCollections(mustCollection(t, "docs", space)), docs, &fakeEmbedder{space: space})
+
+	t.Run("returns the document's chunks in seq order", func(t *testing.T) {
+		got, err := cat.DocumentChunks(ctx, "docs", "file:///a.md")
+		if err != nil {
+			t.Fatalf("DocumentChunks: %v", err)
+		}
+		if len(got) != 2 || got[0].Text != "first" || got[1].Text != "second" {
+			t.Errorf("chunks = %+v, want first then second", got)
+		}
+	})
+
+	t.Run("unknown document is ErrNotFound", func(t *testing.T) {
+		if _, err := cat.DocumentChunks(ctx, "docs", "file:///ghost.md"); !errors.Is(err, app.ErrNotFound) {
+			t.Errorf("want ErrNotFound, got %v", err)
+		}
+	})
+}

@@ -48,6 +48,10 @@ type DocumentRepository interface {
 	// GetChunks hydrates chunks by ID, preserving input order. IDs with no
 	// stored chunk are skipped, so the result may be shorter than the input.
 	GetChunks(ctx context.Context, ids []domain.ChunkID) ([]domain.Chunk, error)
+	// GetChunksByDocument returns all chunks of one document in seq order. An
+	// unknown document (or collection) yields no chunks and no error; existence
+	// is the caller's concern (resolve the document via GetBySource first).
+	GetChunksByDocument(ctx context.Context, collection string, id domain.DocumentID) ([]domain.Chunk, error)
 	// GetDocuments hydrates documents by ID, preserving input order. IDs with no
 	// stored document are skipped, so the result may be shorter than the input.
 	// Used to attach source provenance to retrieval results.

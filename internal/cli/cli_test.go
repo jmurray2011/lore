@@ -178,6 +178,50 @@ func TestCLICollectionLifecycle(t *testing.T) {
 	})
 }
 
+func TestCLICat(t *testing.T) {
+	deps, _, docs, _ := newDeps(stubEmbedder{space: testSpace()}, stubGenerator{})
+	if _, code := exec(deps, "init", "docs"); code != 0 {
+		t.Fatal("init failed")
+	}
+	ctx := context.Background()
+	docID := domain.DeriveDocumentID("docs", "file:///a.md")
+	doc, err := domain.NewDocument("docs", "file:///a.md", domain.HashContent([]byte("a")), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	c0, _ := domain.NewChunk(docID, 0, "the first chunk")
+	c1, _ := domain.NewChunk(docID, 1, "the second chunk")
+	if err := docs.Upsert(ctx, doc, []domain.Chunk{c0, c1}); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("prints a document's chunks in seq order as JSON", func(t *testing.T) {
+		out, code := exec(deps, "cat", "docs", "--doc", "file:///a.md", "--json")
+		if code != 0 {
+			t.Fatalf("cat exit %d, out %q", code, out)
+		}
+		var got []chunkViewJSON
+		if err := json.Unmarshal([]byte(out), &got); err != nil {
+			t.Fatalf("bad JSON %q: %v", out, err)
+		}
+		if len(got) != 2 || got[0].Seq != 0 || got[0].Text != "the first chunk" || got[1].Text != "the second chunk" {
+			t.Errorf("chunks = %+v", got)
+		}
+	})
+
+	t.Run("unknown document exits 3", func(t *testing.T) {
+		if _, code := exec(deps, "cat", "docs", "--doc", "file:///ghost.md"); code != 3 {
+			t.Errorf("want exit 3, got %d", code)
+		}
+	})
+
+	t.Run("missing --doc is a usage error", func(t *testing.T) {
+		if _, code := exec(deps, "cat", "docs"); code != 2 {
+			t.Errorf("want exit 2, got %d", code)
+		}
+	})
+}
+
 func TestCLIStatusDocCount(t *testing.T) {
 	deps, _, docs, _ := newDeps(stubEmbedder{space: testSpace()}, stubGenerator{})
 	if _, code := exec(deps, "init", "docs"); code != 0 {
@@ -716,6 +760,12 @@ type syncViewJSON struct {
 	Pruned      int      `json:"pruned"`
 	PrunedURIs  []string `json:"pruned_uris"`
 	DryRun      bool     `json:"dry_run"`
+}
+
+type chunkViewJSON struct {
+	ChunkID string `json:"chunk_id"`
+	Seq     int    `json:"seq"`
+	Text    string `json:"text"`
 }
 
 type hitViewJSON struct {
