@@ -52,10 +52,12 @@ func newQueryCmd(deps *Deps) *cobra.Command {
 
 func newAskCmd(deps *Deps) *cobra.Command {
 	var (
-		k      int
-		attach []string
-		strict bool
-		source string
+		k       int
+		attach  []string
+		strict  bool
+		source  string
+		expand  bool
+		explain bool
 	)
 	cmd := &cobra.Command{
 		Use:   "ask <collection> <question>",
@@ -72,9 +74,9 @@ func newAskCmd(deps *Deps) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			ans, err := deps.Ask.Ask(cmd.Context(), args[0], question, k, attachments, strict, source)
+			ans, hits, err := deps.Ask.AskExplain(cmd.Context(), args[0], question, k, attachments, strict, source)
 			if err != nil {
-				return err
+				return err // strict's ErrNoGrounding short-circuits here, before any expansion or explain output
 			}
 			if !ans.Grounded {
 				// Non-strict path: the answer rests on model knowledge alone.
@@ -88,13 +90,47 @@ func newAskCmd(deps *Deps) *cobra.Command {
 				citations[i] = citationView{ChunkID: string(c.ChunkID), Source: c.Source, Seq: c.Seq}
 			}
 			view := answerView{Text: ans.Text, Citations: citations, Grounded: ans.Grounded}
-			return render(cmd, view, answerMarkdown(ans))
+
+			// Base human output: the answer, optionally with each cited chunk's
+			// full text appended (--expand), numbered with the answer's ordinals.
+			md := answerMarkdown(ans)
+			if expand {
+				textByChunk := map[domain.ChunkID]string{}
+				if ids := citedChunkIDs(ans); len(ids) > 0 {
+					chunks, err := deps.Catalog.ChunksByIDs(cmd.Context(), args[0], ids)
+					if err != nil {
+						return err
+					}
+					view.Expansions = make([]chunkView, len(chunks))
+					for i, c := range chunks {
+						textByChunk[c.ID] = c.Text
+						view.Expansions[i] = chunkView{ChunkID: string(c.ID), Seq: c.Seq, Text: c.Text}
+					}
+				}
+				md = expandedSources(ans, textByChunk)
+			}
+
+			// --explain: report the chunks that grounded the answer, their scores,
+			// and which the answer cited — orthogonal to --expand and --source.
+			if explain {
+				cited := citedSet(ans)
+				rows := make([]retrievalHitView, len(hits)) // non-nil → json "[]" when empty
+				for i, h := range hits {
+					rows[i] = retrievalHitView{Rank: i + 1, ChunkID: string(h.Chunk.ID), Source: h.Source, Seq: h.Chunk.Seq, Score: h.Score, Cited: cited[h.Chunk.ID]}
+				}
+				view.Retrieval = &rows
+				md += "\n\n" + retrievalMarkdown(hits, cited)
+			}
+
+			return render(cmd, view, md)
 		},
 	}
 	cmd.Flags().IntVarP(&k, "top-k", "k", 8, "number of chunks to ground on (0 to ground on attachments only)")
 	cmd.Flags().StringArrayVar(&attach, "attach", nil, "file to send to the model as an attachment (repeatable)")
 	cmd.Flags().BoolVar(&strict, "strict", false, "fail (exit 1) instead of answering when nothing grounds the question")
 	cmd.Flags().StringVar(&source, "source", "", "restrict grounding to documents whose source matches this glob (e.g. '*.pdf')")
+	cmd.Flags().BoolVar(&expand, "expand", false, "append the full text of each cited chunk after the answer")
+	cmd.Flags().BoolVar(&explain, "explain", false, "report the retrieved chunks, their scores, and which the answer cited")
 	return cmd
 }
 

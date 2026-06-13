@@ -192,6 +192,52 @@ path = "/file/lore.db"
 	}
 }
 
+func TestLoadCache(t *testing.T) {
+	d := config.Defaults().Cache
+	if d.Enabled {
+		t.Error("cache must default to disabled (opt-in)")
+	}
+	if d.TTL != config.DefaultCacheTTL {
+		t.Errorf("default cache TTL = %s, want %s", d.TTL, config.DefaultCacheTTL)
+	}
+
+	t.Run("env enables and sets TTL", func(t *testing.T) {
+		cfg, err := config.Load("", env(map[string]string{"LORE_CACHE": "true", "LORE_CACHE_TTL": "2h"}))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if !cfg.Cache.Enabled || cfg.Cache.TTL != 2*time.Hour {
+			t.Errorf("cache env not applied: %+v", cfg.Cache)
+		}
+	})
+
+	t.Run("env beats file", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.toml")
+		content := "[cache]\nenabled = true\nttl = \"10m\"\n"
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := config.Load(path, env(map[string]string{"LORE_CACHE_TTL": "10s"}))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if !cfg.Cache.Enabled {
+			t.Error("file enabled lost")
+		}
+		if cfg.Cache.TTL != 10*time.Second {
+			t.Errorf("env TTL must beat file: %s", cfg.Cache.TTL)
+		}
+	})
+
+	t.Run("malformed and negative TTL are ErrInvalidArgument", func(t *testing.T) {
+		for _, bad := range []string{"soon", "-5m"} {
+			if _, err := config.Load("", env(map[string]string{"LORE_CACHE_TTL": bad})); !errors.Is(err, domain.ErrInvalidArgument) {
+				t.Errorf("LORE_CACHE_TTL=%q: want ErrInvalidArgument, got %v", bad, err)
+			}
+		}
+	})
+}
+
 func TestDefaultDBPath(t *testing.T) {
 	p, err := config.DefaultDBPath()
 	if err != nil {

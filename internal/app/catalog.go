@@ -72,3 +72,15 @@ func (c *Catalog) DocumentChunks(ctx context.Context, collection, sourceURI stri
 	}
 	return c.docs.GetChunksByDocument(ctx, collection, doc.ID)
 }
+
+// ChunksByIDs returns the collection's chunks with the given IDs, in input order,
+// for inspecting specific or cited chunks. IDs not present are omitted (the
+// caller diffs requested vs returned). It fails with ErrNotFound if the
+// collection does not exist, so an unknown collection is distinguished from
+// merely-absent chunk IDs.
+func (c *Catalog) ChunksByIDs(ctx context.Context, collection string, ids []string) ([]domain.Chunk, error) {
+	if _, err := c.collections.Get(ctx, collection); err != nil {
+		return nil, err
+	}
+	return c.docs.GetChunksByIDs(ctx, collection, ids)
+}
