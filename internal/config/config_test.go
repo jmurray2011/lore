@@ -302,6 +302,194 @@ func TestLoadRerank(t *testing.T) {
 	})
 }
 
+func TestProviderRoleConnectionsDefaultToSharedDefault(t *testing.T) {
+	// With no overrides at all, both roles resolve to the shared provider
+	// default — proving the additive change leaves the baseline untouched.
+	d := config.Defaults().Provider
+	want := config.Connection{
+		BaseURL: "https://api.openai.com/v1",
+		APIKey:  "",
+		Auth:    "bearer",
+		Timeout: config.DefaultProviderTimeout,
+	}
+	if got := d.EmbedConnection(); got != want {
+		t.Errorf("default embed connection = %+v, want shared default %+v", got, want)
+	}
+	if got := d.ChatConnection(); got != want {
+		t.Errorf("default chat connection = %+v, want shared default %+v", got, want)
+	}
+}
+
+func TestProviderRoleConnectionsBackwardCompatible(t *testing.T) {
+	// The non-negotiable: a shared-only config (no per-role overrides) resolves
+	// both roles to the shared values byte-for-byte, exactly as before the split.
+	cfg, err := config.Load("", env(map[string]string{
+		"LORE_BASE_URL": "https://shared.example/v1",
+		"LORE_API_KEY":  "sharedkey",
+		"LORE_AUTH":     "api-key",
+		"LORE_TIMEOUT":  "45s",
+	}))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := config.Connection{BaseURL: "https://shared.example/v1", APIKey: "sharedkey", Auth: "api-key", Timeout: 45 * time.Second}
+	if got := cfg.Provider.EmbedConnection(); got != want {
+		t.Errorf("embed connection = %+v, want shared %+v", got, want)
+	}
+	if got := cfg.Provider.ChatConnection(); got != want {
+		t.Errorf("chat connection = %+v, want shared %+v", got, want)
+	}
+}
+
+func TestProviderRoleOverridesAreIndependent(t *testing.T) {
+	// An override on one role wins over the shared value for that role only; the
+	// other role keeps falling back to shared. Unset override fields (embed auth,
+	// embed timeout here) still inherit shared.
+	cfg, err := config.Load("", env(map[string]string{
+		"LORE_BASE_URL":       "https://shared.example/v1",
+		"LORE_API_KEY":        "sharedkey",
+		"LORE_AUTH":           "bearer",
+		"LORE_TIMEOUT":        "60s",
+		"LORE_EMBED_BASE_URL": "http://localhost:8001/v1",
+		"LORE_EMBED_API_KEY":  "embedkey",
+		"LORE_EMBED_TIMEOUT":  "10s",
+	}))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	wantEmbed := config.Connection{BaseURL: "http://localhost:8001/v1", APIKey: "embedkey", Auth: "bearer", Timeout: 10 * time.Second}
+	if got := cfg.Provider.EmbedConnection(); got != wantEmbed {
+		t.Errorf("embed connection = %+v, want %+v", got, wantEmbed)
+	}
+	wantChat := config.Connection{BaseURL: "https://shared.example/v1", APIKey: "sharedkey", Auth: "bearer", Timeout: 60 * time.Second}
+	if got := cfg.Provider.ChatConnection(); got != wantChat {
+		t.Errorf("chat connection must be unaffected by embed overrides: got %+v, want %+v", got, wantChat)
+	}
+}
+
+func TestProviderRoleOverrideEnvBeatsFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	content := `
+[provider]
+base_url = "https://shared/v1"
+embed_base_url = "http://file-embed:8001/v1"
+chat_base_url = "http://file-chat:8003/v1"
+chat_timeout = "5s"
+`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(path, env(map[string]string{
+		"LORE_EMBED_BASE_URL": "http://env-embed:8001/v1",
+	}))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := cfg.Provider.EmbedConnection().BaseURL; got != "http://env-embed:8001/v1" {
+		t.Errorf("env override must beat file override: got %q", got)
+	}
+	if got := cfg.Provider.ChatConnection().BaseURL; got != "http://file-chat:8003/v1" {
+		t.Errorf("file chat override lost: got %q", got)
+	}
+	if got := cfg.Provider.ChatConnection().Timeout; got != 5*time.Second {
+		t.Errorf("file chat timeout override lost: got %s", got)
+	}
+}
+
+func TestProviderSplitEmbedLocalChatAzure(t *testing.T) {
+	// The motivating scenario in one process: embed against a local bearer
+	// endpoint, chat against Azure with api-key auth, models routed per role.
+	cfg, err := config.Load("", env(map[string]string{
+		"LORE_EMBED_BASE_URL": "http://localhost:8001/v1",
+		"LORE_EMBED_AUTH":     "bearer",
+		"LORE_EMBED_MODEL":    "Qwen/Qwen3-Embedding-4B",
+		"LORE_BASE_URL":       "https://res.openai.azure.com/openai/v1",
+		"LORE_AUTH":           "api-key",
+		"LORE_API_KEY":        "azurekey",
+		"LORE_CHAT_MODEL":     "gpt-4o",
+	}))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	embed := cfg.Provider.EmbedConnection()
+	if embed.BaseURL != "http://localhost:8001/v1" || embed.Auth != "bearer" {
+		t.Errorf("embed must use the local bearer connection: %+v", embed)
+	}
+	chat := cfg.Provider.ChatConnection()
+	if chat.BaseURL != "https://res.openai.azure.com/openai/v1" || chat.Auth != "api-key" || chat.APIKey != "azurekey" {
+		t.Errorf("chat must use the Azure api-key connection: %+v", chat)
+	}
+	if cfg.Provider.EmbedModel != "Qwen/Qwen3-Embedding-4B" {
+		t.Errorf("embed model = %q", cfg.Provider.EmbedModel)
+	}
+	if cfg.Provider.ChatModel != "gpt-4o" {
+		t.Errorf("chat model = %q", cfg.Provider.ChatModel)
+	}
+}
+
+func TestProviderFullyLocalThreeEndpoints(t *testing.T) {
+	// Embed, chat, and rerank each pointed at their own local endpoint; rerank
+	// stays fully independent (no fallback to the shared provider block).
+	cfg, err := config.Load("", env(map[string]string{
+		"LORE_EMBED_BASE_URL":  "http://localhost:8001/v1",
+		"LORE_CHAT_BASE_URL":   "http://localhost:8003/v1",
+		"LORE_RERANK_BASE_URL": "http://localhost:8002/v1",
+		"LORE_RERANK_MODEL":    "bge-reranker",
+	}))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := cfg.Provider.EmbedConnection().BaseURL; got != "http://localhost:8001/v1" {
+		t.Errorf("embed base = %q", got)
+	}
+	if got := cfg.Provider.ChatConnection().BaseURL; got != "http://localhost:8003/v1" {
+		t.Errorf("chat base = %q", got)
+	}
+	if cfg.Rerank.BaseURL != "http://localhost:8002/v1" {
+		t.Errorf("rerank base = %q", cfg.Rerank.BaseURL)
+	}
+}
+
+func TestProviderRoleMixedAuth(t *testing.T) {
+	cfg, err := config.Load("", env(map[string]string{
+		"LORE_EMBED_AUTH": "bearer",
+		"LORE_CHAT_AUTH":  "api-key",
+	}))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := cfg.Provider.EmbedConnection().Auth; got != "bearer" {
+		t.Errorf("embed auth = %q, want bearer", got)
+	}
+	if got := cfg.Provider.ChatConnection().Auth; got != "api-key" {
+		t.Errorf("chat auth = %q, want api-key", got)
+	}
+}
+
+func TestProviderRoleAuthInvalid(t *testing.T) {
+	for _, key := range []string{"LORE_EMBED_AUTH", "LORE_CHAT_AUTH"} {
+		if _, err := config.Load("", env(map[string]string{key: "oauth"})); !errors.Is(err, domain.ErrInvalidArgument) {
+			t.Errorf("%s=oauth: want ErrInvalidArgument, got %v", key, err)
+		}
+	}
+}
+
+func TestProviderRoleTimeoutZeroInheritsShared(t *testing.T) {
+	// A per-role timeout of 0 means "inherit the shared timeout", not "disable":
+	// disabling is expressed by setting the shared provider.timeout to 0, which
+	// both roles then inherit.
+	cfg, err := config.Load("", env(map[string]string{
+		"LORE_TIMEOUT":       "30s",
+		"LORE_EMBED_TIMEOUT": "0",
+	}))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := cfg.Provider.EmbedConnection().Timeout; got != 30*time.Second {
+		t.Errorf("embed timeout = %s, want inherited 30s", got)
+	}
+}
+
 func TestDefaultDBPath(t *testing.T) {
 	p, err := config.DefaultDBPath()
 	if err != nil {

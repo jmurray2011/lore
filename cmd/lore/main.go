@@ -89,17 +89,16 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		}
 		cleanup = store.close
 
-		auth := openai.AuthBearer
-		if cfg.Provider.Auth == "api-key" {
-			auth = openai.AuthAPIKey
-		}
+		// Embed and chat are independently-targetable: each resolves its own
+		// connection (per-role override → shared provider.* → default, decision
+		// 60), so one process can embed against one endpoint and chat against
+		// another. A separate http.Client per role carries that role's timeout (0
+		// disables) — the safety net against a hung provider in non-interactive
+		// use (decision 36).
+		embedConn := cfg.Provider.EmbedConnection()
+		chatConn := cfg.Provider.ChatConnection()
 
-		// One client shared by embedder and generator (connection reuse); its
-		// per-request timeout (0 disables) is the safety net against a hung
-		// provider in non-interactive use (decision 36).
-		httpClient := &http.Client{Timeout: cfg.Provider.Timeout}
-
-		embedder, err := openai.NewEmbedder(cfg.Provider.BaseURL, cfg.Provider.APIKey, cfg.Provider.EmbedModel, cfg.Provider.Dimensions, auth, httpClient)
+		embedder, err := openai.NewEmbedder(embedConn.BaseURL, embedConn.APIKey, cfg.Provider.EmbedModel, cfg.Provider.Dimensions, authStyle(embedConn.Auth), &http.Client{Timeout: embedConn.Timeout})
 		if err != nil {
 			return cli.Deps{}, err
 		}
@@ -108,7 +107,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			ImageInput:       cfg.Provider.ImageInput,
 			DocumentInput:    cfg.Provider.DocumentInput,
 		}
-		gen, err := openai.NewGenerator(cfg.Provider.BaseURL, cfg.Provider.APIKey, cfg.Provider.ChatModel, caps, auth, httpClient)
+		gen, err := openai.NewGenerator(chatConn.BaseURL, chatConn.APIKey, cfg.Provider.ChatModel, caps, authStyle(chatConn.Auth), &http.Client{Timeout: chatConn.Timeout})
 		if err != nil {
 			return cli.Deps{}, err
 		}
@@ -177,6 +176,16 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return fail(err)
 	}
 	return 0
+}
+
+// authStyle maps a resolved connection's auth string to the openai/httpjson
+// auth scheme. Config validation guarantees the value is "bearer" or "api-key",
+// so an unrecognized value defensively falls back to bearer.
+func authStyle(auth string) openai.AuthStyle {
+	if auth == "api-key" {
+		return openai.AuthAPIKey
+	}
+	return openai.AuthBearer
 }
 
 // storage holds the persistence ports for one backend plus a close hook.

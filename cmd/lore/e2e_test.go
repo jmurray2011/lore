@@ -226,6 +226,173 @@ func TestEndToEndAnswerCache(t *testing.T) {
 	}
 }
 
+// TestEndToEndSplitEmbedChatEndpoints proves the headline of decision 60: in a
+// single process the embed role and the chat role reach independently-configured
+// endpoints with independently-configured auth. Embed is pointed at one server
+// with bearer auth; chat at a different server with api-key auth; the shared
+// provider.base_url is left unset entirely, so the only way both roles work is
+// per-role connection resolution.
+func TestEndToEndSplitEmbedChatEndpoints(t *testing.T) {
+	if testing.Short() {
+		t.Skip("e2e: builds the binary and runs it as subprocesses")
+	}
+
+	const dims = 8
+	embedSrv, embedRec := embedStub(t, dims)
+	defer embedSrv.Close()
+	chatSrv, chatRec := chatStub(t)
+	defer chatSrv.Close()
+
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "lore")
+	if runtime.GOOS == "windows" {
+		bin += ".exe"
+	}
+	build := exec.Command("go", "build", "-o", bin, ".")
+	build.Stderr = os.Stderr
+	if err := build.Run(); err != nil {
+		t.Fatalf("build binary: %v", err)
+	}
+
+	env := append(os.Environ(),
+		// No LORE_BASE_URL: both roles override the shared connection entirely.
+		"LORE_API_KEY=secret", // shared key, inherited by both roles
+		"LORE_EMBED_BASE_URL="+embedSrv.URL+"/v1",
+		"LORE_EMBED_AUTH=bearer",
+		"LORE_EMBED_MODEL=stub-embed",
+		"LORE_CHAT_BASE_URL="+chatSrv.URL+"/v1",
+		"LORE_CHAT_AUTH=api-key",
+		"LORE_CHAT_MODEL=stub-chat",
+		"LORE_DIMENSIONS="+strconv.Itoa(dims),
+		"LORE_STORAGE_BACKEND=sqlite",
+		"LORE_DB_PATH="+filepath.Join(dir, "lore.db"),
+		"XDG_CONFIG_HOME="+filepath.Join(dir, "config"),
+	)
+	mustSucceed := func(t *testing.T, args ...string) {
+		t.Helper()
+		var out, errb bytes.Buffer
+		cmd := exec.Command(bin, args...)
+		cmd.Env = env
+		cmd.Stdout = &out
+		cmd.Stderr = &errb
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("%v: %v, stderr=%s", args, err, errb.String())
+		}
+	}
+
+	txtPath := filepath.Join(dir, "alpha.txt")
+	if err := os.WriteFile(txtPath, []byte("alpha beta gamma delta epsilon"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mustSucceed(t, "init", "docs")
+	mustSucceed(t, "add", "docs", txtPath)          // embeds the chunk → embed endpoint only
+	mustSucceed(t, "ask", "docs", "what is alpha?") // embeds the query + synthesizes → both
+
+	if embedRec.count() == 0 {
+		t.Fatal("embed role never reached its configured endpoint")
+	}
+	if chatRec.count() == 0 {
+		t.Fatal("chat role never reached its configured endpoint")
+	}
+	// Mixed auth: embed sent bearer, chat sent api-key — each only its own scheme.
+	if embedRec.authHeader() != "Bearer secret" {
+		t.Errorf("embed Authorization = %q, want %q", embedRec.authHeader(), "Bearer secret")
+	}
+	if embedRec.apiKeyHeader() != "" {
+		t.Errorf("embed must not send the api-key header: %q", embedRec.apiKeyHeader())
+	}
+	if chatRec.apiKeyHeader() != "secret" {
+		t.Errorf("chat api-key = %q, want %q", chatRec.apiKeyHeader(), "secret")
+	}
+	if chatRec.authHeader() != "" {
+		t.Errorf("chat must not send the Authorization header: %q", chatRec.authHeader())
+	}
+}
+
+// endpointRecorder captures the most recent request's auth headers and counts
+// calls, so a test can assert which role hit which endpoint with which scheme.
+type endpointRecorder struct {
+	mu     sync.Mutex
+	calls  int
+	auth   string
+	apiKey string
+}
+
+func (e *endpointRecorder) record(r *http.Request) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.calls++
+	e.auth = r.Header.Get("Authorization")
+	e.apiKey = r.Header.Get("api-key")
+}
+
+func (e *endpointRecorder) count() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.calls
+}
+
+func (e *endpointRecorder) authHeader() string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.auth
+}
+
+func (e *endpointRecorder) apiKeyHeader() string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.apiKey
+}
+
+// embedStub serves only /v1/embeddings, returning a fixed unit vector, and
+// records the auth headers it saw. A request to any other path 404s, which fails
+// the driving command — proving the chat role never lands here.
+func embedStub(t *testing.T, dims int) (*httptest.Server, *endpointRecorder) {
+	t.Helper()
+	rec := &endpointRecorder{}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/embeddings", func(w http.ResponseWriter, r *http.Request) {
+		rec.record(r)
+		var req struct {
+			Input []string `json:"input"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		vec := make([]float32, dims)
+		if dims > 0 {
+			vec[0] = 1
+		}
+		type datum struct {
+			Index     int       `json:"index"`
+			Embedding []float32 `json:"embedding"`
+		}
+		var resp struct {
+			Data []datum `json:"data"`
+		}
+		for i := range req.Input {
+			resp.Data = append(resp.Data, datum{Index: i, Embedding: vec})
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	})
+	return httptest.NewServer(mux), rec
+}
+
+// chatStub serves only /v1/chat/completions and records the auth headers it saw.
+func chatStub(t *testing.T) (*httptest.Server, *endpointRecorder) {
+	t.Helper()
+	rec := &endpointRecorder{}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+		rec.record(r)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"stub answer grounded in context"}}]}`)
+	})
+	return httptest.NewServer(mux), rec
+}
+
 // chatRecorder captures the most recent /v1/chat/completions request body and
 // counts requests, so a test can assert what the binary sent and how often.
 type chatRecorder struct {
