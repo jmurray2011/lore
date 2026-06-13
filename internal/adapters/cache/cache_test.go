@@ -2,6 +2,7 @@ package cache_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -21,6 +22,81 @@ type countingGen struct {
 func (g *countingGen) Synthesize(_ context.Context, _ string, _ []domain.ChunkHit, _ []domain.Attachment) (app.Answer, error) {
 	g.calls++
 	return g.answer, nil
+}
+
+// streamingCountingGen also implements app.StreamingGenerator, emitting its
+// answer word-by-word so a streamed miss is distinguishable from a replayed hit.
+type streamingCountingGen struct {
+	streamCalls int
+	bufCalls    int
+	answer      app.Answer
+}
+
+func (g *streamingCountingGen) Synthesize(_ context.Context, _ string, _ []domain.ChunkHit, _ []domain.Attachment) (app.Answer, error) {
+	g.bufCalls++
+	return g.answer, nil
+}
+
+func (g *streamingCountingGen) SynthesizeStream(_ context.Context, _ string, _ []domain.ChunkHit, _ []domain.Attachment, onDelta func(string)) (app.Answer, error) {
+	g.streamCalls++
+	for i, w := range strings.Fields(g.answer.Text) {
+		if i > 0 {
+			onDelta(" ")
+		}
+		onDelta(w)
+	}
+	return g.answer, nil
+}
+
+func TestCachingGeneratorStream(t *testing.T) {
+	ctx := context.Background()
+	docID := domain.DeriveDocumentID("docs", "file:///a.md")
+	c, _ := domain.NewChunk(docID, 0, "alpha text")
+	hits := []domain.ChunkHit{{Chunk: c, Source: "file:///a.md", Score: 0.9}}
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	clock := func() time.Time { return now }
+
+	t.Run("miss streams via inner and caches; hit replays whole text once, inner untouched", func(t *testing.T) {
+		inner := &streamingCountingGen{answer: app.Answer{Text: "the cached answer"}}
+		g := cache.NewGenerator(inner, memstore.NewAnswerCache(), "salt", time.Hour, clock)
+
+		var first strings.Builder
+		var firstDeltas int
+		if _, err := g.SynthesizeStream(ctx, "why?", hits, nil, func(s string) { first.WriteString(s); firstDeltas++ }); err != nil {
+			t.Fatal(err)
+		}
+		if inner.streamCalls != 1 || inner.bufCalls != 0 {
+			t.Errorf("miss should stream via inner: stream=%d buf=%d", inner.streamCalls, inner.bufCalls)
+		}
+		if first.String() != "the cached answer" || firstDeltas < 3 {
+			t.Errorf("miss streamed %q in %d deltas", first.String(), firstDeltas)
+		}
+
+		var second strings.Builder
+		var secondDeltas int
+		if _, err := g.SynthesizeStream(ctx, "why?", hits, nil, func(s string) { second.WriteString(s); secondDeltas++ }); err != nil {
+			t.Fatal(err)
+		}
+		if inner.streamCalls != 1 {
+			t.Errorf("hit must not call inner again, got %d stream calls", inner.streamCalls)
+		}
+		if second.String() != "the cached answer" || secondDeltas != 1 {
+			t.Errorf("hit should replay the whole text in one delta: %q in %d deltas", second.String(), secondDeltas)
+		}
+	})
+
+	t.Run("a non-streaming inner falls back to one whole-text delta on a miss", func(t *testing.T) {
+		inner := &countingGen{answer: app.Answer{Text: "buffered"}}
+		g := cache.NewGenerator(inner, memstore.NewAnswerCache(), "salt", time.Hour, clock)
+		var got strings.Builder
+		var deltas int
+		if _, err := g.SynthesizeStream(ctx, "why?", hits, nil, func(s string) { got.WriteString(s); deltas++ }); err != nil {
+			t.Fatal(err)
+		}
+		if got.String() != "buffered" || deltas != 1 || inner.calls != 1 {
+			t.Errorf("fallback: %q in %d deltas, %d inner calls", got.String(), deltas, inner.calls)
+		}
+	})
 }
 
 func TestCachingGenerator(t *testing.T) {
