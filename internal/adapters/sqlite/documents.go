@@ -96,6 +96,29 @@ func (r *DocumentRepository) GetChunks(ctx context.Context, ids []domain.ChunkID
 	return out, nil
 }
 
+// GetChunksByDocument returns all chunks of one document in seq order. An
+// unknown document (or collection) yields no chunks and no error.
+func (r *DocumentRepository) GetChunksByDocument(ctx context.Context, collection string, id domain.DocumentID) ([]domain.Chunk, error) {
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT c.id, c.document_id, c.seq, c.text FROM chunks c
+		 JOIN documents d ON c.document_id = d.id
+		 WHERE c.document_id = ? AND d.collection = ? ORDER BY c.seq`, id, collection)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: get chunks by document: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []domain.Chunk
+	for rows.Next() {
+		var c domain.Chunk
+		if err := rows.Scan(&c.ID, &c.DocumentID, &c.Seq, &c.Text); err != nil {
+			return nil, fmt.Errorf("sqlite: scan chunk: %w", err)
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
 // GetDocuments hydrates documents by ID, preserving input order and skipping IDs
 // with no stored document.
 func (r *DocumentRepository) GetDocuments(ctx context.Context, ids []domain.DocumentID) ([]*domain.Document, error) {

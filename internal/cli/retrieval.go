@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"io"
 	"mime"
 	"os"
 	"path/filepath"
@@ -12,8 +13,11 @@ import (
 	"github.com/jmurray2011/lore/internal/domain"
 )
 
-func newQueryCmd(deps Deps) *cobra.Command {
-	var k int
+func newQueryCmd(deps *Deps) *cobra.Command {
+	var (
+		k      int
+		source string
+	)
 	cmd := &cobra.Command{
 		Use:   "query <collection> <query>",
 		Short: "Retrieve the most similar chunks",
@@ -21,7 +25,11 @@ func newQueryCmd(deps Deps) *cobra.Command {
 			if len(args) != 2 {
 				return fmt.Errorf("%w: query takes <collection> and a query string", domain.ErrInvalidArgument)
 			}
-			hits, err := deps.Query.Query(cmd.Context(), args[0], args[1], k)
+			queryText, err := argOrStdin(cmd, args[1])
+			if err != nil {
+				return err
+			}
+			hits, err := deps.Query.Query(cmd.Context(), args[0], queryText, k, source)
 			if err != nil {
 				return err
 			}
@@ -38,13 +46,16 @@ func newQueryCmd(deps Deps) *cobra.Command {
 		},
 	}
 	cmd.Flags().IntVarP(&k, "top-k", "k", 8, "number of chunks to retrieve")
+	cmd.Flags().StringVar(&source, "source", "", "restrict to documents whose source matches this glob (e.g. '*.pdf')")
 	return cmd
 }
 
-func newAskCmd(deps Deps) *cobra.Command {
+func newAskCmd(deps *Deps) *cobra.Command {
 	var (
 		k      int
 		attach []string
+		strict bool
+		source string
 	)
 	cmd := &cobra.Command{
 		Use:   "ask <collection> <question>",
@@ -57,20 +68,47 @@ func newAskCmd(deps Deps) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			ans, err := deps.Ask.Ask(cmd.Context(), args[0], args[1], k, attachments)
+			question, err := argOrStdin(cmd, args[1])
 			if err != nil {
 				return err
+			}
+			ans, err := deps.Ask.Ask(cmd.Context(), args[0], question, k, attachments, strict, source)
+			if err != nil {
+				return err
+			}
+			if !ans.Grounded {
+				// Non-strict path: the answer rests on model knowledge alone.
+				// Warn on stderr so pipes keep clean stdout while a human or CI
+				// log still sees it. --strict turns this into an error instead.
+				_, _ = fmt.Fprintf(cmd.ErrOrStderr(),
+					"lore: warning: no chunks matched and no attachments; the answer for %q is not grounded (use --strict to fail instead)\n", args[0])
 			}
 			citations := make([]citationView, len(ans.Citations))
 			for i, c := range ans.Citations {
 				citations[i] = citationView{ChunkID: string(c.ChunkID), Source: c.Source, Seq: c.Seq}
 			}
-			return render(cmd, answerView{Text: ans.Text, Citations: citations}, answerMarkdown(ans))
+			view := answerView{Text: ans.Text, Citations: citations, Grounded: ans.Grounded}
+			return render(cmd, view, answerMarkdown(ans))
 		},
 	}
 	cmd.Flags().IntVarP(&k, "top-k", "k", 8, "number of chunks to ground on (0 to ground on attachments only)")
 	cmd.Flags().StringArrayVar(&attach, "attach", nil, "file to send to the model as an attachment (repeatable)")
+	cmd.Flags().BoolVar(&strict, "strict", false, "fail (exit 1) instead of answering when nothing grounds the question")
+	cmd.Flags().StringVar(&source, "source", "", "restrict grounding to documents whose source matches this glob (e.g. '*.pdf')")
 	return cmd
+}
+
+// argOrStdin returns arg unchanged, or the trimmed contents of stdin when arg is
+// "-", so query/ask can take their text from a pipe.
+func argOrStdin(cmd *cobra.Command, arg string) (string, error) {
+	if arg != "-" {
+		return arg, nil
+	}
+	data, err := io.ReadAll(cmd.InOrStdin())
+	if err != nil {
+		return "", fmt.Errorf("read stdin: %w", err)
+	}
+	return strings.TrimSpace(string(data)), nil
 }
 
 // hitLabel renders a hit's provenance for human output: "file.docx · chunk 3"

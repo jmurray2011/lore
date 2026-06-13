@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jmurray2011/lore/internal/config"
 	"github.com/jmurray2011/lore/internal/domain"
@@ -225,6 +226,121 @@ func TestLoadInvalidIsErrInvalidArgument(t *testing.T) {
 		if _, err := config.Load("", env(c.env)); !errors.Is(err, domain.ErrInvalidArgument) {
 			t.Errorf("%s: want ErrInvalidArgument, got %v", c.name, err)
 		}
+	}
+}
+
+func TestTimeoutDefaultAndOverride(t *testing.T) {
+	cfg, err := config.Load("", env(nil))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Provider.Timeout != 120*time.Second {
+		t.Errorf("default timeout = %v, want 120s", cfg.Provider.Timeout)
+	}
+
+	cfg, err = config.Load("", env(map[string]string{"LORE_TIMEOUT": "30s"}))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Provider.Timeout != 30*time.Second {
+		t.Errorf("env timeout = %v, want 30s", cfg.Provider.Timeout)
+	}
+
+	// "0" disables the per-request timeout (escape hatch).
+	cfg, err = config.Load("", env(map[string]string{"LORE_TIMEOUT": "0"}))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Provider.Timeout != 0 {
+		t.Errorf("zero timeout = %v, want 0 (disabled)", cfg.Provider.Timeout)
+	}
+}
+
+func TestTimeoutInvalidIsErrInvalidArgument(t *testing.T) {
+	for _, v := range []string{"soon", "-5s"} {
+		if _, err := config.Load("", env(map[string]string{"LORE_TIMEOUT": v})); !errors.Is(err, domain.ErrInvalidArgument) {
+			t.Errorf("LORE_TIMEOUT=%q: want ErrInvalidArgument, got %v", v, err)
+		}
+	}
+}
+
+func TestResolveFlagsOutrankEnvAndFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	content := `
+[log]
+level = "warn"
+format = "json"
+`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// File says warn/json, env says debug/json, flags say error/text.
+	// Flags rank highest, so the result must be error/text.
+	flags := config.FlagOverrides{LogLevel: "error", LogFormat: "text"}
+	cfg, err := config.Resolve(path, env(map[string]string{
+		"LORE_LOG_LEVEL":  "debug",
+		"LORE_LOG_FORMAT": "json",
+	}), flags)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if cfg.Log.Level != slog.LevelError {
+		t.Errorf("flag level must beat env and file: got %v", cfg.Log.Level)
+	}
+	if cfg.Log.Format != "text" {
+		t.Errorf("flag format must beat env and file: got %q", cfg.Log.Format)
+	}
+}
+
+func TestResolveVerboseForcesDebug(t *testing.T) {
+	cfg, err := config.Resolve("", env(nil), config.FlagOverrides{Verbose: true})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if cfg.Log.Level != slog.LevelDebug {
+		t.Errorf("--verbose should force debug, got %v", cfg.Log.Level)
+	}
+}
+
+func TestResolveExplicitLevelBeatsVerbose(t *testing.T) {
+	cfg, err := config.Resolve("", env(nil), config.FlagOverrides{LogLevel: "warn", Verbose: true})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if cfg.Log.Level != slog.LevelWarn {
+		t.Errorf("explicit --log-level should beat --verbose, got %v", cfg.Log.Level)
+	}
+}
+
+func TestResolveInvalidFlagIsErrInvalidArgument(t *testing.T) {
+	cases := []struct {
+		name  string
+		flags config.FlagOverrides
+	}{
+		{"bad level", config.FlagOverrides{LogLevel: "loud"}},
+		{"bad format", config.FlagOverrides{LogFormat: "yaml"}},
+	}
+	for _, c := range cases {
+		if _, err := config.Resolve("", env(nil), c.flags); !errors.Is(err, domain.ErrInvalidArgument) {
+			t.Errorf("%s: want ErrInvalidArgument, got %v", c.name, err)
+		}
+	}
+}
+
+func TestLoadIsResolveWithoutFlags(t *testing.T) {
+	// Load must remain equivalent to Resolve with empty overrides so existing
+	// callers and tests are unaffected.
+	got, err := config.Load("", env(map[string]string{"LORE_LOG_LEVEL": "warn"}))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want, err := config.Resolve("", env(map[string]string{"LORE_LOG_LEVEL": "warn"}), config.FlagOverrides{})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if got != want {
+		t.Errorf("Load %+v != Resolve %+v", got, want)
 	}
 }
 

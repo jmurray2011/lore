@@ -44,7 +44,7 @@ func TestSyncer(t *testing.T) {
 		src := &fakeSource{items: []app.SourceItem{textItem("file:///a.txt", words(10))}}
 		sy := newSyncer(coll, src, &fakeDocs{}, &fakeIndex{})
 
-		sum, err := sy.Sync(ctx, "docs", []string{"/root"}, false)
+		sum, err := sy.Sync(ctx, "docs", []string{"/root"}, false, false)
 		if err != nil {
 			t.Fatalf("Sync: %v", err)
 		}
@@ -60,7 +60,7 @@ func TestSyncer(t *testing.T) {
 		docs := &fakeDocs{}
 		sy := newSyncer(coll, src, docs, &fakeIndex{})
 
-		sum, err := sy.Sync(ctx, "docs", nil, false)
+		sum, err := sy.Sync(ctx, "docs", nil, false, false)
 		if err != nil {
 			t.Fatalf("Sync: %v", err)
 		}
@@ -75,14 +75,14 @@ func TestSyncer(t *testing.T) {
 	t.Run("no path and no remembered source is ErrInvalidArgument", func(t *testing.T) {
 		coll := mustCollection(t, "docs", space)
 		sy := newSyncer(coll, &fakeSource{}, &fakeDocs{}, &fakeIndex{})
-		if _, err := sy.Sync(ctx, "docs", nil, false); !errors.Is(err, domain.ErrInvalidArgument) {
+		if _, err := sy.Sync(ctx, "docs", nil, false, false); !errors.Is(err, domain.ErrInvalidArgument) {
 			t.Errorf("want ErrInvalidArgument, got %v", err)
 		}
 	})
 
 	t.Run("unknown collection is ErrNotFound", func(t *testing.T) {
 		sy := newSyncer(mustCollection(t, "docs", space), &fakeSource{}, &fakeDocs{}, &fakeIndex{})
-		if _, err := sy.Sync(ctx, "missing", []string{"/root"}, false); !errors.Is(err, app.ErrNotFound) {
+		if _, err := sy.Sync(ctx, "missing", []string{"/root"}, false, false); !errors.Is(err, app.ErrNotFound) {
 			t.Errorf("want ErrNotFound, got %v", err)
 		}
 	})
@@ -97,7 +97,7 @@ func TestSyncer(t *testing.T) {
 		src := &fakeSource{items: []app.SourceItem{textItem("file:///a.txt", words(10))}}
 		sy := newSyncer(coll, src, docs, idx)
 
-		sum, err := sy.Sync(ctx, "docs", []string{"/root"}, true)
+		sum, err := sy.Sync(ctx, "docs", []string{"/root"}, true, false)
 		if err != nil {
 			t.Fatalf("Sync: %v", err)
 		}
@@ -120,7 +120,7 @@ func TestSyncer(t *testing.T) {
 		src := &fakeSource{items: []app.SourceItem{textItem("file:///a.txt", words(10))}}
 		sy := newSyncer(coll, src, docs, idx)
 
-		sum, err := sy.Sync(ctx, "docs", []string{"/root"}, false)
+		sum, err := sy.Sync(ctx, "docs", []string{"/root"}, false, false)
 		if err != nil {
 			t.Fatalf("Sync: %v", err)
 		}
@@ -129,6 +129,38 @@ func TestSyncer(t *testing.T) {
 		}
 		if _, err := docs.GetBySource(ctx, "docs", "file:///b.txt"); err != nil {
 			t.Errorf("b.txt must be kept without --prune: %v", err)
+		}
+	})
+
+	t.Run("--prune --dry-run reports the set without removing anything", func(t *testing.T) {
+		coll := mustCollection(t, "docs", space)
+		docs := &fakeDocs{}
+		idx := &fakeIndex{}
+		seedDoc(t, docs, idx, "docs", "file:///b.txt") // present in collection, absent at source
+		src := &fakeSource{items: []app.SourceItem{textItem("file:///a.txt", words(10))}}
+		sy := newSyncer(coll, src, docs, idx)
+
+		sum, err := sy.Sync(ctx, "docs", []string{"/root"}, true, true)
+		if err != nil {
+			t.Fatalf("Sync: %v", err)
+		}
+		if sum.Pruned != 1 || len(sum.PrunedURIs) != 1 || sum.PrunedURIs[0] != "file:///b.txt" {
+			t.Errorf("dry run should report b.txt as prunable, got Pruned=%d URIs=%v", sum.Pruned, sum.PrunedURIs)
+		}
+		// Nothing was ingested or removed.
+		if sum.Added != 0 {
+			t.Errorf("dry run must not ingest, Added = %d", sum.Added)
+		}
+		if _, err := docs.GetBySource(ctx, "docs", "file:///b.txt"); err != nil {
+			t.Errorf("dry run must not remove b.txt: %v", err)
+		}
+	})
+
+	t.Run("--dry-run without --prune is a usage error", func(t *testing.T) {
+		coll := mustCollection(t, "docs", space)
+		sy := newSyncer(coll, &fakeSource{}, &fakeDocs{}, &fakeIndex{})
+		if _, err := sy.Sync(ctx, "docs", []string{"/root"}, false, true); !errors.Is(err, domain.ErrInvalidArgument) {
+			t.Errorf("want ErrInvalidArgument, got %v", err)
 		}
 	})
 }
