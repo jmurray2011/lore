@@ -32,12 +32,15 @@ func TestAsker(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		ans, err := a.Ask(ctx, "docs", "why", 1, []domain.Attachment{att})
+		ans, err := a.Ask(ctx, "docs", "why", 1, []domain.Attachment{att}, false)
 		if err != nil {
 			t.Fatalf("Ask: %v", err)
 		}
 		if ans.Text != "because" {
 			t.Errorf("answer text = %q", ans.Text)
+		}
+		if !ans.Grounded {
+			t.Error("an answer over real hits should be grounded")
 		}
 		if gen.gotQuestion != "why" {
 			t.Errorf("generator got question %q", gen.gotQuestion)
@@ -55,7 +58,7 @@ func TestAsker(t *testing.T) {
 		q := app.NewQuerier(newFakeCollections(), &fakeIndex{}, &fakeDocs{}, &fakeEmbedder{space: space})
 		a := app.NewAsker(q, gen)
 
-		if _, err := a.Ask(ctx, "missing", "why", 1, nil); !errors.Is(err, app.ErrNotFound) {
+		if _, err := a.Ask(ctx, "missing", "why", 1, nil, false); !errors.Is(err, app.ErrNotFound) {
 			t.Errorf("want ErrNotFound, got %v", err)
 		}
 		if gen.gotQuestion != "" {
@@ -71,8 +74,57 @@ func TestAsker(t *testing.T) {
 		gen := &fakeGenerator{err: llmDown}
 		a := newAsker(gen, emb, idx, docs)
 
-		if _, err := a.Ask(ctx, "docs", "why", 1, nil); !errors.Is(err, llmDown) {
+		if _, err := a.Ask(ctx, "docs", "why", 1, nil, false); !errors.Is(err, llmDown) {
 			t.Errorf("want wrapped llm error, got %v", err)
+		}
+	})
+
+	t.Run("strict mode refuses an ungrounded question without calling the generator", func(t *testing.T) {
+		// No matching chunks and no attachments → nothing to ground on.
+		gen := &fakeGenerator{}
+		emb := &fakeEmbedder{space: space}
+		a := newAsker(gen, emb, &fakeIndex{}, &fakeDocs{})
+
+		if _, err := a.Ask(ctx, "docs", "why", 1, nil, true); !errors.Is(err, app.ErrNoGrounding) {
+			t.Errorf("want ErrNoGrounding, got %v", err)
+		}
+		if gen.gotQuestion != "" {
+			t.Error("strict mode must not call the generator when grounding is empty")
+		}
+	})
+
+	t.Run("non-strict proceeds ungrounded and marks the answer not grounded", func(t *testing.T) {
+		gen := &fakeGenerator{answer: app.Answer{Text: "guess"}}
+		emb := &fakeEmbedder{space: space}
+		a := newAsker(gen, emb, &fakeIndex{}, &fakeDocs{})
+
+		ans, err := a.Ask(ctx, "docs", "why", 1, nil, false)
+		if err != nil {
+			t.Fatalf("Ask: %v", err)
+		}
+		if ans.Grounded {
+			t.Error("an answer with no hits and no attachments must be marked ungrounded")
+		}
+		if gen.gotQuestion != "why" {
+			t.Error("non-strict mode should still call the generator")
+		}
+	})
+
+	t.Run("attachments alone count as grounding even under strict with k=0", func(t *testing.T) {
+		gen := &fakeGenerator{answer: app.Answer{Text: "from the image"}}
+		emb := &fakeEmbedder{space: space}
+		a := newAsker(gen, emb, &fakeIndex{}, &fakeDocs{})
+		att, err := domain.NewAttachment("image/png", "c.png", []byte{1, 2, 3})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		ans, err := a.Ask(ctx, "docs", "why", 0, []domain.Attachment{att}, true)
+		if err != nil {
+			t.Fatalf("Ask: %v", err)
+		}
+		if !ans.Grounded {
+			t.Error("attachments should ground the answer")
 		}
 	})
 }

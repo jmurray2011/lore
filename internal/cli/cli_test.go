@@ -84,6 +84,15 @@ func exec(deps cli.Deps, args ...string) (string, int) {
 	return out.String(), code
 }
 
+// execErr is exec but also returns whatever the command wrote to stderr.
+func execErr(deps cli.Deps, args ...string) (stdout, stderr string, code int) {
+	var out, errb bytes.Buffer
+	root := cli.NewRootCommand(depsBuilder(deps), "test", &out, &errb)
+	root.SetArgs(args)
+	code = cli.ExitCode(root.Execute())
+	return out.String(), errb.String(), code
+}
+
 func testSpace() domain.EmbeddingSpace {
 	return domain.EmbeddingSpace{Model: "test-embed", Dimensions: 3}
 }
@@ -399,6 +408,43 @@ func TestCLIAsk(t *testing.T) {
 	if len(ans.Citations) != 1 || ans.Citations[0].Source != "file:///a.md" || ans.Citations[0].Seq != 0 {
 		t.Errorf("citation provenance = %+v, want one file:///a.md#0", ans.Citations)
 	}
+	if !ans.Grounded {
+		t.Error("an answer over a seeded chunk should be grounded")
+	}
+}
+
+func TestCLIAskGroundingGuard(t *testing.T) {
+	// A collection that exists but holds no chunks: a query matches nothing.
+	t.Run("strict refuses an ungrounded question (exit 1)", func(t *testing.T) {
+		deps, _, _, _ := newDeps(stubEmbedder{space: testSpace(), vec: []float32{1, 0, 0}}, stubGenerator{text: "ungrounded guess"})
+		if _, code := exec(deps, "init", "empty"); code != 0 {
+			t.Fatal("init failed")
+		}
+		out, _, code := execErr(deps, "ask", "empty", "anything", "--strict")
+		if code != 1 {
+			t.Errorf("strict + no grounding should exit 1, got %d", code)
+		}
+		if strings.Contains(out, "ungrounded guess") {
+			t.Errorf("strict must not emit an answer, got stdout %q", out)
+		}
+	})
+
+	t.Run("non-strict answers but warns on stderr", func(t *testing.T) {
+		deps, _, _, _ := newDeps(stubEmbedder{space: testSpace(), vec: []float32{1, 0, 0}}, stubGenerator{text: "ungrounded guess"})
+		if _, code := exec(deps, "init", "empty"); code != 0 {
+			t.Fatal("init failed")
+		}
+		out, errOut, code := execErr(deps, "ask", "empty", "anything")
+		if code != 0 {
+			t.Fatalf("non-strict should still answer (exit 0), got %d", code)
+		}
+		if !strings.Contains(out, "ungrounded guess") {
+			t.Errorf("want the answer on stdout, got %q", out)
+		}
+		if !strings.Contains(errOut, "not grounded") {
+			t.Errorf("want an ungrounded warning on stderr, got %q", errOut)
+		}
+	})
 }
 
 func TestCLIAskAttach(t *testing.T) {
@@ -600,6 +646,7 @@ type answerViewJSON struct {
 		Source  string `json:"source"`
 		Seq     int    `json:"seq"`
 	} `json:"citations"`
+	Grounded bool `json:"grounded"`
 }
 
 type ingestViewJSON struct {

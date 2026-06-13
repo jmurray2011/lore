@@ -15,6 +15,10 @@ import (
 var (
 	ErrNotFound      = errors.New("not found")
 	ErrAlreadyExists = errors.New("already exists")
+	// ErrNoGrounding is returned by Ask in strict mode when retrieval yields no
+	// chunks and no attachments were supplied — there is nothing to ground an
+	// answer in, so the LLM is not called.
+	ErrNoGrounding = errors.New("no grounding")
 )
 
 // CollectionRepository persists Collection aggregates.
@@ -98,6 +102,10 @@ type Embedder interface {
 type Answer struct {
 	Text      string
 	Citations []domain.Citation
+	// Grounded reports whether the answer had any grounding input — at least one
+	// retrieved chunk or attachment. False means the model answered from its own
+	// knowledge alone (only possible in non-strict mode).
+	Grounded bool
 }
 
 // Generator synthesizes an answer grounded in retrieved chunks, optionally with

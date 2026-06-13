@@ -47,6 +47,9 @@ lore query notes "rotation policy for signing keys" -k 5
 
 # 4. ask a grounded question (retrieval + synthesis with citations)
 lore ask notes "what is our key rotation policy?"
+# when nothing matches, ask warns on stderr and answers from model knowledge;
+# --strict turns that into a hard error (exit 1) and skips the model call
+lore ask notes "unrelated question" --strict
 
 # inventory & cleanup
 lore ls

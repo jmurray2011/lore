@@ -186,6 +186,7 @@ type citationView struct {
 type answerView struct {
 	Text      string         `json:"text"`
 	Citations []citationView `json:"citations"`
+	Grounded  bool           `json:"grounded"`
 }
 
 type docView struct {

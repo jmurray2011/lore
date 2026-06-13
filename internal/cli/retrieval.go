@@ -45,6 +45,7 @@ func newAskCmd(deps *Deps) *cobra.Command {
 	var (
 		k      int
 		attach []string
+		strict bool
 	)
 	cmd := &cobra.Command{
 		Use:   "ask <collection> <question>",
@@ -57,19 +58,28 @@ func newAskCmd(deps *Deps) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			ans, err := deps.Ask.Ask(cmd.Context(), args[0], args[1], k, attachments)
+			ans, err := deps.Ask.Ask(cmd.Context(), args[0], args[1], k, attachments, strict)
 			if err != nil {
 				return err
+			}
+			if !ans.Grounded {
+				// Non-strict path: the answer rests on model knowledge alone.
+				// Warn on stderr so pipes keep clean stdout while a human or CI
+				// log still sees it. --strict turns this into an error instead.
+				_, _ = fmt.Fprintf(cmd.ErrOrStderr(),
+					"lore: warning: no chunks matched and no attachments; the answer for %q is not grounded (use --strict to fail instead)\n", args[0])
 			}
 			citations := make([]citationView, len(ans.Citations))
 			for i, c := range ans.Citations {
 				citations[i] = citationView{ChunkID: string(c.ChunkID), Source: c.Source, Seq: c.Seq}
 			}
-			return render(cmd, answerView{Text: ans.Text, Citations: citations}, answerMarkdown(ans))
+			view := answerView{Text: ans.Text, Citations: citations, Grounded: ans.Grounded}
+			return render(cmd, view, answerMarkdown(ans))
 		},
 	}
 	cmd.Flags().IntVarP(&k, "top-k", "k", 8, "number of chunks to ground on (0 to ground on attachments only)")
 	cmd.Flags().StringArrayVar(&attach, "attach", nil, "file to send to the model as an attachment (repeatable)")
+	cmd.Flags().BoolVar(&strict, "strict", false, "fail (exit 1) instead of answering when nothing grounds the question")
 	return cmd
 }
 
