@@ -3,7 +3,7 @@ package cli
 import (
 	"fmt"
 	"sort"
-	"strings"
+	"strconv"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -38,12 +38,16 @@ func newLsCmd(deps Deps) *cobra.Command {
 				return err
 			}
 			views := make([]collectionView, len(colls))
-			var b strings.Builder
+			rows := make([][]string, len(colls))
 			for i, c := range colls {
 				views[i] = viewCollection(c)
-				fmt.Fprintf(&b, "%s\t%s\n", c.Name, c.Space)
+				rows[i] = []string{c.Name, c.Space.Model, strconv.Itoa(c.Space.Dimensions)}
 			}
-			return render(cmd, views, strings.TrimRight(b.String(), "\n"))
+			var human string
+			if len(rows) > 0 {
+				human = styleForCmd(cmd).table([]string{"NAME", "MODEL", "DIMS"}, rows)
+			}
+			return render(cmd, views, human)
 		},
 	}
 }
@@ -92,14 +96,20 @@ func newDocsCmd(deps Deps) *cobra.Command {
 			// Sort by source URI so output is stable regardless of backend.
 			sort.Slice(list, func(i, j int) bool { return list[i].SourceURI < list[j].SourceURI })
 
+			st := styleForCmd(cmd)
 			views := make([]docView, len(list))
-			var b strings.Builder
+			rows := make([][]string, len(list))
 			for i, d := range list {
 				ingested := d.IngestedAt.UTC().Format(time.RFC3339)
 				views[i] = docView{Source: d.SourceURI, Hash: string(d.Hash), IngestedAt: ingested}
-				fmt.Fprintf(&b, "%s\t%s\n", d.SourceURI, ingested)
+				rows[i] = []string{shortLabel(d.SourceURI), humanTime(ingested)}
 			}
-			return render(cmd, views, strings.TrimRight(b.String(), "\n"))
+			var human string
+			if len(rows) > 0 {
+				human = st.table([]string{"SOURCE", "INGESTED"}, rows) +
+					"\n" + st.faint(fmt.Sprintf("%d documents", len(rows)))
+			}
+			return render(cmd, views, human)
 		},
 	}
 }
@@ -116,8 +126,11 @@ func newStatusCmd(deps Deps) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			human := fmt.Sprintf("%s\nmodel:      %s\ndimensions: %d\ncreated:    %s",
-				coll.Name, coll.Space.Model, coll.Space.Dimensions, coll.CreatedAt.UTC().Format(time.RFC3339))
+			st := styleForCmd(cmd)
+			human := st.bold(coll.Name) +
+				fmt.Sprintf("\n  %-11s %s", "model", coll.Space.Model) +
+				fmt.Sprintf("\n  %-11s %d", "dimensions", coll.Space.Dimensions) +
+				fmt.Sprintf("\n  %-11s %s", "created", humanTime(coll.CreatedAt.UTC().Format(time.RFC3339)))
 			return render(cmd, viewCollection(coll), human)
 		},
 	}
