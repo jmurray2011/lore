@@ -2268,7 +2268,11 @@ func TestCLIExportImportEncrypted(t *testing.T) {
 		if !agecrypt.IsEncrypted(raw) {
 			t.Error("artifact should be age-encrypted")
 		}
-		for _, leak := range [][]byte{[]byte("the grounded answer"), []byte("kb"), []byte(artifact.Magic), []byte(testSpace().Model)} {
+		// Needles must be long enough not to collide with age's random
+		// nonce/ephemeral-key bytes: a 2-byte name like "kb" turns up in random
+		// ciphertext by chance. The name is encrypted inside the bundle alongside
+		// the content, so the longer needles below already prove it cannot leak.
+		for _, leak := range [][]byte{[]byte("the grounded answer"), []byte(artifact.Magic), []byte(testSpace().Model)} {
 			if bytes.Contains(raw, leak) {
 				t.Errorf("encrypted artifact leaks %q in clear", leak)
 			}
