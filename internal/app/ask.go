@@ -79,3 +79,29 @@ func (a *Asker) Synthesize(ctx context.Context, question string, hits []domain.C
 	answer.Grounded = len(hits) > 0 || len(attachments) > 0
 	return answer, nil
 }
+
+// SynthesizeStream is Synthesize with incremental delivery: when the underlying
+// generator implements StreamingGenerator it emits prose via onDelta as it
+// arrives; otherwise it falls back to a single Synthesize and emits the whole
+// text in one onDelta call. Either way it returns the complete Answer (with
+// Grounded set as Synthesize does), so the caller still gets citations for the
+// post-answer sources, --json, and caching.
+func (a *Asker) SynthesizeStream(ctx context.Context, question string, hits []domain.ChunkHit, attachments []domain.Attachment, onDelta func(string)) (Answer, error) {
+	var (
+		answer Answer
+		err    error
+	)
+	if s, ok := a.generator.(StreamingGenerator); ok {
+		answer, err = s.SynthesizeStream(ctx, question, hits, attachments, onDelta)
+	} else {
+		answer, err = a.generator.Synthesize(ctx, question, hits, attachments)
+		if err == nil {
+			onDelta(answer.Text)
+		}
+	}
+	if err != nil {
+		return Answer{}, fmt.Errorf("synthesize: %w", err)
+	}
+	answer.Grounded = len(hits) > 0 || len(attachments) > 0
+	return answer, nil
+}
