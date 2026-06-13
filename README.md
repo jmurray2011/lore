@@ -89,6 +89,7 @@ config file is TOML at `<user-config-dir>/lore/config.toml`.
 | `LORE_EMBED_MODEL` | `provider.embed_model` | `text-embedding-3-small` | embedding model / deployment |
 | `LORE_DIMENSIONS` | `provider.dimensions` | `1536` | embedding dimensionality (must match the model) |
 | `LORE_CHAT_MODEL` | `provider.chat_model` | `gpt-4o-mini` | chat model / deployment |
+| `LORE_TIMEOUT` | `provider.timeout` | `120s` | per-request HTTP timeout (Go duration; `0` disables) |
 | `LORE_STRUCTURED_OUTPUT` | `provider.structured_output` | `false` | request JSON-schema output (real citations) where supported |
 | `LORE_IMAGE_INPUT` | `provider.image_input` | `false` | allow image attachments |
 | `LORE_DOCUMENT_INPUT` | `provider.document_input` | `false` | allow document attachments |

@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/BurntSushi/toml"
 
@@ -52,6 +53,11 @@ type Provider struct {
 	// Auth selects how the API key is sent: "bearer" (OpenAI default) or
 	// "api-key" (Azure OpenAI's header, decision 21).
 	Auth string
+	// Timeout bounds each HTTP request to the provider (per attempt, so retries
+	// each get the full budget). Zero disables it. Guards against a hung
+	// provider blocking forever in non-interactive use (CI, scripts), where
+	// there is no SIGINT to cancel the request context (decision 36).
+	Timeout time.Duration
 	// StructuredOutput declares that the provider supports JSON-schema
 	// (response_format) output. Off by default so lore works against any
 	// OpenAI-compatible endpoint; enable it for providers that support it
@@ -70,6 +76,11 @@ type Log struct {
 	Format string // "text" or "json"
 }
 
+// DefaultProviderTimeout bounds each provider HTTP request unless overridden.
+// Generous enough not to cut off long generations, finite so a hung provider
+// can't block a non-interactive run forever.
+const DefaultProviderTimeout = 120 * time.Second
+
 // Defaults returns the baseline configuration before file and environment
 // overlays. The provider defaults target OpenAI; point BaseURL elsewhere for
 // Ollama, vLLM, LM Studio, etc.
@@ -81,6 +92,7 @@ func Defaults() Config {
 			Dimensions: 1536,
 			ChatModel:  "gpt-4o-mini",
 			Auth:       "bearer",
+			Timeout:    DefaultProviderTimeout,
 		},
 		Storage: Storage{Backend: "sqlite"},
 		Log:     Log{Level: slog.LevelInfo, Format: "text"},
@@ -159,6 +171,7 @@ type fileConfig struct {
 		Dimensions       int    `toml:"dimensions"`
 		ChatModel        string `toml:"chat_model"`
 		Auth             string `toml:"auth"`
+		Timeout          string `toml:"timeout"`
 		StructuredOutput bool   `toml:"structured_output"`
 		ImageInput       bool   `toml:"image_input"`
 		DocumentInput    bool   `toml:"document_input"`
@@ -182,6 +195,13 @@ func applyFile(cfg *Config, fc fileConfig) error {
 	setString(&cfg.Provider.EmbedModel, fc.Provider.EmbedModel)
 	setString(&cfg.Provider.ChatModel, fc.Provider.ChatModel)
 	setString(&cfg.Provider.Auth, fc.Provider.Auth)
+	if fc.Provider.Timeout != "" {
+		d, err := parseTimeout(fc.Provider.Timeout)
+		if err != nil {
+			return err
+		}
+		cfg.Provider.Timeout = d
+	}
 	setString(&cfg.Storage.Backend, fc.Storage.Backend)
 	setString(&cfg.Storage.Path, fc.Storage.Path)
 	if fc.Ingest.Concurrency != 0 {
@@ -216,6 +236,13 @@ func applyEnv(cfg *Config, getenv func(string) string) error {
 	setString(&cfg.Provider.EmbedModel, getenv("LORE_EMBED_MODEL"))
 	setString(&cfg.Provider.ChatModel, getenv("LORE_CHAT_MODEL"))
 	setString(&cfg.Provider.Auth, getenv("LORE_AUTH"))
+	if v := getenv("LORE_TIMEOUT"); v != "" {
+		d, err := parseTimeout(v)
+		if err != nil {
+			return err
+		}
+		cfg.Provider.Timeout = d
+	}
 	setString(&cfg.Storage.Backend, getenv("LORE_STORAGE_BACKEND"))
 	setString(&cfg.Storage.Path, getenv("LORE_DB_PATH"))
 	setString(&cfg.Log.Format, getenv("LORE_LOG_FORMAT"))
@@ -271,6 +298,19 @@ func applyBoolEnv(dst *bool, getenv func(string) string, key string) error {
 	}
 	*dst = b
 	return nil
+}
+
+// parseTimeout parses a Go duration string (e.g. "30s", "2m", "0") into a
+// non-negative timeout. A negative or malformed value is ErrInvalidArgument.
+func parseTimeout(s string) (time.Duration, error) {
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return 0, fmt.Errorf("config: %w: timeout %q is not a duration", domain.ErrInvalidArgument, s)
+	}
+	if d < 0 {
+		return 0, fmt.Errorf("config: %w: timeout must not be negative, got %s", domain.ErrInvalidArgument, s)
+	}
+	return d, nil
 }
 
 func parseLevel(s string) (slog.Level, error) {

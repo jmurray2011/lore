@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jmurray2011/lore/internal/config"
 	"github.com/jmurray2011/lore/internal/domain"
@@ -224,6 +225,41 @@ func TestLoadInvalidIsErrInvalidArgument(t *testing.T) {
 	for _, c := range cases {
 		if _, err := config.Load("", env(c.env)); !errors.Is(err, domain.ErrInvalidArgument) {
 			t.Errorf("%s: want ErrInvalidArgument, got %v", c.name, err)
+		}
+	}
+}
+
+func TestTimeoutDefaultAndOverride(t *testing.T) {
+	cfg, err := config.Load("", env(nil))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Provider.Timeout != 120*time.Second {
+		t.Errorf("default timeout = %v, want 120s", cfg.Provider.Timeout)
+	}
+
+	cfg, err = config.Load("", env(map[string]string{"LORE_TIMEOUT": "30s"}))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Provider.Timeout != 30*time.Second {
+		t.Errorf("env timeout = %v, want 30s", cfg.Provider.Timeout)
+	}
+
+	// "0" disables the per-request timeout (escape hatch).
+	cfg, err = config.Load("", env(map[string]string{"LORE_TIMEOUT": "0"}))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Provider.Timeout != 0 {
+		t.Errorf("zero timeout = %v, want 0 (disabled)", cfg.Provider.Timeout)
+	}
+}
+
+func TestTimeoutInvalidIsErrInvalidArgument(t *testing.T) {
+	for _, v := range []string{"soon", "-5s"} {
+		if _, err := config.Load("", env(map[string]string{"LORE_TIMEOUT": v})); !errors.Is(err, domain.ErrInvalidArgument) {
+			t.Errorf("LORE_TIMEOUT=%q: want ErrInvalidArgument, got %v", v, err)
 		}
 	}
 }

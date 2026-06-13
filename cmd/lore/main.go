@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -87,7 +88,12 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			auth = openai.AuthAPIKey
 		}
 
-		embedder, err := openai.NewEmbedder(cfg.Provider.BaseURL, cfg.Provider.APIKey, cfg.Provider.EmbedModel, cfg.Provider.Dimensions, auth, nil)
+		// One client shared by embedder and generator (connection reuse); its
+		// per-request timeout (0 disables) is the safety net against a hung
+		// provider in non-interactive use (decision 36).
+		httpClient := &http.Client{Timeout: cfg.Provider.Timeout}
+
+		embedder, err := openai.NewEmbedder(cfg.Provider.BaseURL, cfg.Provider.APIKey, cfg.Provider.EmbedModel, cfg.Provider.Dimensions, auth, httpClient)
 		if err != nil {
 			return cli.Deps{}, err
 		}
@@ -96,7 +102,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			ImageInput:       cfg.Provider.ImageInput,
 			DocumentInput:    cfg.Provider.DocumentInput,
 		}
-		generator, err := openai.NewGenerator(cfg.Provider.BaseURL, cfg.Provider.APIKey, cfg.Provider.ChatModel, caps, auth, nil)
+		generator, err := openai.NewGenerator(cfg.Provider.BaseURL, cfg.Provider.APIKey, cfg.Provider.ChatModel, caps, auth, httpClient)
 		if err != nil {
 			return cli.Deps{}, err
 		}
