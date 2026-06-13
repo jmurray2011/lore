@@ -25,11 +25,19 @@ func newQueryCmd(deps Deps) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			st := styleForCmd(cmd)
 			views := make([]hitView, len(hits))
 			var b strings.Builder
 			for i, h := range hits {
 				views[i] = hitView{ChunkID: string(h.Chunk.ID), Source: h.Source, Seq: h.Chunk.Seq, Score: h.Score, Text: h.Chunk.Text}
-				fmt.Fprintf(&b, "%.4f  %s\n    %s\n", h.Score, provLabel(h.Source, h.Chunk.Seq, h.Chunk.ID), h.Chunk.Text)
+				if i > 0 {
+					b.WriteString("\n")
+				}
+				fmt.Fprintf(&b, "%s %s  %s\n    %s\n",
+					st.cyan(fmt.Sprintf("[%d]", i+1)),
+					st.green(fmt.Sprintf("%.4f", h.Score)),
+					st.bold(hitLabel(h)),
+					h.Chunk.Text)
 			}
 			return render(cmd, views, strings.TrimRight(b.String(), "\n"))
 		},
@@ -59,16 +67,10 @@ func newAskCmd(deps Deps) *cobra.Command {
 				return err
 			}
 			citations := make([]citationView, len(ans.Citations))
-			labels := make([]string, len(ans.Citations))
 			for i, c := range ans.Citations {
 				citations[i] = citationView{ChunkID: string(c.ChunkID), Source: c.Source, Seq: c.Seq}
-				labels[i] = provLabel(c.Source, c.Seq, c.ChunkID)
 			}
-			human := ans.Text
-			if len(labels) > 0 {
-				human += "\n\nsources: " + strings.Join(labels, ", ")
-			}
-			return render(cmd, answerView{Text: ans.Text, Citations: citations}, human)
+			return render(cmd, answerView{Text: ans.Text, Citations: citations}, styleForCmd(cmd).answer(ans))
 		},
 	}
 	cmd.Flags().IntVarP(&k, "top-k", "k", 8, "number of chunks to ground on (0 to ground on attachments only)")
@@ -76,13 +78,13 @@ func newAskCmd(deps Deps) *cobra.Command {
 	return cmd
 }
 
-// provLabel renders provenance for human output: "source#seq" when the source
-// document is known, falling back to the opaque chunk ID otherwise.
-func provLabel(source string, seq int, chunkID domain.ChunkID) string {
-	if source == "" {
-		return string(chunkID)
+// hitLabel renders a hit's provenance for human output: "file.docx · chunk 3"
+// when the source is known, falling back to the opaque chunk ID otherwise.
+func hitLabel(h domain.ChunkHit) string {
+	if h.Source == "" {
+		return string(h.Chunk.ID)
 	}
-	return fmt.Sprintf("%s#%d", source, seq)
+	return fmt.Sprintf("%s · chunk %d", shortLabel(h.Source), h.Chunk.Seq)
 }
 
 // loadAttachments reads each path into an Attachment, detecting its media type

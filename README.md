@@ -59,7 +59,9 @@ lore rm notes                                          # whole collection
 Query hits and answer citations are tagged with their source as `source#chunk`,
 so every result traces back to the document it came from.
 
-Add `--json` to any command for machine-readable output.
+Add `--json` to any command for machine-readable output. Human output is
+colorized on an interactive terminal and plain everywhere else; force it off with
+`--no-color` or `NO_COLOR=1`.
 
 ## Supported document formats
 
