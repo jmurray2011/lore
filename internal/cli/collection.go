@@ -125,10 +125,15 @@ func newStatusCmd(deps *Deps) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			human := fmt.Sprintf("## %s\n\n- **model** — %s\n- **dimensions** — %d\n- **created** — %s\n",
-				coll.Name, coll.Space.Model, coll.Space.Dimensions,
+			docs, err := deps.Catalog.ListDocuments(cmd.Context(), args[0])
+			if err != nil {
+				return err
+			}
+			n := len(docs)
+			human := fmt.Sprintf("## %s\n\n- **model** — %s\n- **dimensions** — %d\n- **documents** — %d\n- **created** — %s\n",
+				coll.Name, coll.Space.Model, coll.Space.Dimensions, n,
 				humanTime(coll.CreatedAt.UTC().Format(time.RFC3339)))
-			return render(cmd, viewCollection(coll), human)
+			return render(cmd, statusView{collectionView: viewCollection(coll), Documents: n}, human)
 		},
 	}
 }

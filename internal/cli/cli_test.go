@@ -178,6 +178,38 @@ func TestCLICollectionLifecycle(t *testing.T) {
 	})
 }
 
+func TestCLIStatusDocCount(t *testing.T) {
+	deps, _, docs, _ := newDeps(stubEmbedder{space: testSpace()}, stubGenerator{})
+	if _, code := exec(deps, "init", "docs"); code != 0 {
+		t.Fatal("init failed")
+	}
+	ctx := context.Background()
+	for _, uri := range []string{"file:///a.md", "file:///b.md"} {
+		doc, err := domain.NewDocument("docs", uri, domain.HashContent([]byte(uri)), time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := docs.Upsert(ctx, doc, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	out, code := exec(deps, "status", "docs", "--json")
+	if code != 0 {
+		t.Fatalf("status exit %d, out %q", code, out)
+	}
+	var v statusViewJSON
+	if err := json.Unmarshal([]byte(out), &v); err != nil {
+		t.Fatalf("bad JSON %q: %v", out, err)
+	}
+	if v.Documents != 2 {
+		t.Errorf("documents = %d, want 2", v.Documents)
+	}
+	if v.Model != "test-embed" {
+		t.Errorf("status still carries collection details: %+v", v)
+	}
+}
+
 func TestCLIDocs(t *testing.T) {
 	deps, _, docs, _ := newDeps(stubEmbedder{space: testSpace()}, stubGenerator{})
 	if _, code := exec(deps, "init", "docs"); code != 0 {
@@ -666,6 +698,14 @@ type docViewJSON struct {
 	Source     string `json:"source"`
 	Hash       string `json:"hash"`
 	IngestedAt string `json:"ingested_at"`
+}
+
+type statusViewJSON struct {
+	Name       string `json:"name"`
+	Model      string `json:"model"`
+	Dimensions int    `json:"dimensions"`
+	CreatedAt  string `json:"created_at"`
+	Documents  int    `json:"documents"`
 }
 
 type syncViewJSON struct {

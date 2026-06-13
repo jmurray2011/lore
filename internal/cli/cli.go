@@ -169,6 +169,14 @@ func viewCollection(c *domain.Collection) collectionView {
 	}
 }
 
+// statusView is the collection view plus the document count, shown only by
+// `status` (a single collection). ls deliberately omits the count — it would
+// cost one query per listed collection.
+type statusView struct {
+	collectionView
+	Documents int `json:"documents"`
+}
+
 type hitView struct {
 	ChunkID string  `json:"chunk_id"`
 	Source  string  `json:"source"`
