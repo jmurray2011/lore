@@ -22,6 +22,7 @@ func newQueryCmd(deps *Deps) *cobra.Command {
 		explain    bool
 		rerank     bool
 		candidates int
+		budget     int
 	)
 	cmd := &cobra.Command{
 		Use:   "query <collection> <query>",
@@ -39,13 +40,17 @@ func newQueryCmd(deps *Deps) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			hits, tokens := budgetTrim(hits, budget, deps.Tokens)
 
 			views, md := hitViews(hits)
 			if err := render(cmd, views, md); err != nil {
 				return err
 			}
-			// query's stdout is the bare hit array (the synthesize contract), so
-			// --explain diagnostics go to stderr — JSON when --json, else text.
+			// query's stdout is the bare hit array (the synthesize contract), so the
+			// budget report (and --explain diagnostics) go to stderr.
+			if budget > 0 {
+				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "lore: budget %d: returned %d chunks (~%d tokens)\n", budget, len(hits), tokens)
+			}
 			if explain {
 				return writeQueryExplain(cmd, buildExplain(hits, runnerUp, nil))
 			}
@@ -57,7 +62,30 @@ func newQueryCmd(deps *Deps) *cobra.Command {
 	cmd.Flags().BoolVar(&explain, "explain", false, "print the score distribution (top-k + the best rejected candidate) to stderr")
 	cmd.Flags().BoolVar(&rerank, "rerank", false, "two-stage retrieval: vector-search a wide pool, then rerank to the top -k")
 	cmd.Flags().IntVar(&candidates, "rerank-candidates", 50, "size of the pre-rerank vector candidate pool (must be >= -k)")
+	cmd.Flags().IntVar(&budget, "budget", 0, "cap the returned set to this many tokens (after ranking; trims within -k)")
 	return cmd
+}
+
+// budgetTrim limits ranked hits to a cumulative token budget, applied after
+// ranking (and after any rerank), returning the trimmed hits and their token
+// total. budget <= 0 (or no counter) is a no-op. The first hit is always kept so
+// a budget smaller than the top chunk still returns something; the caller has
+// already capped the slice to -k, so budget only ever tightens the bound.
+func budgetTrim(hits []domain.ChunkHit, budget int, counter app.TokenCounter) ([]domain.ChunkHit, int) {
+	if budget <= 0 || counter == nil {
+		return hits, 0
+	}
+	var out []domain.ChunkHit
+	total := 0
+	for _, h := range hits {
+		t := counter.Count(h.Chunk.Text)
+		if len(out) > 0 && total+t > budget {
+			break
+		}
+		out = append(out, h)
+		total += t
+	}
+	return out, total
 }
 
 // resolveHits performs retrieval for query and ask: a plain top-k vector search,
@@ -170,6 +198,7 @@ func newAskCmd(deps *Deps) *cobra.Command {
 		explain    bool
 		rerank     bool
 		candidates int
+		budget     int
 	)
 	cmd := &cobra.Command{
 		Use:   "ask <collection> <question>",
@@ -187,20 +216,26 @@ func newAskCmd(deps *Deps) *cobra.Command {
 				return err
 			}
 			var (
-				ans      app.Answer
-				ret      app.Retrieval
-				runnerUp *float64
+				ans       app.Answer
+				ret       app.Retrieval
+				runnerUp  *float64
+				groundTok *int
 			)
 			switch {
-			case rerank:
-				// Two-stage retrieval feeding synthesis: a wide vector pool reranked
-				// to the top-k, then synthesized (the documented interpose-between-
-				// retrieval-and-synthesis use of Synthesize). Replicates Ask's strict
-				// guard since Synthesize has none.
+			case rerank || budget > 0:
+				// Interpose between retrieval and synthesis: resolve hits (optionally
+				// two-stage via --rerank), cap them to the token --budget, then
+				// synthesize. Uses Synthesize (the documented seam) and replicates
+				// Ask's strict guard, which Synthesize lacks.
 				var hits []domain.ChunkHit
-				hits, runnerUp, err = resolveHits(cmd, deps, args[0], question, k, candidates, source, true, explain)
+				hits, runnerUp, err = resolveHits(cmd, deps, args[0], question, k, candidates, source, rerank, explain)
 				if err != nil {
 					return err
+				}
+				if budget > 0 {
+					var tokens int
+					hits, tokens = budgetTrim(hits, budget, deps.Tokens)
+					groundTok = &tokens
 				}
 				if len(hits) == 0 && len(attachments) == 0 && strict {
 					return fmt.Errorf("ask %q: %w: no chunks matched and no attachments supplied", args[0], app.ErrNoGrounding)
@@ -227,7 +262,10 @@ func newAskCmd(deps *Deps) *cobra.Command {
 			for i, c := range ans.Citations {
 				citations[i] = citationView{ChunkID: string(c.ChunkID), Source: c.Source, Seq: c.Seq}
 			}
-			view := answerView{Text: ans.Text, Citations: citations, Grounded: ans.Grounded}
+			view := answerView{Text: ans.Text, Citations: citations, Grounded: ans.Grounded, GroundingTokens: groundTok}
+			if budget > 0 && groundTok != nil {
+				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "lore: budget %d: grounded on %d chunks (~%d tokens)\n", budget, len(ret.Hits), *groundTok)
+			}
 
 			// Base human output: the answer, optionally with each cited chunk's
 			// full text appended (--expand), numbered with the answer's ordinals.
@@ -277,6 +315,7 @@ func newAskCmd(deps *Deps) *cobra.Command {
 	cmd.Flags().BoolVar(&explain, "explain", false, "print the retrieval score distribution to stderr (the answer's explain key under --json)")
 	cmd.Flags().BoolVar(&rerank, "rerank", false, "two-stage retrieval: vector-search a wide pool, then rerank to the top -k before synthesis")
 	cmd.Flags().IntVar(&candidates, "rerank-candidates", 50, "size of the pre-rerank vector candidate pool (must be >= -k)")
+	cmd.Flags().IntVar(&budget, "budget", 0, "cap grounding to this many tokens (after ranking/rerank; trims within -k)")
 	return cmd
 }
 

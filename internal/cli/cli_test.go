@@ -91,9 +91,9 @@ func newDeps(emb app.Embedder, gen app.Generator) (cli.Deps, *memstore.Collectio
 	index := memstore.NewVectorIndex()
 	q := app.NewQuerier(colls, index, docs, emb)
 	fixed, _ := domain.NewFixedChunker(domain.DefaultChunkSize, domain.DefaultChunkOverlap)
-	chunkers, _ := domain.NewRegistry(fixed, nil)
+	chunkers, _ := domain.NewRegistry(testChunkerSpec(), fixed, nil)
 	source := fs.NewSource()
-	catalog := app.NewCatalog(colls, docs, emb)
+	catalog := app.NewCatalog(colls, docs, emb, chunkers)
 	ingestor := app.NewIngestor(colls, docs, index, emb, extract.New(), source, chunkers)
 	remover := app.NewRemover(colls, docs, index)
 	deps := cli.Deps{
@@ -103,9 +103,17 @@ func newDeps(emb app.Embedder, gen app.Generator) (cli.Deps, *memstore.Collectio
 		Query:   q,
 		Ask:     app.NewAsker(q, gen),
 		Remove:  remover,
+		Tokens:  wordTokenCounter{},
 	}
 	return deps, colls, docs, index
 }
+
+// wordTokenCounter is a deterministic stand-in for the real tiktoken counter in
+// CLI tests: one token per whitespace word, so --budget arithmetic is easy to
+// assert without depending on a BPE vocabulary.
+type wordTokenCounter struct{}
+
+func (wordTokenCounter) Count(s string) int { return len(strings.Fields(s)) }
 
 // exec runs one command with a fresh root (clean flag state) over shared deps.
 func exec(deps cli.Deps, args ...string) (string, int) {
@@ -137,6 +145,15 @@ func execStdin(deps cli.Deps, stdin string, args ...string) (string, int) {
 
 func testSpace() domain.EmbeddingSpace {
 	return domain.EmbeddingSpace{Model: "test-embed", Dimensions: 3}
+}
+
+// testChunkerSpec matches the fixed chunker the test deps wire, so collections
+// init'd through the CLI accept ingestion.
+func testChunkerSpec() domain.ChunkerSpec {
+	return domain.ChunkerSpec{
+		Strategy: "fixed", Version: domain.FixedChunkerVersion,
+		Size: domain.DefaultChunkSize, Overlap: domain.DefaultChunkOverlap, Tokenizer: "words",
+	}
 }
 
 func TestRootBuildsDepsFromGlobalFlags(t *testing.T) {
@@ -625,7 +642,7 @@ func TestCLIQuerySourceFilter(t *testing.T) {
 func TestCLISpaceMismatchExits4(t *testing.T) {
 	// Collection pinned to one space; embedder reports a different one.
 	deps, colls, _, _ := newDeps(stubEmbedder{space: domain.EmbeddingSpace{Model: "other", Dimensions: 9}}, stubGenerator{})
-	coll, err := domain.NewCollection("docs", testSpace(), time.Now())
+	coll, err := domain.NewCollection("docs", testSpace(), testChunkerSpec(), time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -636,6 +653,39 @@ func TestCLISpaceMismatchExits4(t *testing.T) {
 	if _, code := exec(deps, "query", "docs", "anything"); code != 4 {
 		t.Errorf("want exit 4 (invariant), got %d", code)
 	}
+}
+
+func TestCLIChunkerMismatchExits4(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("collection pinned to a different chunker", func(t *testing.T) {
+		deps, colls, _, _ := newDeps(stubEmbedder{space: testSpace()}, stubGenerator{})
+		other, err := domain.NewChunkerSpec("structure", 1, 256, 32, "o200k_base", true) // differs from the deps' fixed chunker
+		if err != nil {
+			t.Fatal(err)
+		}
+		coll, err := domain.NewCollection("docs", testSpace(), other, time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := colls.Create(ctx, coll); err != nil {
+			t.Fatal(err)
+		}
+		if _, code := execStdin(deps, "some content", "add", "docs", "--stdin"); code != 4 {
+			t.Errorf("want exit 4 (invariant), got %d", code)
+		}
+	})
+
+	t.Run("legacy unpinned collection refuses ingest", func(t *testing.T) {
+		deps, colls, _, _ := newDeps(stubEmbedder{space: testSpace()}, stubGenerator{})
+		legacy := &domain.Collection{Name: "docs", Space: testSpace()} // zero chunker spec
+		if err := colls.Create(ctx, legacy); err != nil {
+			t.Fatal(err)
+		}
+		if _, code := execStdin(deps, "some content", "add", "docs", "--stdin"); code != 4 {
+			t.Errorf("want exit 4 (invariant), got %d", code)
+		}
+	})
 }
 
 func TestCLIAsk(t *testing.T) {
@@ -955,6 +1005,91 @@ func TestCLIAskExplain(t *testing.T) {
 		}
 		if strings.Contains(out, "explain") || strings.Contains(errOut, "retrieval:") {
 			t.Errorf("strict must error before any explain output:\nstdout=%s\nstderr=%s", out, errOut)
+		}
+	})
+}
+
+func TestCLIBudget(t *testing.T) {
+	qvec := []float32{1, 0, 0}
+
+	// Seed three equally-matching 3-word chunks so all are retrieved; the
+	// word-count token counter then makes --budget arithmetic exact.
+	seed := func(t *testing.T) cli.Deps {
+		t.Helper()
+		deps, _, docs, index := newDeps(stubEmbedder{space: testSpace(), vec: qvec}, stubGenerator{text: "the answer"})
+		if _, code := exec(deps, "init", "docs"); code != 0 {
+			t.Fatal("init failed")
+		}
+		ctx := context.Background()
+		for i := 0; i < 3; i++ {
+			uri := fmt.Sprintf("file:///d%d.md", i)
+			doc, err := domain.NewDocument("docs", uri, domain.HashContent([]byte(uri)), time.Now())
+			if err != nil {
+				t.Fatal(err)
+			}
+			ch, err := domain.NewChunk(doc.ID, 0, "aa bb cc") // 3 words = 3 tokens
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := docs.Upsert(ctx, doc, []domain.Chunk{ch}); err != nil {
+				t.Fatal(err)
+			}
+			if err := index.Upsert(ctx, "docs", []app.VectorEntry{{ChunkID: ch.ID, Vector: qvec}}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return deps
+	}
+
+	t.Run("query --budget trims the returned set to the token cap", func(t *testing.T) {
+		deps := seed(t)
+		// Budget 7: 3 + 3 = 6 <= 7 keeps two; a third (9) would exceed.
+		out, errOut, code := execErr(deps, "query", "docs", "anything", "--budget", "7", "--json")
+		if code != 0 {
+			t.Fatalf("exit %d", code)
+		}
+		var hits []hitViewJSON
+		if err := json.Unmarshal([]byte(out), &hits); err != nil {
+			t.Fatalf("bad JSON %q: %v", out, err)
+		}
+		if len(hits) != 2 {
+			t.Errorf("budget 7 over 3-token chunks should return 2, got %d", len(hits))
+		}
+		if !strings.Contains(errOut, "returned 2 chunks") || !strings.Contains(errOut, "6 tokens") {
+			t.Errorf("budget report missing/incorrect on stderr: %q", errOut)
+		}
+	})
+
+	t.Run("ask --budget reports grounding tokens and caps grounding", func(t *testing.T) {
+		deps := seed(t)
+		out, code := exec(deps, "ask", "docs", "why?", "--budget", "7", "--json")
+		if code != 0 {
+			t.Fatalf("exit %d, out %q", code, out)
+		}
+		var ans answerViewJSON
+		if err := json.Unmarshal([]byte(out), &ans); err != nil {
+			t.Fatalf("bad JSON %q: %v", out, err)
+		}
+		if ans.GroundingTokens == nil || *ans.GroundingTokens != 6 {
+			t.Errorf("grounding_tokens = %v, want 6 (two 3-token chunks)", ans.GroundingTokens)
+		}
+	})
+
+	t.Run("ask --json without --budget omits grounding_tokens", func(t *testing.T) {
+		deps := seed(t)
+		out, code := exec(deps, "ask", "docs", "why?", "--json")
+		if code != 0 {
+			t.Fatalf("exit %d", code)
+		}
+		if strings.Contains(out, "grounding_tokens") {
+			t.Errorf("grounding_tokens should be omitted without --budget: %s", out)
+		}
+		var ans answerViewJSON
+		if err := json.Unmarshal([]byte(out), &ans); err != nil {
+			t.Fatal(err)
+		}
+		if ans.GroundingTokens != nil {
+			t.Errorf("grounding_tokens should be nil without --budget, got %v", *ans.GroundingTokens)
 		}
 	})
 }
@@ -1799,9 +1934,10 @@ type answerViewJSON struct {
 		Source  string `json:"source"`
 		Seq     int    `json:"seq"`
 	} `json:"citations"`
-	Grounded   bool             `json:"grounded"`
-	Expansions []chunkViewJSON  `json:"expansions"`
-	Explain    *explainViewJSON `json:"explain"`
+	Grounded        bool             `json:"grounded"`
+	Expansions      []chunkViewJSON  `json:"expansions"`
+	Explain         *explainViewJSON `json:"explain"`
+	GroundingTokens *int             `json:"grounding_tokens"`
 }
 
 type explainViewJSON struct {
