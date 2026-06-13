@@ -274,6 +274,51 @@ func TestCLISync(t *testing.T) {
 	})
 }
 
+func TestCLISyncDryRun(t *testing.T) {
+	deps, _, _, _ := newDeps(stubEmbedder{space: testSpace(), vec: []float32{1, 0, 0}}, stubGenerator{})
+	if _, code := exec(deps, "init", "notes"); code != 0 {
+		t.Fatal("init failed")
+	}
+	dir := t.TempDir()
+	b := filepath.Join(dir, "b.txt")
+	for name, body := range map[string]string{"a.txt": "alpha content here", "b.txt": "beta content here"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, code := exec(deps, "add", "notes", dir); code != 0 {
+		t.Fatalf("add exit %d", code)
+	}
+	if err := os.Remove(b); err != nil {
+		t.Fatal(err)
+	}
+
+	// Dry run reports b.txt as prunable but removes nothing.
+	out, code := exec(deps, "sync", "notes", "--prune", "--dry-run", "--json")
+	if code != 0 {
+		t.Fatalf("dry-run exit %d, out %q", code, out)
+	}
+	var sv syncViewJSON
+	if err := json.Unmarshal([]byte(out), &sv); err != nil {
+		t.Fatalf("bad JSON %q: %v", out, err)
+	}
+	if sv.Pruned != 1 || len(sv.PrunedURIs) != 1 || !strings.Contains(sv.PrunedURIs[0], "b.txt") {
+		t.Errorf("want one prunable b.txt, got %+v", sv)
+	}
+	if !sv.DryRun {
+		t.Error("dry_run flag should be set")
+	}
+	if n := docCount(t, deps, "notes"); n != 2 {
+		t.Errorf("dry run must not remove anything; doc count = %d, want 2", n)
+	}
+
+	t.Run("--dry-run without --prune is a usage error", func(t *testing.T) {
+		if _, code := exec(deps, "sync", "notes", "--dry-run"); code != 2 {
+			t.Errorf("want exit 2, got %d", code)
+		}
+	})
+}
+
 // docCount returns how many documents `docs <collection> --json` reports.
 func docCount(t *testing.T, deps cli.Deps, collection string) int {
 	t.Helper()
@@ -624,11 +669,13 @@ type docViewJSON struct {
 }
 
 type syncViewJSON struct {
-	Added       int `json:"added"`
-	Skipped     int `json:"skipped"`
-	Unsupported int `json:"unsupported"`
-	Chunks      int `json:"chunks"`
-	Pruned      int `json:"pruned"`
+	Added       int      `json:"added"`
+	Skipped     int      `json:"skipped"`
+	Unsupported int      `json:"unsupported"`
+	Chunks      int      `json:"chunks"`
+	Pruned      int      `json:"pruned"`
+	PrunedURIs  []string `json:"pruned_uris"`
+	DryRun      bool     `json:"dry_run"`
 }
 
 type hitViewJSON struct {

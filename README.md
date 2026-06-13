@@ -41,6 +41,7 @@ lore add notes ./docs report.pdf spreadsheet.xlsx
 # re-ingest changed files later; --prune also drops documents deleted at source
 lore sync notes              # replays the sources add remembered (no path needed)
 lore sync notes --prune      # also remove docs whose source file is gone
+lore sync notes --prune --dry-run   # preview exactly what --prune would remove
 
 # 3. retrieve the most similar chunks
 lore query notes "rotation policy for signing keys" -k 5
