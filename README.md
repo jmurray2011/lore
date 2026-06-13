@@ -82,6 +82,27 @@ Add `--json` to any command for machine-readable output. Human output is
 colorized on an interactive terminal and plain everywhere else; force it off with
 `--no-color` or `NO_COLOR=1`.
 
+## Inspecting chunks / auditing citations
+
+Citations point at chunks; these let you read the chunk behind a claim without
+dumping the whole document.
+
+```bash
+# print specific chunks by ID (repeatable) — e.g. the ones an answer cited
+lore cat notes --chunk 3f2a…9c --chunk 7b1e…04
+lore cat notes --chunk 3f2a…9c --json        # same {chunk_id, seq, text} shape as cat --doc
+
+# answer, then append the full text of each cited chunk under a Sources: block,
+# numbered with the same [n] the answer used
+lore ask notes "what is our key rotation policy?" --expand
+lore ask notes "…" --expand --json           # answer object gains an "expansions": [...] array
+```
+
+`cat --chunk` and `cat --doc` are mutually exclusive. A malformed chunk ID is a
+usage error (exit 2); a well-formed but absent one warns on stderr, still prints
+the chunks that were found, and exits 3. `--expand` is orthogonal to `--strict`
+(strict still hard-errors on an ungrounded question first) and `--source`.
+
 ## Supported document formats
 
 | Format | Extensions | Notes |

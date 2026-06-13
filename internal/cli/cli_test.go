@@ -39,17 +39,22 @@ func (s stubEmbedder) Embed(_ context.Context, texts []string) ([][]float32, err
 }
 
 type stubGenerator struct {
-	text string
-	rec  *[]domain.Attachment // when set, records the attachments it was given
+	text      string
+	rec       *[]domain.Attachment // when set, records the attachments it was given
+	citeFirst int                  // when >0, cite only the first N hits (else all)
 }
 
 func (s stubGenerator) Synthesize(_ context.Context, _ string, hits []domain.ChunkHit, attachments []domain.Attachment) (app.Answer, error) {
 	if s.rec != nil {
 		*s.rec = attachments
 	}
-	cites := make([]domain.Citation, len(hits))
-	for i, h := range hits {
-		cites[i] = domain.Citation{ChunkID: h.Chunk.ID, Source: h.Source, Seq: h.Chunk.Seq}
+	n := len(hits)
+	if s.citeFirst > 0 && s.citeFirst < n {
+		n = s.citeFirst
+	}
+	cites := make([]domain.Citation, n)
+	for i := 0; i < n; i++ {
+		cites[i] = domain.Citation{ChunkID: hits[i].Chunk.ID, Source: hits[i].Source, Seq: hits[i].Chunk.Seq}
 	}
 	return app.Answer{Text: s.text, Citations: cites}, nil
 }
@@ -647,6 +652,152 @@ func TestCLIAsk(t *testing.T) {
 	if !ans.Grounded {
 		t.Error("an answer over a seeded chunk should be grounded")
 	}
+	// Without --expand the JSON must be byte-for-byte unaffected: no expansions key.
+	if strings.Contains(out, "expansions") {
+		t.Errorf("--json without --expand must not include an expansions key: %s", out)
+	}
+}
+
+func TestCLIAskExpand(t *testing.T) {
+	qvec := []float32{1, 0, 0}
+
+	// Seeds two chunks with distinct vectors so retrieval order is deterministic:
+	// d0 (alpha) cosine-matches the query vector, d1 (beta) less so.
+	seed := func(t *testing.T, citeFirst int) cli.Deps {
+		t.Helper()
+		deps, _, docs, index := newDeps(stubEmbedder{space: testSpace(), vec: qvec}, stubGenerator{text: "the answer", citeFirst: citeFirst})
+		if _, code := exec(deps, "init", "docs"); code != 0 {
+			t.Fatal("init failed")
+		}
+		ctx := context.Background()
+		for i, spec := range []struct {
+			body string
+			vec  []float32
+		}{
+			{"alpha chunk body", []float32{1, 0, 0}},
+			{"beta chunk body", []float32{0, 1, 0}},
+		} {
+			uri := fmt.Sprintf("file:///d%d.md", i)
+			did := domain.DeriveDocumentID("docs", uri)
+			doc, err := domain.NewDocument("docs", uri, domain.HashContent([]byte(uri)), time.Now())
+			if err != nil {
+				t.Fatal(err)
+			}
+			ch, err := domain.NewChunk(did, 0, spec.body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := docs.Upsert(ctx, doc, []domain.Chunk{ch}); err != nil {
+				t.Fatal(err)
+			}
+			if err := index.Upsert(ctx, "docs", []app.VectorEntry{{ChunkID: ch.ID, Vector: spec.vec}}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return deps
+	}
+
+	t.Run("human output appends a Sources block with cited chunk text and ordinals", func(t *testing.T) {
+		deps := seed(t, 0) // cite all retrieved
+		out, code := exec(deps, "ask", "docs", "anything", "-k", "2", "--expand")
+		if code != 0 {
+			t.Fatalf("exit %d, out %q", code, out)
+		}
+		if !strings.Contains(out, "Sources:") {
+			t.Errorf("missing Sources block:\n%s", out)
+		}
+		if !strings.Contains(out, "[1]") || !strings.Contains(out, "[2]") {
+			t.Errorf("Sources block should number with the answer's ordinals:\n%s", out)
+		}
+		if !strings.Contains(out, "alpha chunk body") || !strings.Contains(out, "beta chunk body") {
+			t.Errorf("expand must include both cited chunks' full text:\n%s", out)
+		}
+	})
+
+	t.Run("only cited chunks appear; an uncited retrieved chunk is absent", func(t *testing.T) {
+		deps := seed(t, 1) // model cites only the first (d0/alpha) of two retrieved
+		out, code := exec(deps, "ask", "docs", "anything", "-k", "2", "--expand")
+		if code != 0 {
+			t.Fatalf("exit %d", code)
+		}
+		if !strings.Contains(out, "alpha chunk body") {
+			t.Errorf("cited chunk text should appear:\n%s", out)
+		}
+		if strings.Contains(out, "beta chunk body") {
+			t.Errorf("uncited chunk text must not appear:\n%s", out)
+		}
+	})
+
+	t.Run("--json adds an expansions array without disturbing existing fields", func(t *testing.T) {
+		deps := seed(t, 0)
+		out, code := exec(deps, "ask", "docs", "anything", "-k", "2", "--expand", "--json")
+		if code != 0 {
+			t.Fatalf("exit %d, out %q", code, out)
+		}
+		var ans answerViewJSON
+		if err := json.Unmarshal([]byte(out), &ans); err != nil {
+			t.Fatalf("bad JSON %q: %v", out, err)
+		}
+		if ans.Text != "the answer" || len(ans.Citations) != 2 || !ans.Grounded {
+			t.Errorf("existing fields disturbed: %+v", ans)
+		}
+		if len(ans.Expansions) != 2 {
+			t.Fatalf("want 2 expansions, got %d", len(ans.Expansions))
+		}
+		texts := ans.Expansions[0].Text + "|" + ans.Expansions[1].Text
+		if !strings.Contains(texts, "alpha chunk body") || !strings.Contains(texts, "beta chunk body") {
+			t.Errorf("expansions missing chunk text: %+v", ans.Expansions)
+		}
+		// Each expansion uses the slice-1 chunk shape (chunk_id, seq, text).
+		if ans.Expansions[0].ChunkID == "" {
+			t.Errorf("expansion missing chunk_id: %+v", ans.Expansions[0])
+		}
+	})
+
+	t.Run("ungrounded answer omits the block (and the json key)", func(t *testing.T) {
+		deps, _, _, _ := newDeps(stubEmbedder{space: testSpace(), vec: qvec}, stubGenerator{text: "ungrounded guess"})
+		if _, code := exec(deps, "init", "empty"); code != 0 {
+			t.Fatal("init failed")
+		}
+		out, errOut, code := execErr(deps, "ask", "empty", "anything", "--expand")
+		if code != 0 {
+			t.Fatalf("non-strict ungrounded should exit 0, got %d", code)
+		}
+		if strings.Contains(out, "Sources:") {
+			t.Errorf("nothing cited: the Sources block must be omitted:\n%s", out)
+		}
+		if !strings.Contains(errOut, "not grounded") {
+			t.Errorf("want the ungrounded warning on stderr, got %q", errOut)
+		}
+	})
+
+	t.Run("--strict still errors before expansion", func(t *testing.T) {
+		deps, _, _, _ := newDeps(stubEmbedder{space: testSpace(), vec: qvec}, stubGenerator{text: "x"})
+		if _, code := exec(deps, "init", "empty"); code != 0 {
+			t.Fatal("init failed")
+		}
+		out, code := exec(deps, "ask", "empty", "anything", "--strict", "--expand")
+		if code != 1 {
+			t.Errorf("strict + ungrounded should exit 1, got %d", code)
+		}
+		if strings.Contains(out, "Sources:") {
+			t.Errorf("strict must error before any expansion runs:\n%s", out)
+		}
+	})
+
+	t.Run("--expand composes with --source scoping", func(t *testing.T) {
+		deps := seed(t, 0)
+		out, code := exec(deps, "ask", "docs", "anything", "-k", "2", "--source", "d0.md", "--expand")
+		if code != 0 {
+			t.Fatalf("exit %d, out %q", code, out)
+		}
+		if !strings.Contains(out, "alpha chunk body") {
+			t.Errorf("scoped expand should include the d0 chunk:\n%s", out)
+		}
+		if strings.Contains(out, "beta chunk body") {
+			t.Errorf("--source d0.md should exclude d1's chunk:\n%s", out)
+		}
+	})
 }
 
 func TestCLIAskGroundingGuard(t *testing.T) {
@@ -1044,7 +1195,8 @@ type answerViewJSON struct {
 		Source  string `json:"source"`
 		Seq     int    `json:"seq"`
 	} `json:"citations"`
-	Grounded bool `json:"grounded"`
+	Grounded   bool            `json:"grounded"`
+	Expansions []chunkViewJSON `json:"expansions"`
 }
 
 type ingestViewJSON struct {

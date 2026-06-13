@@ -203,6 +203,9 @@ type answerView struct {
 	Text      string         `json:"text"`
 	Citations []citationView `json:"citations"`
 	Grounded  bool           `json:"grounded"`
+	// Expansions carries the full text of cited chunks when --expand is set.
+	// omitempty keeps existing --json output byte-for-byte unchanged otherwise.
+	Expansions []chunkView `json:"expansions,omitempty"`
 }
 
 type docView struct {
