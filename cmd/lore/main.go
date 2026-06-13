@@ -19,10 +19,13 @@ import (
 	"github.com/jmurray2011/lore/internal/adapters/docx"
 	"github.com/jmurray2011/lore/internal/adapters/extract"
 	"github.com/jmurray2011/lore/internal/adapters/fs"
+	"github.com/jmurray2011/lore/internal/adapters/httpjson"
 	"github.com/jmurray2011/lore/internal/adapters/memstore"
 	"github.com/jmurray2011/lore/internal/adapters/openai"
 	"github.com/jmurray2011/lore/internal/adapters/pdf"
+	"github.com/jmurray2011/lore/internal/adapters/rerank"
 	"github.com/jmurray2011/lore/internal/adapters/sqlite"
+	"github.com/jmurray2011/lore/internal/adapters/tiktoken"
 	"github.com/jmurray2011/lore/internal/adapters/xlsx"
 	"github.com/jmurray2011/lore/internal/app"
 	"github.com/jmurray2011/lore/internal/cli"
@@ -119,7 +122,27 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			generator = cache.NewGenerator(gen, store.cache, salt, cfg.Cache.TTL, time.Now)
 		}
 
-		chunker, err := domain.NewChunker(domain.DefaultChunkSize, domain.DefaultChunkOverlap)
+		// Optional rerank provider — a separate Cohere-style endpoint (its own
+		// base URL/key/model, decision). Wired only when configured; the rerank
+		// command and query/ask --rerank report a usage error when it is nil.
+		var reranker *app.Reranker
+		if cfg.Rerank.BaseURL != "" && cfg.Rerank.Model != "" {
+			rerankAuth := httpjson.AuthBearer
+			if cfg.Rerank.Auth == "api-key" {
+				rerankAuth = httpjson.AuthAPIKey
+			}
+			provider, err := rerank.NewReranker(cfg.Rerank.BaseURL, cfg.Rerank.APIKey, cfg.Rerank.Model, rerankAuth, &http.Client{Timeout: cfg.Rerank.Timeout})
+			if err != nil {
+				return cli.Deps{}, err
+			}
+			reranker = app.NewReranker(provider)
+		}
+
+		counter, err := tiktoken.New()
+		if err != nil {
+			return cli.Deps{}, err
+		}
+		chunkers, err := buildChunkers(cfg.Chunk, counter)
 		if err != nil {
 			return cli.Deps{}, err
 		}
@@ -127,8 +150,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		extractor := extract.NewRouter(extract.New(), docx.New(), pdf.New(), xlsx.New())
 		source := fs.NewSource()
 
-		catalog := app.NewCatalog(store.collections, store.docs, embedder)
-		ingestor := app.NewIngestor(store.collections, store.docs, store.index, embedder, extractor, source, chunker, app.WithConcurrency(cfg.Ingest.Concurrency))
+		catalog := app.NewCatalog(store.collections, store.docs, embedder, chunkers)
+		ingestor := app.NewIngestor(store.collections, store.docs, store.index, embedder, extractor, source, chunkers, app.WithConcurrency(cfg.Ingest.Concurrency))
 		querier := app.NewQuerier(store.collections, store.index, store.docs, embedder)
 		remover := app.NewRemover(store.collections, store.docs, store.index)
 		return cli.Deps{
@@ -137,7 +160,9 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			Sync:    app.NewSyncer(catalog, ingestor, remover, source),
 			Query:   querier,
 			Ask:     app.NewAsker(querier, generator),
+			Rerank:  reranker,
 			Remove:  remover,
+			Tokens:  counter,
 		}, nil
 	}
 
@@ -201,5 +226,38 @@ func openStorage(cfg config.Storage) (storage, error) {
 	default:
 		// config validation rejects unknown backends; this stays defensive.
 		return storage{}, fmt.Errorf("lore: %w: unknown storage backend %q", domain.ErrInvalidArgument, cfg.Backend)
+	}
+}
+
+// buildChunkers assembles the chunker Registry (and the ChunkerSpec it pins onto
+// new collections) from the chunk configuration. The structure strategy routes
+// markdown to the heading-aware, token-sized chunker and falls back to the fixed
+// word chunker for formats without a structure-aware chunker yet; the fixed
+// strategy uses the word chunker for everything.
+func buildChunkers(cc config.Chunk, counter *tiktoken.Counter) (domain.Registry, error) {
+	switch cc.Strategy {
+	case "fixed":
+		fixed, err := domain.NewFixedChunker(cc.Size, cc.Overlap)
+		if err != nil {
+			return domain.Registry{}, err
+		}
+		spec := domain.ChunkerSpec{Strategy: "fixed", Version: domain.FixedChunkerVersion, Size: cc.Size, Overlap: cc.Overlap, Tokenizer: "words"}
+		return domain.NewRegistry(spec, fixed, nil)
+	case "structure":
+		markdown, err := domain.NewMarkdownChunker(cc.Size, cc.Overlap, cc.ContextPrefix, counter.Count)
+		if err != nil {
+			return domain.Registry{}, err
+		}
+		// Plain text (and the default for docx paragraphs + best-effort pdf/xlsx
+		// text) uses the paragraph-aware, token-sized text chunker.
+		text, err := domain.NewTextChunker(cc.Size, cc.Overlap, counter.Count)
+		if err != nil {
+			return domain.Registry{}, err
+		}
+		spec := domain.ChunkerSpec{Strategy: "structure", Version: domain.StructureChunkerVersion, Size: cc.Size, Overlap: cc.Overlap, Tokenizer: tiktoken.EncodingName, ContextPrefix: cc.ContextPrefix}
+		return domain.NewRegistry(spec, text, map[string]domain.Chunker{"text/markdown": markdown})
+	default:
+		// config validation rejects unknown strategies; this stays defensive.
+		return domain.Registry{}, fmt.Errorf("lore: %w: unknown chunk strategy %q", domain.ErrInvalidArgument, cc.Strategy)
 	}
 }

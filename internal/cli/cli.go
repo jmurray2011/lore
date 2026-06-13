@@ -26,7 +26,12 @@ type Deps struct {
 	Sync    *app.Syncer
 	Query   *app.Querier
 	Ask     *app.Asker
-	Remove  *app.Remover
+	// Rerank is nil when no rerank provider is configured; commands that need it
+	// (rerank, query/ask --rerank) report a usage error in that case.
+	Rerank *app.Reranker
+	Remove *app.Remover
+	// Tokens counts tokens for --budget token-bounded retrieval (query/ask).
+	Tokens app.TokenCounter
 }
 
 // GlobalOptions are the resolved global flags the composition root needs to
@@ -100,6 +105,7 @@ func NewRootCommand(build Builder, version string, out, errOut io.Writer) *cobra
 		newQueryCmd(&deps),
 		newAskCmd(&deps),
 		newSynthesizeCmd(&deps),
+		newRerankCmd(&deps),
 		newRmCmd(&deps),
 	)
 	return root
@@ -125,7 +131,7 @@ func ExitCode(err error) int {
 		return 2
 	case errors.Is(err, app.ErrNotFound):
 		return 3
-	case errors.Is(err, domain.ErrSpaceMismatch):
+	case errors.Is(err, domain.ErrSpaceMismatch), errors.Is(err, domain.ErrChunkerMismatch):
 		return 4
 	default:
 		return 1
@@ -174,12 +180,22 @@ func viewCollection(c *domain.Collection) collectionView {
 	}
 }
 
-// statusView is the collection view plus the document count, shown only by
-// `status` (a single collection). ls deliberately omits the count — it would
-// cost one query per listed collection.
+// statusView is the collection view plus the document count and the pinned
+// chunker, shown only by `status` (a single collection). ls deliberately omits
+// the count — it would cost one query per listed collection.
 type statusView struct {
 	collectionView
-	Documents int `json:"documents"`
+	Documents int    `json:"documents"`
+	Chunker   string `json:"chunker"`
+}
+
+// chunkerLabel renders a collection's pinned chunker for display, naming the
+// read-only state of a collection that predates chunker pinning.
+func chunkerLabel(c *domain.Collection) string {
+	if c.Chunker.IsZero() {
+		return "unpinned (legacy; rebuild to ingest)"
+	}
+	return c.Chunker.String()
 }
 
 type hitView struct {
@@ -187,13 +203,19 @@ type hitView struct {
 	Source  string  `json:"source"`
 	Seq     int     `json:"seq"`
 	Score   float64 `json:"score"`
-	Text    string  `json:"text"`
+	// RerankScore is present only on hits that went through a reranker; omitempty
+	// keeps the schema additive for query/synthesize consumers that never rerank.
+	RerankScore *float64 `json:"rerank_score,omitempty"`
+	Text        string   `json:"text"`
 }
 
 type chunkView struct {
 	ChunkID string `json:"chunk_id"`
 	Seq     int    `json:"seq"`
-	Text    string `json:"text"`
+	// HeadingPath is the document section the chunk came from (structure-aware
+	// chunkers); omitempty keeps output unchanged for chunks without one.
+	HeadingPath string `json:"heading_path,omitempty"`
+	Text        string `json:"text"`
 }
 
 type citationView struct {
@@ -209,24 +231,43 @@ type answerView struct {
 	// Expansions carries the full text of cited chunks when --expand is set.
 	// omitempty keeps existing --json output byte-for-byte unchanged otherwise.
 	Expansions []chunkView `json:"expansions,omitempty"`
-	// Retrieval carries the retrieval diagnostics when --explain is set: every
-	// chunk that grounded the answer, with its score and whether it was cited. A
-	// pointer so the key is present (as []) when --explain is on but nothing was
-	// retrieved, yet absent — output unchanged — when --explain is off.
-	Retrieval *[]retrievalHitView `json:"retrieval,omitempty"`
+	// Explain carries the retrieval diagnostics when --explain is set. omitempty
+	// keeps ask --json byte-for-byte unchanged without the flag. (query --json is
+	// a bare hit array — the synthesize contract — so its explain goes to stderr
+	// instead; see writeQueryExplain.)
+	Explain *explainView `json:"explain,omitempty"`
+	// GroundingTokens is the token count of the chunks that grounded the answer,
+	// reported only when --budget is set; omitempty keeps output unchanged
+	// otherwise.
+	GroundingTokens *int `json:"grounding_tokens,omitempty"`
 }
 
-// retrievalHitView is one grounding chunk in an --explain report: its rank,
-// score, and whether the answer cited it — enough to tell retrieval starvation
-// (every score low) from a synthesis miss (a high-scoring chunk left uncited).
-// It omits the chunk text deliberately; --expand is the flag for that.
-type retrievalHitView struct {
-	Rank    int     `json:"rank"`
-	ChunkID string  `json:"chunk_id"`
-	Source  string  `json:"source"`
-	Seq     int     `json:"seq"`
-	Score   float64 `json:"score"`
-	Cited   bool    `json:"cited"`
+// explainView is the --explain diagnostic: the returned hits' score
+// distribution plus the best candidate just outside the top-k (next_score), so
+// a low-everywhere distribution (retrieval starvation) is distinguishable from a
+// high-but-uncited chunk (a synthesis miss). It carries scores, not chunk text;
+// --expand is the flag for text.
+type explainView struct {
+	Returned  []explainHit `json:"returned"`
+	NextScore *float64     `json:"next_score"` // null when there is no further candidate
+	Stats     explainStats `json:"stats"`
+}
+
+// explainHit is one returned chunk in the distribution. RerankScore is set when
+// two-stage retrieval (--rerank) reordered the hits; Cited is set only for ask
+// (which has an answer to cite from). Both are omitted otherwise.
+type explainHit struct {
+	Score       float64  `json:"score"`
+	RerankScore *float64 `json:"rerank_score,omitempty"`
+	Source      string   `json:"source"`
+	Seq         int      `json:"seq"`
+	Cited       *bool    `json:"cited,omitempty"`
+}
+
+type explainStats struct {
+	Min  float64 `json:"min"`
+	Max  float64 `json:"max"`
+	Mean float64 `json:"mean"`
 }
 
 type docView struct {

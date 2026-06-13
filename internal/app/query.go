@@ -28,6 +28,15 @@ func NewQuerier(collections CollectionRepository, index VectorIndex, docs Docume
 // top results), some matches can still be missed.
 const sourceOverfetch = 10
 
+// Retrieval is what Explain returns: the top-k Hits plus the best candidate just
+// outside them (the runner-up), for --explain diagnostics. HasNext is false when
+// there is no further candidate (fewer than k+1 matched after filtering).
+type Retrieval struct {
+	Hits      []domain.ChunkHit
+	NextScore float64
+	HasNext   bool
+}
+
 // Query embeds the question and returns up to k ChunkHits from the collection,
 // best match first. It enforces space coherence (invariant 1): the embedder
 // must produce vectors in the collection's space, or it fails with
@@ -40,41 +49,61 @@ const sourceOverfetch = 10
 // An empty query is ErrInvalidArgument; an unknown collection is ErrNotFound.
 // No matching chunks yields no hits and no error.
 func (q *Querier) Query(ctx context.Context, collection, query string, k int, source string) ([]domain.ChunkHit, error) {
+	r, err := q.retrieve(ctx, collection, query, k, source, false)
+	return r.Hits, err
+}
+
+// Explain runs the same retrieval as Query but also reports the best candidate
+// just outside the returned top-k (the runner-up) for --explain diagnostics. It
+// fetches one extra candidate (k+1) to surface that runner-up — no extra model
+// call beyond the single query embed. Same errors as Query.
+func (q *Querier) Explain(ctx context.Context, collection, query string, k int, source string) (Retrieval, error) {
+	return q.retrieve(ctx, collection, query, k, source, true)
+}
+
+// retrieve is the shared body of Query and Explain. withRunnerUp fetches one
+// extra candidate (non-source path) and splits the ordered, filtered candidates
+// into the returned top-k and the runner-up. Query passes false, so its search
+// budget and result are byte-for-byte what they were before Explain existed.
+func (q *Querier) retrieve(ctx context.Context, collection, query string, k int, source string, withRunnerUp bool) (Retrieval, error) {
 	if strings.TrimSpace(query) == "" {
-		return nil, fmt.Errorf("query: %w: text must not be empty", domain.ErrInvalidArgument)
+		return Retrieval{}, fmt.Errorf("query: %w: text must not be empty", domain.ErrInvalidArgument)
 	}
 
 	coll, err := q.collections.Get(ctx, collection)
 	if err != nil {
-		return nil, err
+		return Retrieval{}, err
 	}
 
 	space, err := q.embedder.Space(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("embedder space: %w", err)
+		return Retrieval{}, fmt.Errorf("embedder space: %w", err)
 	}
 	if err := coll.AcceptsSpace(space); err != nil {
-		return nil, err
+		return Retrieval{}, err
 	}
 
 	vecs, err := q.embedder.Embed(ctx, []string{query})
 	if err != nil {
-		return nil, fmt.Errorf("embed query: %w", err)
+		return Retrieval{}, fmt.Errorf("embed query: %w", err)
 	}
 	if len(vecs) != 1 {
-		return nil, fmt.Errorf("embedder returned %d vectors for 1 query", len(vecs))
+		return Retrieval{}, fmt.Errorf("embedder returned %d vectors for 1 query", len(vecs))
 	}
 
 	searchK := k
-	if source != "" && k > 0 {
-		searchK = k * sourceOverfetch
+	switch {
+	case source != "" && k > 0:
+		searchK = k * sourceOverfetch // over-fetch already exposes the runner-up
+	case withRunnerUp && k > 0:
+		searchK = k + 1 // one extra candidate to surface the runner-up
 	}
 	matches, err := q.index.Search(ctx, coll.Name, vecs[0], searchK)
 	if err != nil {
-		return nil, fmt.Errorf("search %q: %w", coll.Name, err)
+		return Retrieval{}, fmt.Errorf("search %q: %w", coll.Name, err)
 	}
 	if len(matches) == 0 {
-		return nil, nil
+		return Retrieval{}, nil
 	}
 
 	ids := make([]domain.ChunkID, len(matches))
@@ -86,12 +115,12 @@ func (q *Querier) Query(ctx context.Context, collection, query string, k int, so
 
 	chunks, err := q.docs.GetChunks(ctx, ids)
 	if err != nil {
-		return nil, fmt.Errorf("hydrate chunks: %w", err)
+		return Retrieval{}, fmt.Errorf("hydrate chunks: %w", err)
 	}
 
 	sourceByDoc, err := q.sources(ctx, chunks)
 	if err != nil {
-		return nil, err
+		return Retrieval{}, err
 	}
 
 	hits := make([]domain.ChunkHit, 0, len(chunks))
@@ -107,11 +136,17 @@ func (q *Querier) Query(ctx context.Context, collection, query string, k int, so
 			}
 		}
 		hits = kept
-		if k > 0 && len(hits) > k {
-			hits = hits[:k]
-		}
 	}
-	return hits, nil
+
+	// Split into the returned top-k and the runner-up just beyond it. The hits
+	// are already in score order (matches are, and hydration preserves order).
+	r := Retrieval{Hits: hits}
+	if k > 0 && len(hits) > k {
+		r.NextScore = hits[k].Score
+		r.HasNext = true
+		r.Hits = hits[:k]
+	}
+	return r, nil
 }
 
 // matchSource reports whether a source URI matches the user's glob. A pattern

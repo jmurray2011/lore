@@ -16,7 +16,7 @@ func TestCatalogInit(t *testing.T) {
 
 	t.Run("creates a collection pinned to the embedder space", func(t *testing.T) {
 		colls := newFakeCollections()
-		cat := app.NewCatalog(colls, &fakeDocs{}, &fakeEmbedder{space: space})
+		cat := app.NewCatalog(colls, &fakeDocs{}, &fakeEmbedder{space: space}, chunker41(t))
 
 		coll, err := cat.Init(ctx, "docs")
 		if err != nil {
@@ -31,7 +31,7 @@ func TestCatalogInit(t *testing.T) {
 	})
 
 	t.Run("invalid name is ErrInvalidArgument", func(t *testing.T) {
-		cat := app.NewCatalog(newFakeCollections(), &fakeDocs{}, &fakeEmbedder{space: space})
+		cat := app.NewCatalog(newFakeCollections(), &fakeDocs{}, &fakeEmbedder{space: space}, chunker41(t))
 		if _, err := cat.Init(ctx, "Bad Name"); !errors.Is(err, domain.ErrInvalidArgument) {
 			t.Errorf("want ErrInvalidArgument, got %v", err)
 		}
@@ -39,7 +39,7 @@ func TestCatalogInit(t *testing.T) {
 
 	t.Run("duplicate is ErrAlreadyExists", func(t *testing.T) {
 		colls := newFakeCollections()
-		cat := app.NewCatalog(colls, &fakeDocs{}, &fakeEmbedder{space: space})
+		cat := app.NewCatalog(colls, &fakeDocs{}, &fakeEmbedder{space: space}, chunker41(t))
 		if _, err := cat.Init(ctx, "docs"); err != nil {
 			t.Fatal(err)
 		}
@@ -51,7 +51,7 @@ func TestCatalogInit(t *testing.T) {
 
 func TestCatalogListAndGet(t *testing.T) {
 	ctx := context.Background()
-	cat := app.NewCatalog(newFakeCollections(), &fakeDocs{}, &fakeEmbedder{space: testSpace()})
+	cat := app.NewCatalog(newFakeCollections(), &fakeDocs{}, &fakeEmbedder{space: testSpace()}, chunker41(t))
 	if _, err := cat.Init(ctx, "alpha"); err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +91,7 @@ func TestCatalogListDocuments(t *testing.T) {
 		seed(t, docs, "docs", "file:///a.md")
 		seed(t, docs, "docs", "file:///b.md")
 		seed(t, docs, "notes", "file:///c.md")
-		cat := app.NewCatalog(newFakeCollections(mustCollection(t, "docs", space)), docs, &fakeEmbedder{space: space})
+		cat := app.NewCatalog(newFakeCollections(mustCollection(t, "docs", space)), docs, &fakeEmbedder{space: space}, chunker41(t))
 
 		got, err := cat.ListDocuments(ctx, "docs")
 		if err != nil {
@@ -108,7 +108,7 @@ func TestCatalogListDocuments(t *testing.T) {
 	})
 
 	t.Run("unknown collection is ErrNotFound", func(t *testing.T) {
-		cat := app.NewCatalog(newFakeCollections(), &fakeDocs{}, &fakeEmbedder{space: space})
+		cat := app.NewCatalog(newFakeCollections(), &fakeDocs{}, &fakeEmbedder{space: space}, chunker41(t))
 		if _, err := cat.ListDocuments(ctx, "missing"); !errors.Is(err, app.ErrNotFound) {
 			t.Errorf("want ErrNotFound, got %v", err)
 		}
@@ -129,7 +129,7 @@ func TestCatalogDocumentChunks(t *testing.T) {
 	if err := docs.Upsert(ctx, doc, chunks); err != nil {
 		t.Fatal(err)
 	}
-	cat := app.NewCatalog(newFakeCollections(mustCollection(t, "docs", space)), docs, &fakeEmbedder{space: space})
+	cat := app.NewCatalog(newFakeCollections(mustCollection(t, "docs", space)), docs, &fakeEmbedder{space: space}, chunker41(t))
 
 	t.Run("returns the document's chunks in seq order", func(t *testing.T) {
 		got, err := cat.DocumentChunks(ctx, "docs", "file:///a.md")
@@ -162,7 +162,7 @@ func TestCatalogChunksByIDs(t *testing.T) {
 	if err := docs.Upsert(ctx, doc, chunks); err != nil {
 		t.Fatal(err)
 	}
-	cat := app.NewCatalog(newFakeCollections(mustCollection(t, "docs", space)), docs, &fakeEmbedder{space: space})
+	cat := app.NewCatalog(newFakeCollections(mustCollection(t, "docs", space)), docs, &fakeEmbedder{space: space}, chunker41(t))
 
 	t.Run("returns requested chunks in input order, omitting absent", func(t *testing.T) {
 		got, err := cat.ChunksByIDs(ctx, "docs", []string{string(chunks[1].ID), "no-such-chunk", string(chunks[0].ID)})

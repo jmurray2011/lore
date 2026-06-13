@@ -26,9 +26,13 @@ func RunCollectionRepositorySuite(t *testing.T, factory func(t *testing.T) app.C
 	if err != nil {
 		t.Fatalf("NewEmbeddingSpace: %v", err)
 	}
+	spec, err := domain.NewChunkerSpec("structure", 1, 512, 64, "o200k_base", true)
+	if err != nil {
+		t.Fatalf("NewChunkerSpec: %v", err)
+	}
 	newCollection := func(t *testing.T, name string) *domain.Collection {
 		t.Helper()
-		c, err := domain.NewCollection(name, space, createdAt)
+		c, err := domain.NewCollection(name, space, spec, createdAt)
 		if err != nil {
 			t.Fatalf("NewCollection(%q): %v", name, err)
 		}
@@ -46,6 +50,11 @@ func RunCollectionRepositorySuite(t *testing.T, factory func(t *testing.T) app.C
 		}
 		if got.Name != "docs" || !got.Space.Equal(space) || !got.CreatedAt.Equal(createdAt) {
 			t.Errorf("round-trip mismatch: got %+v", got)
+		}
+		// The chunker pin must survive persistence — a collection that lost its
+		// spec would silently become unpinned (and refuse re-ingest).
+		if got.Chunker != spec {
+			t.Errorf("chunker spec round-trip mismatch: got %+v, want %+v", got.Chunker, spec)
 		}
 	})
 

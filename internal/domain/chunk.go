@@ -38,6 +38,11 @@ type Chunk struct {
 	DocumentID DocumentID
 	Seq        int
 	Text       string
+	// HeadingPath is the document section a chunk came from, joined with " > "
+	// (e.g. "Auth > Keys > Rotation"). Set by structure-aware chunkers; empty for
+	// formats or strategies without headings. It is provenance for display and
+	// inspection, not part of the chunk's identity.
+	HeadingPath string
 }
 
 // NewChunk constructs a Chunk with its deterministic ID.
@@ -66,12 +71,16 @@ type VectorMatch struct {
 	Score   float64
 }
 
-// ChunkHit is a hydrated retrieval result: the chunk itself, its score, and the
-// URI of the source document it came from (provenance for display and citation).
+// ChunkHit is a hydrated retrieval result: the chunk itself, its similarity
+// score, and the URI of the source document it came from (provenance for display
+// and citation). RerankScore is set only after a cross-encoder rerank — nil
+// means the hit was never reranked, so it serializes additively (rerank_score
+// omitted) and the original Score is always preserved alongside it.
 type ChunkHit struct {
-	Chunk  Chunk
-	Score  float64
-	Source string // source URI of the chunk's document
+	Chunk       Chunk
+	Score       float64
+	Source      string // source URI of the chunk's document
+	RerankScore *float64
 }
 
 // Citation references a chunk an answer was grounded in, carrying the provenance
