@@ -213,6 +213,46 @@ lore query kb "controls" -k 20 --budget 1500 --json       # top-20, capped to 15
 - `ask --json` reports the grounding set's token count as `grounding_tokens`;
   `query` reports it on stderr (its stdout stays the bare hit array).
 
+## Cross-collection retrieval
+
+Collections are independent corpora, but vectors from collections that share an
+embedding space (same model + dimensions) are directly comparable. Two commands
+exploit that.
+
+**Search several collections at once** with repeatable `-c`/`--collection` on
+`query` and `ask`. Their hits merge into one ranked top-k (or grounding set),
+and each hit/citation is tagged with the collection it came from:
+
+```bash
+lore ask -c notes -c code -c slack "how do we deploy?"     # answer grounded across all three
+lore query -c notes -c code "retry backoff" -k 10 --json   # merged hits, each with a "collection" field
+```
+
+All targeted collections must share an embedding space — the merge compares
+their vectors directly, so a mismatch is an invariant violation (**exit 4**,
+naming the offenders), checked before any retrieval runs. A single collection
+(one `-c`, or the bare positional `<collection>`) behaves exactly as before.
+Composes with `--rerank` (the *merged* pool is reranked), `--budget` (the merged
+set is token-filled), and `--explain` (the distribution covers the merged set).
+
+**Semantic diff between two collections** with `query <target>
+--from-collection <source>`. Instead of embedding query text, this feeds the
+source collection's *own stored vectors* back as queries (no re-embedding, so no
+risk of a drifted model) and finds each source chunk's nearest neighbors in the
+target. Results are grouped by source chunk:
+
+```bash
+# For each chunk in v2, find its closest match in v1, then surface the chunks
+# in v2 whose best v1 match is weak — i.e. new or substantially changed content:
+lore query v2 --from-collection v1 --json \
+  | jq 'map(select(.hits[0].score < 0.7))'
+```
+
+Source and target must share an embedding space (exit 4 otherwise). `-k` bounds
+the hits per source chunk; `--source` scopes the *target* side; `--json` emits
+`[{ "from": {chunk_id, source, seq}, "hits": [ <hit>, ... ] }, ...]` with the
+standard hit object inside `hits`.
+
 ## Supported document formats
 
 | Format | Extensions | Notes |
