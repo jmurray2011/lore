@@ -192,12 +192,33 @@ after retries exits 1 and emits nothing — lore never silently falls back to
 vector order. Pair it with `--explain`, which then shows both `sim=` and
 `rerank=` scores and a rerank-ordered runner-up.
 
+## Token-budget retrieval (`--budget`)
+
+`-k` is a crude proxy for "how much context": chunks vary in size, so a fixed
+count over- or under-fills the model's window. `--budget N` on `query` and `ask`
+returns the top-ranked chunks whose **cumulative token count** reaches `N`
+instead:
+
+```bash
+lore ask kb "summarize the controls" --budget 2000        # fill ~2000 tokens of context
+lore query kb "controls" -k 20 --budget 1500 --json       # top-20, capped to 1500 tokens
+```
+
+- Tokens are counted with the same tokenizer used for chunk sizing.
+- **Composes with `-k`:** `--budget` is applied *after* ranking and only ever
+  *tightens* the bound — it takes top chunks until the budget fills, never
+  exceeding `-k` chunks (default 8). Raise `-k` to let the budget consider more.
+- **Composes with `--rerank`:** the budget applies to the **final** set — the
+  candidate pool is reranked first, then trimmed to the token budget.
+- `ask --json` reports the grounding set's token count as `grounding_tokens`;
+  `query` reports it on stderr (its stdout stays the bare hit array).
+
 ## Supported document formats
 
 | Format | Extensions | Notes |
 |---|---|---|
 | Plain text | `.txt` | UTF-8, newlines normalized |
-| Markdown | `.md`, `.markdown` | embedded as-is |
+| Markdown | `.md`, `.markdown` | heading-aware chunking, code-fence-safe |
 | Word | `.docx` | text runs, paragraph breaks |
 | Excel | `.xlsx` | one line per row, cells tab-joined |
 | PDF | `.pdf` | best-effort text (no layout/tables; image-only PDFs yield nothing) |
@@ -206,6 +227,45 @@ Unsupported files are reported as a separate `unsupported` count (distinct from
 `skipped`, which means already-ingested and unchanged), so a folder of mixed
 types never hides files that were silently never ingested. Hidden files and
 directories (`.git`, etc.) are never ingested.
+
+## Chunking
+
+Retrieval quality is bounded by *chunk* quality more than by index
+sophistication. lore chunks documents with a pluggable, per-format strategy
+selected by `chunk.strategy`:
+
+- **`structure`** (default) — token-sized and boundary-aware:
+  - **Markdown** splits on the heading hierarchy: each chunk is a section,
+    carrying its full heading path (`Auth > Keys > Rotation`) as metadata. It
+    **never splits inside a fenced code block**; oversized sections split at
+    paragraph (then sentence, then word) boundaries; tiny adjacent sections merge
+    up to the target size.
+  - **Plain text / docx / pdf / xlsx** pack paragraphs up to the target size,
+    never breaking mid-sentence where avoidable.
+- **`fixed`** — the legacy fixed-size word windows (an escape hatch).
+
+Sizes are measured in **tokens** (`chunk.size`, `chunk.overlap`) for the
+structure strategy and in whitespace words for `fixed`, via a built-in,
+offline tiktoken counter (`o200k_base`). The heading path is shown by `cat`
+and in `--json`.
+
+**Contextual embedding (`chunk.context_prefix`, default on).** For markdown,
+the chunk's heading path is prepended to the text that gets **embedded**, so the
+vector captures the chunk's place in the document. The **stored** text is always
+the original — citations and `cat` show real content, never the prefixed form.
+
+**Chunker pinning.** A collection records the chunker it was created with (shown
+by `lore status`). Re-ingesting (`add`/`sync`) with a *different* chunker —
+strategy, size, overlap, tokenizer, or the context-prefix setting — would leave
+the collection holding two incompatible chunk layouts (unchanged documents skip
+re-chunking), so lore **refuses it with exit 4** rather than silently mixing.
+Changing the chunker means rebuilding: `lore init` a fresh collection and re-add.
+Collections created before pinning existed are read-only in the same way —
+queryable, but they must be rebuilt to ingest again.
+
+Code-aware chunking (one chunk per function/class, via tree-sitter) is a planned
+future strategy that slots into the same registry; source files currently use
+the text chunker.
 
 ## Configuration
 
@@ -232,6 +292,10 @@ config file is TOML at `<user-config-dir>/lore/config.toml`.
 | `LORE_STORAGE_BACKEND` | `storage.backend` | `sqlite` | `sqlite` or `memory` |
 | `LORE_DB_PATH` | `storage.path` | `<user-config-dir>/lore/lore.db` | SQLite database file |
 | `LORE_INGEST_CONCURRENCY` | `ingest.concurrency` | `8` | parallel embeds during ingest (lower for tight rate limits) |
+| `LORE_CHUNK_STRATEGY` | `chunk.strategy` | `structure` | `structure` (heading/paragraph-aware) or `fixed` (legacy word windows) |
+| `LORE_CHUNK_SIZE` | `chunk.size` | `512` | target chunk size (tokens for `structure`, words for `fixed`) |
+| `LORE_CHUNK_OVERLAP` | `chunk.overlap` | `64` | overlap between size-driven splits, same unit as size |
+| `LORE_CHUNK_CONTEXT_PREFIX` | `chunk.context_prefix` | `true` | prepend a chunk's heading path to its embedded text (markdown) |
 | `LORE_CACHE` | `cache.enabled` | `false` | reuse synthesized `ask`/`synthesize` answers across runs |
 | `LORE_CACHE_TTL` | `cache.ttl` | `720h` (30d) | max age of a reusable cached answer (Go duration) |
 | `LORE_LOG_LEVEL` | `log.level` | `info` | `debug`/`info`/`warn`/`error` |
