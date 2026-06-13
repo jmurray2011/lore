@@ -9,14 +9,19 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
+	"filippo.io/age"
+
+	"github.com/jmurray2011/lore/internal/adapters/agecrypt"
 	"github.com/jmurray2011/lore/internal/adapters/extract"
 	"github.com/jmurray2011/lore/internal/adapters/fs"
 	"github.com/jmurray2011/lore/internal/adapters/memstore"
 	"github.com/jmurray2011/lore/internal/app"
+	"github.com/jmurray2011/lore/internal/artifact"
 	"github.com/jmurray2011/lore/internal/cli"
 	"github.com/jmurray2011/lore/internal/domain"
 )
@@ -104,6 +109,8 @@ func newDeps(emb app.Embedder, gen app.Generator) (cli.Deps, *memstore.Collectio
 		Ask:     app.NewAsker(q, gen),
 		Remove:  remover,
 		Tokens:  wordTokenCounter{},
+		Export:  app.NewExporter(colls, docs, index),
+		Import:  app.NewImporter(colls, docs, index, remover),
 	}
 	return deps, colls, docs, index
 }
@@ -2125,6 +2132,221 @@ func TestCLIMultiCollection(t *testing.T) {
 		deps, _, _ := setup(t)
 		if _, code := exec(deps, "query", "v2", "--from-collection", "a", "-c", "b"); code != 2 {
 			t.Errorf("want exit 2, got %d", code)
+		}
+	})
+}
+
+// transferViewJSON mirrors the export/import summary JSON.
+type transferViewJSON struct {
+	Collection string `json:"collection"`
+	Model      string `json:"model"`
+	Dimensions int    `json:"dimensions"`
+	Documents  int    `json:"documents"`
+	Chunks     int    `json:"chunks"`
+	Encrypted  bool   `json:"encrypted"`
+	Output     string `json:"output"`
+}
+
+func TestCLIExportImport(t *testing.T) {
+	qvec := []float32{1, 0, 0}
+	deps, _, docs, index := newDeps(stubEmbedder{space: testSpace(), vec: qvec}, stubGenerator{})
+	if _, code := exec(deps, "init", "kb"); code != 0 {
+		t.Fatal("init failed")
+	}
+	seedDoc(t, docs, index, "kb", "file:///a.md",
+		[]string{"the grounded answer", "second chunk here"}, [][]float32{{1, 0, 0}, {0, 1, 0}})
+	file := filepath.Join(t.TempDir(), "kb.lore")
+
+	t.Run("export writes a summary and a file", func(t *testing.T) {
+		out, code := exec(deps, "export", "kb", "-o", file, "--json")
+		if code != 0 {
+			t.Fatalf("export exit %d, out %q", code, out)
+		}
+		var v transferViewJSON
+		if err := json.Unmarshal([]byte(out), &v); err != nil {
+			t.Fatalf("bad JSON %q: %v", out, err)
+		}
+		if v.Collection != "kb" || v.Documents != 1 || v.Chunks != 2 || v.Encrypted {
+			t.Errorf("export summary = %+v", v)
+		}
+		if fi, err := os.Stat(file); err != nil || fi.Size() == 0 {
+			t.Fatalf("artifact not written: %v", err)
+		}
+	})
+
+	t.Run("import reconstructs losslessly and query matches the original", func(t *testing.T) {
+		out, code := exec(deps, "import", file, "--name", "kb2", "--json")
+		if code != 0 {
+			t.Fatalf("import exit %d, out %q", code, out)
+		}
+		var v transferViewJSON
+		if err := json.Unmarshal([]byte(out), &v); err != nil {
+			t.Fatal(err)
+		}
+		if v.Collection != "kb2" || v.Documents != 1 || v.Chunks != 2 {
+			t.Errorf("import summary = %+v", v)
+		}
+		// A query against the imported collection returns the same top hit (text +
+		// score) as the original — the vectors and pins round-tripped.
+		orig, _ := exec(deps, "query", "kb", "anything", "-k", "1", "--json")
+		imp, _ := exec(deps, "query", "kb2", "anything", "-k", "1", "--json")
+		var oh, ih []hitViewJSON
+		_ = json.Unmarshal([]byte(orig), &oh)
+		_ = json.Unmarshal([]byte(imp), &ih)
+		if len(oh) != 1 || len(ih) != 1 {
+			t.Fatalf("expected one hit each, got %d and %d", len(oh), len(ih))
+		}
+		if oh[0].Text != ih[0].Text || oh[0].Score != ih[0].Score {
+			t.Errorf("query mismatch after import: orig %+v, imported %+v", oh[0], ih[0])
+		}
+	})
+
+	t.Run("importing over an existing name is refused without --force", func(t *testing.T) {
+		if _, code := exec(deps, "import", file); code == 0 {
+			t.Error("importing over existing 'kb' should fail")
+		}
+	})
+
+	t.Run("--force replaces", func(t *testing.T) {
+		if _, code := exec(deps, "import", file, "--force"); code != 0 {
+			t.Errorf("--force import should succeed, got exit %d", code)
+		}
+	})
+
+	t.Run("missing -o is a usage error", func(t *testing.T) {
+		if _, code := exec(deps, "export", "kb"); code != 2 {
+			t.Errorf("want exit 2, got %d", code)
+		}
+	})
+
+	t.Run("export of unknown collection exits 3", func(t *testing.T) {
+		if _, code := exec(deps, "export", "ghost", "-o", filepath.Join(t.TempDir(), "x.lore")); code != 3 {
+			t.Errorf("want exit 3, got %d", code)
+		}
+	})
+
+	t.Run("importing a newer artifact version is a clear error, nothing imported", func(t *testing.T) {
+		bad := filepath.Join(t.TempDir(), "future.lore")
+		buf := append([]byte(artifact.Magic), 0, 0, 0, byte(artifact.FormatVersion+1))
+		buf = append(buf, []byte("body")...)
+		if err := os.WriteFile(bad, buf, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, code := exec(deps, "import", bad, "--name", "future"); code == 0 {
+			t.Error("importing a newer version should fail")
+		}
+		if _, code := exec(deps, "status", "future"); code != 3 {
+			t.Error("nothing should have been imported")
+		}
+	})
+}
+
+func TestCLIExportImportEncrypted(t *testing.T) {
+	deps, _, docs, index := newDeps(stubEmbedder{space: testSpace(), vec: []float32{1, 0, 0}}, stubGenerator{})
+	if _, code := exec(deps, "init", "kb"); code != 0 {
+		t.Fatal("init failed")
+	}
+	seedDoc(t, docs, index, "kb", "file:///a.md",
+		[]string{"the grounded answer"}, [][]float32{{1, 0, 0}})
+
+	// An age key pair for the recipient/identity path (no shell needed).
+	id, err := age.GenerateX25519Identity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	idFile := filepath.Join(t.TempDir(), "key.txt")
+	if err := os.WriteFile(idFile, []byte(id.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("recipient/identity round-trips and the artifact reveals nothing in clear", func(t *testing.T) {
+		file := filepath.Join(t.TempDir(), "kb.lore.age")
+		if _, code := execStdin(deps, "", "export", "kb", "-o", file, "--encrypt", "--recipient", id.Recipient().String()); code != 0 {
+			t.Fatalf("encrypted export failed, exit %d", code)
+		}
+		raw, _ := os.ReadFile(file)
+		if !agecrypt.IsEncrypted(raw) {
+			t.Error("artifact should be age-encrypted")
+		}
+		for _, leak := range [][]byte{[]byte("the grounded answer"), []byte("kb"), []byte(artifact.Magic), []byte(testSpace().Model)} {
+			if bytes.Contains(raw, leak) {
+				t.Errorf("encrypted artifact leaks %q in clear", leak)
+			}
+		}
+		if _, code := execStdin(deps, "", "import", file, "--name", "kb_r", "--identity", idFile); code != 0 {
+			t.Fatalf("identity import failed, exit %d", code)
+		}
+		if _, code := exec(deps, "status", "kb_r"); code != 0 {
+			t.Error("imported collection should exist")
+		}
+	})
+
+	t.Run("tampered ciphertext fails to decrypt (exit 1), nothing imported", func(t *testing.T) {
+		file := filepath.Join(t.TempDir(), "t.lore.age")
+		if _, code := execStdin(deps, "", "export", "kb", "-o", file, "--encrypt", "--recipient", id.Recipient().String()); code != 0 {
+			t.Fatal("export failed")
+		}
+		raw, _ := os.ReadFile(file)
+		raw[len(raw)-1] ^= 0xff
+		if err := os.WriteFile(file, raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, code := execStdin(deps, "", "import", file, "--name", "kb_t", "--identity", idFile); code != 1 {
+			t.Errorf("tampered import: want exit 1, got %d", code)
+		}
+		if _, code := exec(deps, "status", "kb_t"); code != 3 {
+			t.Error("nothing should be imported from a tampered artifact")
+		}
+	})
+
+	t.Run("wrong identity fails (exit 1)", func(t *testing.T) {
+		file := filepath.Join(t.TempDir(), "w.lore.age")
+		execStdin(deps, "", "export", "kb", "-o", file, "--encrypt", "--recipient", id.Recipient().String())
+		other, _ := age.GenerateX25519Identity()
+		otherFile := filepath.Join(t.TempDir(), "other.txt")
+		_ = os.WriteFile(otherFile, []byte(other.String()), 0o600)
+		if _, code := execStdin(deps, "", "import", file, "--name", "kb_w", "--identity", otherFile); code != 1 {
+			t.Errorf("wrong identity: want exit 1, got %d", code)
+		}
+	})
+
+	t.Run("--encrypt with no key source and no TTY is a usage error", func(t *testing.T) {
+		file := filepath.Join(t.TempDir(), "n.lore.age")
+		if _, code := execStdin(deps, "", "export", "kb", "-o", file, "--encrypt"); code != 2 {
+			t.Errorf("want exit 2, got %d", code)
+		}
+	})
+
+	t.Run("encrypted artifact with no key source and no TTY is a usage error", func(t *testing.T) {
+		file := filepath.Join(t.TempDir(), "e.lore.age")
+		execStdin(deps, "", "export", "kb", "-o", file, "--encrypt", "--recipient", id.Recipient().String())
+		if _, code := execStdin(deps, "", "import", file, "--name", "kb_e"); code != 2 {
+			t.Errorf("want exit 2 (detected encrypted, no key), got %d", code)
+		}
+	})
+
+	t.Run("passphrase and recipient together is a usage error", func(t *testing.T) {
+		file := filepath.Join(t.TempDir(), "x.lore.age")
+		if _, code := execStdin(deps, "", "export", "kb", "-o", file, "--encrypt",
+			"--recipient", id.Recipient().String(), "--passphrase-cmd", "echo hi"); code != 2 {
+			t.Errorf("want exit 2, got %d", code)
+		}
+	})
+
+	t.Run("passphrase-cmd round-trips", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("passphrase-cmd test assumes a POSIX shell")
+		}
+		file := filepath.Join(t.TempDir(), "p.lore.age")
+		if _, code := execStdin(deps, "", "export", "kb", "-o", file, "--encrypt", "--passphrase-cmd", "printf hunter2"); code != 0 {
+			t.Fatalf("passphrase export failed, exit %d", code)
+		}
+		if _, code := execStdin(deps, "", "import", file, "--name", "kb_pp", "--passphrase-cmd", "printf hunter2"); code != 0 {
+			t.Fatalf("passphrase import failed, exit %d", code)
+		}
+		// Wrong passphrase → exit 1.
+		if _, code := execStdin(deps, "", "import", file, "--name", "kb_pp2", "--passphrase-cmd", "printf wrong"); code != 1 {
+			t.Errorf("wrong passphrase: want exit 1, got %d", code)
 		}
 	})
 }
