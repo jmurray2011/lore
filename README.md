@@ -410,6 +410,14 @@ config file is TOML at `<user-config-dir>/lore/config.toml`.
 | `LORE_DIMENSIONS` | `provider.dimensions` | `1536` | embedding dimensionality (must match the model) |
 | `LORE_CHAT_MODEL` | `provider.chat_model` | `gpt-4o-mini` | chat model / deployment |
 | `LORE_TIMEOUT` | `provider.timeout` | `120s` | per-request HTTP timeout (Go duration; `0` disables) |
+| `LORE_EMBED_BASE_URL` | `provider.embed_base_url` | (shared `base_url`) | base URL for the **embed** role only |
+| `LORE_EMBED_API_KEY` | `provider.embed_api_key` | (shared `api_key`) | API key for the embed role only |
+| `LORE_EMBED_AUTH` | `provider.embed_auth` | (shared `auth`) | embed auth scheme: `bearer` or `api-key` |
+| `LORE_EMBED_TIMEOUT` | `provider.embed_timeout` | (shared `timeout`) | embed per-request timeout (Go duration; `0` inherits shared) |
+| `LORE_CHAT_BASE_URL` | `provider.chat_base_url` | (shared `base_url`) | base URL for the **chat** role only |
+| `LORE_CHAT_API_KEY` | `provider.chat_api_key` | (shared `api_key`) | API key for the chat role only |
+| `LORE_CHAT_AUTH` | `provider.chat_auth` | (shared `auth`) | chat auth scheme: `bearer` or `api-key` |
+| `LORE_CHAT_TIMEOUT` | `provider.chat_timeout` | (shared `timeout`) | chat per-request timeout (Go duration; `0` inherits shared) |
 | `LORE_STRUCTURED_OUTPUT` | `provider.structured_output` | `false` | request JSON-schema output (real citations) where supported |
 | `LORE_IMAGE_INPUT` | `provider.image_input` | `false` | allow image attachments |
 | `LORE_DOCUMENT_INPUT` | `provider.document_input` | `false` | allow document attachments |
@@ -477,6 +485,45 @@ export LORE_API_KEY="<key>"
 export LORE_EMBED_MODEL="<embedding-deployment>"   LORE_DIMENSIONS=3072
 export LORE_CHAT_MODEL="<chat-deployment>"
 ```
+
+### Split embed/chat endpoints
+
+The bare `provider.*` connection (`base_url`/`api_key`/`auth`/`timeout`) is the
+**shared default** for both roles. To target the embed and chat roles at
+different services in one process, override either role independently with the
+`embed_*` / `chat_*` connection settings; each field resolves **per-role override
+→ shared `provider.*` → built-in default**. So you can embed against a local
+model and generate against a hosted one in a single command:
+
+```bash
+# Embed locally (bearer), chat against Azure (api-key) — one process.
+export LORE_EMBED_BASE_URL="http://localhost:8001/v1"
+export LORE_EMBED_AUTH=bearer
+export LORE_EMBED_MODEL="Qwen/Qwen3-Embedding-4B"   LORE_DIMENSIONS=2560
+export LORE_BASE_URL="https://<resource>.openai.azure.com/openai/v1"
+export LORE_AUTH=api-key   LORE_API_KEY="<azure-key>"
+export LORE_CHAT_MODEL="<chat-deployment>"
+lore ask kb "summarize the controls"
+```
+
+Or run fully local across three independent endpoints (rerank was already its
+own provider — see above):
+
+```bash
+export LORE_EMBED_BASE_URL="http://localhost:8001/v1"  LORE_EMBED_MODEL="bge-m3"  LORE_DIMENSIONS=1024
+export LORE_CHAT_BASE_URL="http://localhost:8003/v1"   LORE_CHAT_MODEL="qwen2.5-instruct"
+export LORE_RERANK_BASE_URL="http://localhost:8002/v1" LORE_RERANK_MODEL="bge-reranker-v2-m3"
+```
+
+**Caveat — the embedding space is pinned to model + dimensions, not endpoint.**
+A collection records the embedding model name and dimensionality; lore can't see
+*which* service produced a vector. Pointing `embed_base_url` at a new endpoint
+while keeping the same `embed_model` + `dimensions` will **not** trip the
+space-mismatch guard — so if the new endpoint serves a genuinely different model
+under the same name, the collection silently ends up with chunks embedded by two
+different services in one nominal space, degrading retrieval. Repointing the
+embed role is your assertion that the new endpoint serves the *same* embedding
+model; if it doesn't, rebuild the collection (re-`init` + re-`add`).
 
 ## Attachments
 

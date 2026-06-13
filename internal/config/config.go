@@ -85,7 +85,11 @@ type Storage struct {
 	Path    string
 }
 
-// Provider configures the OpenAI-compatible backend.
+// Provider configures the OpenAI-compatible backend. The bare connection fields
+// (BaseURL/APIKey/Auth/Timeout) are the shared default for both the embed and
+// chat roles; the Embed*/Chat* fields optionally override them per role so one
+// process can embed against one endpoint and chat against another (decision 60).
+// Resolve a role's effective connection with EmbedConnection / ChatConnection.
 type Provider struct {
 	BaseURL    string
 	APIKey     string
@@ -100,16 +104,80 @@ type Provider struct {
 	// provider blocking forever in non-interactive use (CI, scripts), where
 	// there is no SIGINT to cancel the request context (decision 36).
 	Timeout time.Duration
+	// EmbedBaseURL/EmbedAPIKey/EmbedAuth/EmbedTimeout override the shared
+	// connection for the embedding role only; an empty (zero) field inherits the
+	// shared value. EmbedTimeout of 0 inherits the shared Timeout — to disable a
+	// timeout set the shared Timeout to 0 (both roles then inherit it).
+	EmbedBaseURL string
+	EmbedAPIKey  string
+	EmbedAuth    string
+	EmbedTimeout time.Duration
+	// ChatBaseURL/ChatAPIKey/ChatAuth/ChatTimeout override the shared connection
+	// for the chat role only, with the same empty-inherits-shared semantics.
+	ChatBaseURL string
+	ChatAPIKey  string
+	ChatAuth    string
+	ChatTimeout time.Duration
 	// StructuredOutput declares that the provider supports JSON-schema
 	// (response_format) output. Off by default so lore works against any
 	// OpenAI-compatible endpoint; enable it for providers that support it
-	// (decision 19).
+	// (decision 19). A chat-role property.
 	StructuredOutput bool
 	// ImageInput / DocumentInput declare that the provider accepts image /
 	// document attachments (decision 20). Off by default; `ask --attach`
-	// errors for an attachment whose capability is off.
+	// errors for an attachment whose capability is off. Chat-role properties.
 	ImageInput    bool
 	DocumentInput bool
+}
+
+// Connection is one provider role's resolved HTTP connection: the endpoint,
+// credential, auth scheme, and per-request timeout used to reach it.
+type Connection struct {
+	BaseURL string
+	APIKey  string
+	Auth    string // "bearer" or "api-key"
+	Timeout time.Duration
+}
+
+// EmbedConnection resolves the embedding role's connection: each field is its
+// embed_* override when set, else the shared provider.* value.
+func (p Provider) EmbedConnection() Connection {
+	return Connection{
+		BaseURL: orString(p.EmbedBaseURL, p.BaseURL),
+		APIKey:  orString(p.EmbedAPIKey, p.APIKey),
+		Auth:    orString(p.EmbedAuth, p.Auth),
+		Timeout: orDuration(p.EmbedTimeout, p.Timeout),
+	}
+}
+
+// ChatConnection resolves the chat role's connection: each field is its chat_*
+// override when set, else the shared provider.* value.
+func (p Provider) ChatConnection() Connection {
+	return Connection{
+		BaseURL: orString(p.ChatBaseURL, p.BaseURL),
+		APIKey:  orString(p.ChatAPIKey, p.APIKey),
+		Auth:    orString(p.ChatAuth, p.Auth),
+		Timeout: orDuration(p.ChatTimeout, p.Timeout),
+	}
+}
+
+// orString returns override when non-empty, else shared — the per-role-override
+// → shared-default fallback for string connection fields.
+func orString(override, shared string) string {
+	if override != "" {
+		return override
+	}
+	return shared
+}
+
+// orDuration returns override when non-zero, else shared. A zero override means
+// "inherit the shared timeout"; a role can't be given an explicit 0 timeout (set
+// the shared provider.timeout to 0 to disable, which both roles inherit).
+func orDuration(override, shared time.Duration) time.Duration {
+	if override != 0 {
+		return override
+	}
+	return shared
 }
 
 // Log configures the slog logger.
@@ -220,6 +288,14 @@ type fileConfig struct {
 		ChatModel        string `toml:"chat_model"`
 		Auth             string `toml:"auth"`
 		Timeout          string `toml:"timeout"`
+		EmbedBaseURL     string `toml:"embed_base_url"`
+		EmbedAPIKey      string `toml:"embed_api_key"`
+		EmbedAuth        string `toml:"embed_auth"`
+		EmbedTimeout     string `toml:"embed_timeout"`
+		ChatBaseURL      string `toml:"chat_base_url"`
+		ChatAPIKey       string `toml:"chat_api_key"`
+		ChatAuth         string `toml:"chat_auth"`
+		ChatTimeout      string `toml:"chat_timeout"`
 		StructuredOutput bool   `toml:"structured_output"`
 		ImageInput       bool   `toml:"image_input"`
 		DocumentInput    bool   `toml:"document_input"`
@@ -260,12 +336,20 @@ func applyFile(cfg *Config, fc fileConfig) error {
 	setString(&cfg.Provider.EmbedModel, fc.Provider.EmbedModel)
 	setString(&cfg.Provider.ChatModel, fc.Provider.ChatModel)
 	setString(&cfg.Provider.Auth, fc.Provider.Auth)
-	if fc.Provider.Timeout != "" {
-		d, err := parseTimeout(fc.Provider.Timeout)
-		if err != nil {
-			return err
-		}
-		cfg.Provider.Timeout = d
+	if err := setTimeout(&cfg.Provider.Timeout, fc.Provider.Timeout); err != nil {
+		return err
+	}
+	setString(&cfg.Provider.EmbedBaseURL, fc.Provider.EmbedBaseURL)
+	setString(&cfg.Provider.EmbedAPIKey, fc.Provider.EmbedAPIKey)
+	setString(&cfg.Provider.EmbedAuth, fc.Provider.EmbedAuth)
+	if err := setTimeout(&cfg.Provider.EmbedTimeout, fc.Provider.EmbedTimeout); err != nil {
+		return err
+	}
+	setString(&cfg.Provider.ChatBaseURL, fc.Provider.ChatBaseURL)
+	setString(&cfg.Provider.ChatAPIKey, fc.Provider.ChatAPIKey)
+	setString(&cfg.Provider.ChatAuth, fc.Provider.ChatAuth)
+	if err := setTimeout(&cfg.Provider.ChatTimeout, fc.Provider.ChatTimeout); err != nil {
+		return err
 	}
 	setString(&cfg.Storage.Backend, fc.Storage.Backend)
 	setString(&cfg.Storage.Path, fc.Storage.Path)
@@ -332,12 +416,20 @@ func applyEnv(cfg *Config, getenv func(string) string) error {
 	setString(&cfg.Provider.EmbedModel, getenv("LORE_EMBED_MODEL"))
 	setString(&cfg.Provider.ChatModel, getenv("LORE_CHAT_MODEL"))
 	setString(&cfg.Provider.Auth, getenv("LORE_AUTH"))
-	if v := getenv("LORE_TIMEOUT"); v != "" {
-		d, err := parseTimeout(v)
-		if err != nil {
-			return err
-		}
-		cfg.Provider.Timeout = d
+	if err := setTimeout(&cfg.Provider.Timeout, getenv("LORE_TIMEOUT")); err != nil {
+		return err
+	}
+	setString(&cfg.Provider.EmbedBaseURL, getenv("LORE_EMBED_BASE_URL"))
+	setString(&cfg.Provider.EmbedAPIKey, getenv("LORE_EMBED_API_KEY"))
+	setString(&cfg.Provider.EmbedAuth, getenv("LORE_EMBED_AUTH"))
+	if err := setTimeout(&cfg.Provider.EmbedTimeout, getenv("LORE_EMBED_TIMEOUT")); err != nil {
+		return err
+	}
+	setString(&cfg.Provider.ChatBaseURL, getenv("LORE_CHAT_BASE_URL"))
+	setString(&cfg.Provider.ChatAPIKey, getenv("LORE_CHAT_API_KEY"))
+	setString(&cfg.Provider.ChatAuth, getenv("LORE_CHAT_AUTH"))
+	if err := setTimeout(&cfg.Provider.ChatTimeout, getenv("LORE_CHAT_TIMEOUT")); err != nil {
+		return err
 	}
 	setString(&cfg.Rerank.BaseURL, getenv("LORE_RERANK_BASE_URL"))
 	setString(&cfg.Rerank.APIKey, getenv("LORE_RERANK_API_KEY"))
@@ -421,6 +513,20 @@ func setString(dst *string, v string) {
 	}
 }
 
+// setTimeout overlays a duration string onto dst when non-empty, leaving dst
+// untouched (so the prior precedence level stands) when the string is empty.
+func setTimeout(dst *time.Duration, v string) error {
+	if v == "" {
+		return nil
+	}
+	d, err := parseTimeout(v)
+	if err != nil {
+		return err
+	}
+	*dst = d
+	return nil
+}
+
 // applyBoolEnv overlays a boolean environment variable onto dst when set.
 func applyBoolEnv(dst *bool, getenv func(string) string, key string) error {
 	v := getenv(key)
@@ -475,6 +581,16 @@ func parseLevel(s string) (slog.Level, error) {
 	}
 }
 
+// validateRoleAuth checks a per-role auth override. An empty value is fine (the
+// role inherits the already-validated shared auth); otherwise it must name a
+// known scheme.
+func validateRoleAuth(role, auth string) error {
+	if auth != "" && auth != "bearer" && auth != "api-key" {
+		return fmt.Errorf("config: %w: provider %s auth %q (want \"bearer\" or \"api-key\")", domain.ErrInvalidArgument, role, auth)
+	}
+	return nil
+}
+
 func validate(cfg Config) error {
 	if cfg.Log.Format != "text" && cfg.Log.Format != "json" {
 		return fmt.Errorf("config: %w: log format %q (want \"text\" or \"json\")", domain.ErrInvalidArgument, cfg.Log.Format)
@@ -484,6 +600,12 @@ func validate(cfg Config) error {
 	}
 	if cfg.Provider.Auth != "bearer" && cfg.Provider.Auth != "api-key" {
 		return fmt.Errorf("config: %w: provider auth %q (want \"bearer\" or \"api-key\")", domain.ErrInvalidArgument, cfg.Provider.Auth)
+	}
+	if err := validateRoleAuth("embed", cfg.Provider.EmbedAuth); err != nil {
+		return err
+	}
+	if err := validateRoleAuth("chat", cfg.Provider.ChatAuth); err != nil {
+		return err
 	}
 	if cfg.Rerank.Auth != "bearer" && cfg.Rerank.Auth != "api-key" {
 		return fmt.Errorf("config: %w: rerank auth %q (want \"bearer\" or \"api-key\")", domain.ErrInvalidArgument, cfg.Rerank.Auth)
