@@ -34,6 +34,7 @@ func RunDocumentRepositorySuite(t *testing.T, factory func(t *testing.T) app.Doc
 			if err != nil {
 				t.Fatalf("NewChunk: %v", err)
 			}
+			ch.HeadingPath = fmt.Sprintf("%s > section %d", content, i)
 			chunks[i] = ch
 		}
 		return doc, chunks
@@ -120,6 +121,9 @@ func RunDocumentRepositorySuite(t *testing.T, factory func(t *testing.T) app.Doc
 			}
 			if ch.DocumentID != docA.ID {
 				t.Errorf("a chunk from another document leaked: %v", ch.DocumentID)
+			}
+			if ch.HeadingPath != chunksA[i].HeadingPath {
+				t.Errorf("chunk %d heading path not persisted: got %q, want %q", i, ch.HeadingPath, chunksA[i].HeadingPath)
 			}
 		}
 	})

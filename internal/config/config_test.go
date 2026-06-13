@@ -122,6 +122,37 @@ func TestLoadIngestConcurrency(t *testing.T) {
 	}
 }
 
+func TestLoadChunk(t *testing.T) {
+	def := config.Defaults().Chunk
+	if def.Strategy != "structure" || def.Size != 512 || def.Overlap != 64 || !def.ContextPrefix {
+		t.Errorf("default chunk config = %+v, want structure/512/64/prefix-on", def)
+	}
+
+	cfg, err := config.Load("", env(map[string]string{
+		"LORE_CHUNK_STRATEGY":       "fixed",
+		"LORE_CHUNK_SIZE":           "256",
+		"LORE_CHUNK_OVERLAP":        "0",     // explicit zero must apply, not read as unset
+		"LORE_CHUNK_CONTEXT_PREFIX": "false", // default-true flag must be turn-off-able
+	}))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Chunk != (config.Chunk{Strategy: "fixed", Size: 256, Overlap: 0, ContextPrefix: false}) {
+		t.Errorf("chunk env overlay = %+v", cfg.Chunk)
+	}
+
+	bad := []map[string]string{
+		{"LORE_CHUNK_STRATEGY": "semantic"},                   // unknown strategy
+		{"LORE_CHUNK_SIZE": "0"},                              // non-positive size
+		{"LORE_CHUNK_SIZE": "10", "LORE_CHUNK_OVERLAP": "10"}, // overlap == size
+	}
+	for _, m := range bad {
+		if _, err := config.Load("", env(m)); !errors.Is(err, domain.ErrInvalidArgument) {
+			t.Errorf("%v: want ErrInvalidArgument, got %v", m, err)
+		}
+	}
+}
+
 func TestLoadAuth(t *testing.T) {
 	if got := config.Defaults().Provider.Auth; got != "bearer" {
 		t.Errorf("default auth = %q, want bearer", got)
@@ -234,6 +265,39 @@ func TestLoadCache(t *testing.T) {
 			if _, err := config.Load("", env(map[string]string{"LORE_CACHE_TTL": bad})); !errors.Is(err, domain.ErrInvalidArgument) {
 				t.Errorf("LORE_CACHE_TTL=%q: want ErrInvalidArgument, got %v", bad, err)
 			}
+		}
+	})
+}
+
+func TestLoadRerank(t *testing.T) {
+	d := config.Defaults().Rerank
+	if d.Auth != "bearer" || d.Timeout != config.DefaultProviderTimeout {
+		t.Errorf("rerank defaults wrong: %+v", d)
+	}
+	if d.BaseURL != "" || d.Model != "" {
+		t.Error("rerank must be unconfigured by default (no base URL / model)")
+	}
+
+	t.Run("env populates the rerank block", func(t *testing.T) {
+		cfg, err := config.Load("", env(map[string]string{
+			"LORE_RERANK_BASE_URL": "https://rerank.example/v1",
+			"LORE_RERANK_API_KEY":  "rk",
+			"LORE_RERANK_AUTH":     "api-key",
+			"LORE_RERANK_MODEL":    "rerank-3",
+			"LORE_RERANK_TIMEOUT":  "30s",
+		}))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		r := cfg.Rerank
+		if r.BaseURL != "https://rerank.example/v1" || r.APIKey != "rk" || r.Auth != "api-key" || r.Model != "rerank-3" || r.Timeout != 30*time.Second {
+			t.Errorf("rerank env not applied: %+v", r)
+		}
+	})
+
+	t.Run("invalid rerank auth is ErrInvalidArgument", func(t *testing.T) {
+		if _, err := config.Load("", env(map[string]string{"LORE_RERANK_AUTH": "oauth"})); !errors.Is(err, domain.ErrInvalidArgument) {
+			t.Errorf("want ErrInvalidArgument, got %v", err)
 		}
 	})
 }

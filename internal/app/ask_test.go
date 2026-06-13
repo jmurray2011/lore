@@ -135,15 +135,15 @@ func TestAsker(t *testing.T) {
 		gen := &fakeGenerator{answer: app.Answer{Text: "because"}}
 		a := newAsker(gen, emb, idx, docs)
 
-		ans, hits, err := a.AskExplain(ctx, "docs", "why", 1, nil, false, "")
+		ans, ret, err := a.AskExplain(ctx, "docs", "why", 1, nil, false, "")
 		if err != nil {
 			t.Fatalf("AskExplain: %v", err)
 		}
 		if ans.Text != "because" {
 			t.Errorf("answer text = %q", ans.Text)
 		}
-		if len(hits) != 1 || hits[0].Chunk.ID != c0.ID || hits[0].Score != 0.8 {
-			t.Errorf("AskExplain hits = %+v, want one c0 at score 0.8", hits)
+		if len(ret.Hits) != 1 || ret.Hits[0].Chunk.ID != c0.ID || ret.Hits[0].Score != 0.8 {
+			t.Errorf("AskExplain hits = %+v, want one c0 at score 0.8", ret.Hits)
 		}
 	})
 
@@ -152,12 +152,12 @@ func TestAsker(t *testing.T) {
 		emb := &fakeEmbedder{space: space}
 		a := newAsker(gen, emb, &fakeIndex{}, &fakeDocs{})
 
-		ans, hits, err := a.AskExplain(ctx, "docs", "why", 1, nil, true, "")
+		ans, ret, err := a.AskExplain(ctx, "docs", "why", 1, nil, true, "")
 		if !errors.Is(err, app.ErrNoGrounding) {
 			t.Errorf("want ErrNoGrounding, got %v", err)
 		}
-		if hits != nil {
-			t.Errorf("strict ungrounded must return no hits, got %+v", hits)
+		if ret.Hits != nil {
+			t.Errorf("strict ungrounded must return no hits, got %+v", ret.Hits)
 		}
 		if ans.Text != "" {
 			t.Errorf("strict ungrounded must return a zero answer, got %+v", ans)

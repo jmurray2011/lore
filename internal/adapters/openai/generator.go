@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/jmurray2011/lore/internal/adapters/httpjson"
 	"github.com/jmurray2011/lore/internal/app"
 	"github.com/jmurray2011/lore/internal/domain"
 )
@@ -65,9 +66,9 @@ type Capabilities struct {
 // and cites the whole grounding set. Attachments are encoded into the user
 // message when the matching capability is set.
 type Generator struct {
-	client
-	model string
-	caps  Capabilities
+	client *httpjson.Client
+	model  string
+	caps   Capabilities
 }
 
 // NewGenerator constructs a Generator. caps must reflect only what the provider
@@ -80,7 +81,7 @@ func NewGenerator(baseURL, apiKey, model string, caps Capabilities, auth AuthSty
 	if strings.TrimSpace(model) == "" {
 		return nil, fmt.Errorf("openai generator: %w: model is required", domain.ErrInvalidArgument)
 	}
-	return &Generator{client: newClient(baseURL, apiKey, auth, httpClient), model: model, caps: caps}, nil
+	return &Generator{client: httpjson.NewClient(baseURL, apiKey, auth, httpClient), model: model, caps: caps}, nil
 }
 
 // chatMessage is a request message. Content is a string for plain text, or a
@@ -157,7 +158,7 @@ func (g *Generator) Synthesize(ctx context.Context, question string, hits []doma
 	}
 
 	var resp chatResponse
-	if err := g.post(ctx, "/chat/completions", req, &resp); err != nil {
+	if err := g.client.Post(ctx, "/chat/completions", req, &resp); err != nil {
 		return app.Answer{}, err
 	}
 	if len(resp.Choices) == 0 {

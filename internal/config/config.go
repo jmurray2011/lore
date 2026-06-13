@@ -23,10 +23,41 @@ import (
 // Config is lore's resolved configuration.
 type Config struct {
 	Provider Provider
+	Rerank   Rerank
 	Storage  Storage
 	Ingest   Ingest
+	Chunk    Chunk
 	Cache    Cache
 	Log      Log
+}
+
+// Chunk configures how documents are split into retrieval units. Strategy is
+// "structure" (heading/paragraph-aware, token-sized — default) or "fixed"
+// (legacy fixed word windows). Size/Overlap are measured in tokens for the
+// structure strategy and in whitespace words for fixed. These values are pinned
+// onto a collection at creation; changing them refuses re-ingest (rebuild
+// instead).
+type Chunk struct {
+	Strategy string
+	Size     int
+	Overlap  int
+	// ContextPrefix prepends a chunk's heading path to the text that is embedded
+	// (not stored), so the embedding captures the chunk's place in the document.
+	// Default on; applies to the structure strategy's markdown chunker.
+	ContextPrefix bool
+}
+
+// Rerank configures the cross-encoder rerank provider for two-stage retrieval.
+// It is deliberately separate from Provider: rerank APIs are Cohere-style, not
+// OpenAI-compatible, and are commonly a different vendor (embed with OpenAI,
+// rerank with Cohere/Jina). Empty BaseURL/Model means reranking is unconfigured;
+// requesting it then is a usage error.
+type Rerank struct {
+	BaseURL string
+	APIKey  string
+	Auth    string // "bearer" (default) or "api-key"
+	Model   string
+	Timeout time.Duration
 }
 
 // Cache configures the answer cache: reuse of synthesized ask/synthesize answers
@@ -108,7 +139,9 @@ func Defaults() Config {
 			Auth:       "bearer",
 			Timeout:    DefaultProviderTimeout,
 		},
+		Rerank:  Rerank{Auth: "bearer", Timeout: DefaultProviderTimeout},
 		Storage: Storage{Backend: "sqlite"},
+		Chunk:   Chunk{Strategy: "structure", Size: 512, Overlap: 64, ContextPrefix: true},
 		Cache:   Cache{TTL: DefaultCacheTTL},
 		Log:     Log{Level: slog.LevelInfo, Format: "text"},
 	}
@@ -195,9 +228,22 @@ type fileConfig struct {
 		Backend string `toml:"backend"`
 		Path    string `toml:"path"`
 	} `toml:"storage"`
+	Rerank struct {
+		BaseURL string `toml:"base_url"`
+		APIKey  string `toml:"api_key"`
+		Auth    string `toml:"auth"`
+		Model   string `toml:"model"`
+		Timeout string `toml:"timeout"`
+	} `toml:"rerank"`
 	Ingest struct {
 		Concurrency int `toml:"concurrency"`
 	} `toml:"ingest"`
+	Chunk struct {
+		Strategy      string `toml:"strategy"`
+		Size          int    `toml:"size"`
+		Overlap       *int   `toml:"overlap"`        // pointer: distinguish unset from an explicit 0 (no overlap)
+		ContextPrefix *bool  `toml:"context_prefix"` // pointer: distinguish unset from an explicit false (default is true)
+	} `toml:"chunk"`
 	Cache struct {
 		Enabled bool   `toml:"enabled"`
 		TTL     string `toml:"ttl"`
@@ -223,8 +269,29 @@ func applyFile(cfg *Config, fc fileConfig) error {
 	}
 	setString(&cfg.Storage.Backend, fc.Storage.Backend)
 	setString(&cfg.Storage.Path, fc.Storage.Path)
+	setString(&cfg.Rerank.BaseURL, fc.Rerank.BaseURL)
+	setString(&cfg.Rerank.APIKey, fc.Rerank.APIKey)
+	setString(&cfg.Rerank.Auth, fc.Rerank.Auth)
+	setString(&cfg.Rerank.Model, fc.Rerank.Model)
+	if fc.Rerank.Timeout != "" {
+		d, err := parseTimeout(fc.Rerank.Timeout)
+		if err != nil {
+			return err
+		}
+		cfg.Rerank.Timeout = d
+	}
 	if fc.Ingest.Concurrency != 0 {
 		cfg.Ingest.Concurrency = fc.Ingest.Concurrency
+	}
+	setString(&cfg.Chunk.Strategy, fc.Chunk.Strategy)
+	if fc.Chunk.Size != 0 {
+		cfg.Chunk.Size = fc.Chunk.Size
+	}
+	if fc.Chunk.Overlap != nil {
+		cfg.Chunk.Overlap = *fc.Chunk.Overlap
+	}
+	if fc.Chunk.ContextPrefix != nil {
+		cfg.Chunk.ContextPrefix = *fc.Chunk.ContextPrefix
 	}
 	if fc.Cache.Enabled {
 		cfg.Cache.Enabled = true
@@ -272,6 +339,17 @@ func applyEnv(cfg *Config, getenv func(string) string) error {
 		}
 		cfg.Provider.Timeout = d
 	}
+	setString(&cfg.Rerank.BaseURL, getenv("LORE_RERANK_BASE_URL"))
+	setString(&cfg.Rerank.APIKey, getenv("LORE_RERANK_API_KEY"))
+	setString(&cfg.Rerank.Auth, getenv("LORE_RERANK_AUTH"))
+	setString(&cfg.Rerank.Model, getenv("LORE_RERANK_MODEL"))
+	if v := getenv("LORE_RERANK_TIMEOUT"); v != "" {
+		d, err := parseTimeout(v)
+		if err != nil {
+			return err
+		}
+		cfg.Rerank.Timeout = d
+	}
 	setString(&cfg.Storage.Backend, getenv("LORE_STORAGE_BACKEND"))
 	setString(&cfg.Storage.Path, getenv("LORE_DB_PATH"))
 	setString(&cfg.Log.Format, getenv("LORE_LOG_FORMAT"))
@@ -289,6 +367,24 @@ func applyEnv(cfg *Config, getenv func(string) string) error {
 			return fmt.Errorf("config: %w: LORE_INGEST_CONCURRENCY %q is not an integer", domain.ErrInvalidArgument, v)
 		}
 		cfg.Ingest.Concurrency = n
+	}
+	setString(&cfg.Chunk.Strategy, getenv("LORE_CHUNK_STRATEGY"))
+	if v := getenv("LORE_CHUNK_SIZE"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("config: %w: LORE_CHUNK_SIZE %q is not an integer", domain.ErrInvalidArgument, v)
+		}
+		cfg.Chunk.Size = n
+	}
+	if v := getenv("LORE_CHUNK_OVERLAP"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("config: %w: LORE_CHUNK_OVERLAP %q is not an integer", domain.ErrInvalidArgument, v)
+		}
+		cfg.Chunk.Overlap = n
+	}
+	if err := applyBoolEnv(&cfg.Chunk.ContextPrefix, getenv, "LORE_CHUNK_CONTEXT_PREFIX"); err != nil {
+		return err
 	}
 	if err := applyBoolEnv(&cfg.Provider.StructuredOutput, getenv, "LORE_STRUCTURED_OUTPUT"); err != nil {
 		return err
@@ -389,11 +485,23 @@ func validate(cfg Config) error {
 	if cfg.Provider.Auth != "bearer" && cfg.Provider.Auth != "api-key" {
 		return fmt.Errorf("config: %w: provider auth %q (want \"bearer\" or \"api-key\")", domain.ErrInvalidArgument, cfg.Provider.Auth)
 	}
+	if cfg.Rerank.Auth != "bearer" && cfg.Rerank.Auth != "api-key" {
+		return fmt.Errorf("config: %w: rerank auth %q (want \"bearer\" or \"api-key\")", domain.ErrInvalidArgument, cfg.Rerank.Auth)
+	}
 	if cfg.Ingest.Concurrency < 0 {
 		return fmt.Errorf("config: %w: ingest concurrency must not be negative, got %d", domain.ErrInvalidArgument, cfg.Ingest.Concurrency)
 	}
 	if cfg.Storage.Backend != "sqlite" && cfg.Storage.Backend != "memory" {
 		return fmt.Errorf("config: %w: storage backend %q (want \"sqlite\" or \"memory\")", domain.ErrInvalidArgument, cfg.Storage.Backend)
+	}
+	if cfg.Chunk.Strategy != "structure" && cfg.Chunk.Strategy != "fixed" {
+		return fmt.Errorf("config: %w: chunk strategy %q (want \"structure\" or \"fixed\")", domain.ErrInvalidArgument, cfg.Chunk.Strategy)
+	}
+	if cfg.Chunk.Size <= 0 {
+		return fmt.Errorf("config: %w: chunk size must be positive, got %d", domain.ErrInvalidArgument, cfg.Chunk.Size)
+	}
+	if cfg.Chunk.Overlap < 0 || cfg.Chunk.Overlap >= cfg.Chunk.Size {
+		return fmt.Errorf("config: %w: chunk overlap (%d) must be in [0, size=%d)", domain.ErrInvalidArgument, cfg.Chunk.Overlap, cfg.Chunk.Size)
 	}
 	if cfg.Cache.TTL < 0 {
 		return fmt.Errorf("config: %w: cache ttl must not be negative, got %s", domain.ErrInvalidArgument, cfg.Cache.TTL)

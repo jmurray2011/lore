@@ -253,11 +253,15 @@ func chunkViews(chunks []domain.Chunk) ([]chunkView, string) {
 	views := make([]chunkView, len(chunks))
 	var b strings.Builder
 	for i, c := range chunks {
-		views[i] = chunkView{ChunkID: string(c.ID), Seq: c.Seq, Text: c.Text}
+		views[i] = chunkView{ChunkID: string(c.ID), Seq: c.Seq, HeadingPath: c.HeadingPath, Text: c.Text}
 		if i > 0 {
 			b.WriteString("\n---\n\n")
 		}
-		fmt.Fprintf(&b, "**chunk %d**\n\n%s\n", c.Seq, c.Text)
+		if c.HeadingPath != "" {
+			fmt.Fprintf(&b, "**chunk %d** — %s\n\n%s\n", c.Seq, c.HeadingPath, c.Text)
+		} else {
+			fmt.Fprintf(&b, "**chunk %d**\n\n%s\n", c.Seq, c.Text)
+		}
 	}
 	return views, strings.TrimRight(b.String(), "\n")
 }
@@ -279,10 +283,11 @@ func newStatusCmd(deps *Deps) *cobra.Command {
 				return err
 			}
 			n := len(docs)
-			human := fmt.Sprintf("## %s\n\n- **model** — %s\n- **dimensions** — %d\n- **documents** — %d\n- **created** — %s\n",
-				coll.Name, coll.Space.Model, coll.Space.Dimensions, n,
+			chunker := chunkerLabel(coll)
+			human := fmt.Sprintf("## %s\n\n- **model** — %s\n- **dimensions** — %d\n- **chunker** — %s\n- **documents** — %d\n- **created** — %s\n",
+				coll.Name, coll.Space.Model, coll.Space.Dimensions, chunker, n,
 				humanTime(coll.CreatedAt.UTC().Format(time.RFC3339)))
-			return render(cmd, statusView{collectionView: viewCollection(coll), Documents: n}, human)
+			return render(cmd, statusView{collectionView: viewCollection(coll), Documents: n, Chunker: chunker}, human)
 		},
 	}
 }

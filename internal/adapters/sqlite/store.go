@@ -21,7 +21,13 @@ var schemaStmts = []string{
 		name TEXT PRIMARY KEY,
 		model TEXT NOT NULL,
 		dimensions INTEGER NOT NULL,
-		created_at TEXT NOT NULL
+		created_at TEXT NOT NULL,
+		chunker_strategy TEXT NOT NULL DEFAULT '',
+		chunker_version INTEGER NOT NULL DEFAULT 0,
+		chunker_size INTEGER NOT NULL DEFAULT 0,
+		chunker_overlap INTEGER NOT NULL DEFAULT 0,
+		chunker_tokenizer TEXT NOT NULL DEFAULT '',
+		chunker_context_prefix INTEGER NOT NULL DEFAULT 0
 	)`,
 	`CREATE TABLE IF NOT EXISTS collection_sources (
 		collection TEXT NOT NULL,
@@ -41,7 +47,8 @@ var schemaStmts = []string{
 		id TEXT PRIMARY KEY,
 		document_id TEXT NOT NULL,
 		seq INTEGER NOT NULL,
-		text TEXT NOT NULL
+		text TEXT NOT NULL,
+		heading_path TEXT NOT NULL DEFAULT ''
 	)`,
 	`CREATE INDEX IF NOT EXISTS chunks_by_document ON chunks(document_id)`,
 	`CREATE TABLE IF NOT EXISTS vectors (
@@ -83,6 +90,25 @@ func Open(path string) (*Store, error) {
 	if err := ensureColumn(db, "documents", "fingerprint", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		_ = db.Close()
 		return nil, err
+	}
+	if err := ensureColumn(db, "chunks", "heading_path", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	// Chunker pin columns. Pre-pin collections get the zero-value defaults, which
+	// read back as a zero ChunkerSpec — i.e. unpinned (read-only, not ingestable).
+	for _, col := range []struct{ name, def string }{
+		{"chunker_strategy", "TEXT NOT NULL DEFAULT ''"},
+		{"chunker_version", "INTEGER NOT NULL DEFAULT 0"},
+		{"chunker_size", "INTEGER NOT NULL DEFAULT 0"},
+		{"chunker_overlap", "INTEGER NOT NULL DEFAULT 0"},
+		{"chunker_tokenizer", "TEXT NOT NULL DEFAULT ''"},
+		{"chunker_context_prefix", "INTEGER NOT NULL DEFAULT 0"},
+	} {
+		if err := ensureColumn(db, "collections", col.name, col.def); err != nil {
+			_ = db.Close()
+			return nil, err
+		}
 	}
 	return &Store{db: db}, nil
 }

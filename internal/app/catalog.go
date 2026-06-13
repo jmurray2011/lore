@@ -14,24 +14,27 @@ type Catalog struct {
 	collections CollectionRepository
 	docs        DocumentRepository
 	embedder    Embedder
+	chunkers    domain.Registry
 	now         func() time.Time
 }
 
-// NewCatalog wires a Catalog over the collection and document repositories and
-// the embedder whose space new collections are pinned to.
-func NewCatalog(collections CollectionRepository, docs DocumentRepository, embedder Embedder) *Catalog {
-	return &Catalog{collections: collections, docs: docs, embedder: embedder, now: time.Now}
+// NewCatalog wires a Catalog over the collection and document repositories, the
+// embedder whose space new collections are pinned to, and the chunker registry
+// whose spec they are pinned to.
+func NewCatalog(collections CollectionRepository, docs DocumentRepository, embedder Embedder, chunkers domain.Registry) *Catalog {
+	return &Catalog{collections: collections, docs: docs, embedder: embedder, chunkers: chunkers, now: time.Now}
 }
 
 // Init creates a collection pinned to the embedder's current EmbeddingSpace
-// (invariant 1). It fails with ErrAlreadyExists if the name is taken and
+// (invariant 1) and the active chunker spec (re-ingest under a different chunker
+// is then refused). It fails with ErrAlreadyExists if the name is taken and
 // ErrInvalidArgument if the name is invalid.
 func (c *Catalog) Init(ctx context.Context, name string) (*domain.Collection, error) {
 	space, err := c.embedder.Space(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("embedder space: %w", err)
 	}
-	coll, err := domain.NewCollection(name, space, c.now())
+	coll, err := domain.NewCollection(name, space, c.chunkers.Spec(), c.now())
 	if err != nil {
 		return nil, err
 	}

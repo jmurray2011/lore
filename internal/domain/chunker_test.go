@@ -10,11 +10,11 @@ import (
 	"github.com/jmurray2011/lore/internal/domain"
 )
 
-func mustChunker(t *testing.T, size, overlap int) domain.Chunker {
+func mustChunker(t *testing.T, size, overlap int) domain.FixedChunker {
 	t.Helper()
-	c, err := domain.NewChunker(size, overlap)
+	c, err := domain.NewFixedChunker(size, overlap)
 	if err != nil {
-		t.Fatalf("NewChunker(%d, %d): %v", size, overlap, err)
+		t.Fatalf("NewFixedChunker(%d, %d): %v", size, overlap, err)
 	}
 	return c
 }
@@ -28,9 +28,9 @@ func words(n int) string {
 	return strings.Join(parts, " ")
 }
 
-func TestNewChunker(t *testing.T) {
+func TestNewFixedChunker(t *testing.T) {
 	t.Run("valid", func(t *testing.T) {
-		if _, err := domain.NewChunker(512, 76); err != nil {
+		if _, err := domain.NewFixedChunker(512, 76); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 	})
@@ -47,7 +47,7 @@ func TestNewChunker(t *testing.T) {
 			{"overlap exceeds size", 4, 5},
 		}
 		for _, c := range cases {
-			if _, err := domain.NewChunker(c.size, c.overlap); !errors.Is(err, domain.ErrInvalidArgument) {
+			if _, err := domain.NewFixedChunker(c.size, c.overlap); !errors.Is(err, domain.ErrInvalidArgument) {
 				t.Errorf("%s: want ErrInvalidArgument, got %v", c.name, err)
 			}
 		}
