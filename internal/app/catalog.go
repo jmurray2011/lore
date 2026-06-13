@@ -60,3 +60,15 @@ func (c *Catalog) ListDocuments(ctx context.Context, collection string) ([]*doma
 	}
 	return c.docs.ListDocuments(ctx, collection)
 }
+
+// DocumentChunks returns the stored chunks of one document (by source URI) in
+// seq order — the extracted, chunked text as it was actually indexed, for
+// inspecting what the extractor and chunker produced. It fails with ErrNotFound
+// if no document with that source URI exists in the collection.
+func (c *Catalog) DocumentChunks(ctx context.Context, collection, sourceURI string) ([]domain.Chunk, error) {
+	doc, err := c.docs.GetBySource(ctx, collection, sourceURI)
+	if err != nil {
+		return nil, err
+	}
+	return c.docs.GetChunksByDocument(ctx, collection, doc.ID)
+}

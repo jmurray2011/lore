@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -11,7 +12,7 @@ import (
 	"github.com/jmurray2011/lore/internal/domain"
 )
 
-func newInitCmd(deps Deps) *cobra.Command {
+func newInitCmd(deps *Deps) *cobra.Command {
 	return &cobra.Command{
 		Use:   "init <collection>",
 		Short: "Create a collection, pinned to the configured embedding space",
@@ -28,7 +29,7 @@ func newInitCmd(deps Deps) *cobra.Command {
 	}
 }
 
-func newLsCmd(deps Deps) *cobra.Command {
+func newLsCmd(deps *Deps) *cobra.Command {
 	return &cobra.Command{
 		Use:   "ls",
 		Short: "List collections",
@@ -52,7 +53,7 @@ func newLsCmd(deps Deps) *cobra.Command {
 	}
 }
 
-func newRmCmd(deps Deps) *cobra.Command {
+func newRmCmd(deps *Deps) *cobra.Command {
 	var docURI string
 	cmd := &cobra.Command{
 		Use:   "rm <collection>",
@@ -81,7 +82,7 @@ func newRmCmd(deps Deps) *cobra.Command {
 	return cmd
 }
 
-func newDocsCmd(deps Deps) *cobra.Command {
+func newDocsCmd(deps *Deps) *cobra.Command {
 	return &cobra.Command{
 		Use:   "docs <collection>",
 		Short: "List the documents ingested into a collection",
@@ -113,7 +114,40 @@ func newDocsCmd(deps Deps) *cobra.Command {
 	}
 }
 
-func newStatusCmd(deps Deps) *cobra.Command {
+func newCatCmd(deps *Deps) *cobra.Command {
+	var docURI string
+	cmd := &cobra.Command{
+		Use:   "cat <collection> --doc <uri>",
+		Short: "Print a document's stored chunks (the extracted, chunked text as indexed)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) != 1 {
+				return fmt.Errorf("%w: cat takes exactly one collection name", domain.ErrInvalidArgument)
+			}
+			if docURI == "" {
+				return fmt.Errorf("%w: cat requires --doc <source-uri>", domain.ErrInvalidArgument)
+			}
+			chunks, err := deps.Catalog.DocumentChunks(cmd.Context(), args[0], docURI)
+			if err != nil {
+				return err
+			}
+			views := make([]chunkView, len(chunks))
+			var b strings.Builder
+			fmt.Fprintf(&b, "## %s\n\n", shortLabel(docURI))
+			for i, c := range chunks {
+				views[i] = chunkView{ChunkID: string(c.ID), Seq: c.Seq, Text: c.Text}
+				if i > 0 {
+					b.WriteString("\n---\n\n")
+				}
+				fmt.Fprintf(&b, "**chunk %d**\n\n%s\n", c.Seq, c.Text)
+			}
+			return render(cmd, views, strings.TrimRight(b.String(), "\n"))
+		},
+	}
+	cmd.Flags().StringVar(&docURI, "doc", "", "source URI of the document to print (required)")
+	return cmd
+}
+
+func newStatusCmd(deps *Deps) *cobra.Command {
 	return &cobra.Command{
 		Use:   "status <collection>",
 		Short: "Show a collection's details",
@@ -125,10 +159,15 @@ func newStatusCmd(deps Deps) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			human := fmt.Sprintf("## %s\n\n- **model** — %s\n- **dimensions** — %d\n- **created** — %s\n",
-				coll.Name, coll.Space.Model, coll.Space.Dimensions,
+			docs, err := deps.Catalog.ListDocuments(cmd.Context(), args[0])
+			if err != nil {
+				return err
+			}
+			n := len(docs)
+			human := fmt.Sprintf("## %s\n\n- **model** — %s\n- **dimensions** — %d\n- **documents** — %d\n- **created** — %s\n",
+				coll.Name, coll.Space.Model, coll.Space.Dimensions, n,
 				humanTime(coll.CreatedAt.UTC().Format(time.RFC3339)))
-			return render(cmd, viewCollection(coll), human)
+			return render(cmd, statusView{collectionView: viewCollection(coll), Documents: n}, human)
 		},
 	}
 }

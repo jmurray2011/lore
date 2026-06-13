@@ -5,14 +5,45 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/jmurray2011/lore/internal/adapters/openai"
 	"github.com/jmurray2011/lore/internal/domain"
 )
+
+func TestEmbedderHonorsClientTimeout(t *testing.T) {
+	// The handler hangs until the test ends, so the only way Embed returns is
+	// the http.Client's timeout firing — the protection against a provider that
+	// accepts a connection then never responds (decision 36).
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		<-release
+	}))
+	// defers run LIFO: unblock the handler first, then Close (which waits for
+	// the in-flight request to finish) can complete.
+	defer srv.Close()
+	defer close(release)
+
+	hc := &http.Client{Timeout: 50 * time.Millisecond}
+	e, err := openai.NewEmbedder(srv.URL, "k", "m", 2, openai.AuthBearer, hc)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := e.Embed(context.Background(), []string{"hi"}); err == nil {
+		t.Fatal("expected a timeout error, got nil")
+	} else {
+		var netErr net.Error
+		if !errors.As(err, &netErr) || !netErr.Timeout() {
+			t.Errorf("want a timeout error, got %v", err)
+		}
+	}
+}
 
 func TestClientRetriesOnRateLimit(t *testing.T) {
 	ctx := context.Background()

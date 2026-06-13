@@ -37,27 +37,45 @@ lore init notes
 
 # 2. ingest files or directories (idempotent — safe to re-run)
 lore add notes ./docs report.pdf spreadsheet.xlsx
+cat meeting.md | lore add notes --stdin --name meeting.md   # ingest piped content
 
 # re-ingest changed files later; --prune also drops documents deleted at source
 lore sync notes              # replays the sources add remembered (no path needed)
 lore sync notes --prune      # also remove docs whose source file is gone
+lore sync notes --prune --dry-run   # preview exactly what --prune would remove
 
 # 3. retrieve the most similar chunks
 lore query notes "rotation policy for signing keys" -k 5
+lore query notes "rotation policy" --source '*.pdf'   # scope to matching documents
+echo "rotation policy" | lore query notes -          # read the query from stdin
 
 # 4. ask a grounded question (retrieval + synthesis with citations)
 lore ask notes "what is our key rotation policy?"
+# when nothing matches, ask warns on stderr and answers from model knowledge;
+# --strict turns that into a hard error (exit 1) and skips the model call
+lore ask notes "unrelated question" --strict
 
 # inventory & cleanup
 lore ls
 lore status notes
 lore docs notes                                        # list ingested documents
+lore cat notes --doc file:///abs/path/to/report.pdf  # print a document's stored chunks
 lore rm notes --doc file:///abs/path/to/report.pdf   # one document
 lore rm notes                                          # whole collection
 ```
 
 Query hits and answer citations are tagged with their source as `source#chunk`,
 so every result traces back to the document it came from.
+
+`ask` is retrieval + synthesis in one step. To get between them — filter,
+re-rank, threshold, or merge hits yourself — pipe `query --json` into
+`synthesize`, which reads hits on stdin and answers from exactly those:
+
+```bash
+lore query kb "tenant isolation" --json \
+  | jq 'map(select(.score > 0.3))' \
+  | lore synthesize "how is tenant isolation enforced?"
+```
 
 Add `--json` to any command for machine-readable output. Human output is
 colorized on an interactive terminal and plain everywhere else; force it off with
@@ -73,8 +91,10 @@ colorized on an interactive terminal and plain everywhere else; force it off wit
 | Excel | `.xlsx` | one line per row, cells tab-joined |
 | PDF | `.pdf` | best-effort text (no layout/tables; image-only PDFs yield nothing) |
 
-Unsupported files are skipped. Hidden files and directories (`.git`, etc.) are
-never ingested.
+Unsupported files are reported as a separate `unsupported` count (distinct from
+`skipped`, which means already-ingested and unchanged), so a folder of mixed
+types never hides files that were silently never ingested. Hidden files and
+directories (`.git`, etc.) are never ingested.
 
 ## Configuration
 
@@ -89,6 +109,7 @@ config file is TOML at `<user-config-dir>/lore/config.toml`.
 | `LORE_EMBED_MODEL` | `provider.embed_model` | `text-embedding-3-small` | embedding model / deployment |
 | `LORE_DIMENSIONS` | `provider.dimensions` | `1536` | embedding dimensionality (must match the model) |
 | `LORE_CHAT_MODEL` | `provider.chat_model` | `gpt-4o-mini` | chat model / deployment |
+| `LORE_TIMEOUT` | `provider.timeout` | `120s` | per-request HTTP timeout (Go duration; `0` disables) |
 | `LORE_STRUCTURED_OUTPUT` | `provider.structured_output` | `false` | request JSON-schema output (real citations) where supported |
 | `LORE_IMAGE_INPUT` | `provider.image_input` | `false` | allow image attachments |
 | `LORE_DOCUMENT_INPUT` | `provider.document_input` | `false` | allow document attachments |
@@ -97,6 +118,15 @@ config file is TOML at `<user-config-dir>/lore/config.toml`.
 | `LORE_INGEST_CONCURRENCY` | `ingest.concurrency` | `8` | parallel embeds during ingest (lower for tight rate limits) |
 | `LORE_LOG_LEVEL` | `log.level` | `info` | `debug`/`info`/`warn`/`error` |
 | `LORE_LOG_FORMAT` | `log.format` | `text` | `text` or `json` |
+
+Global flags override env, file, and defaults for the current command:
+
+| Flag | Overrides | Meaning |
+|---|---|---|
+| `--config <path>` | — | read this TOML file instead of the default location |
+| `--log-level <level>` | `log.level` | `debug`/`info`/`warn`/`error` |
+| `--log-format <fmt>` | `log.format` | `text` or `json` |
+| `-v`, `--verbose` | `log.level` | shorthand for `--log-level debug` |
 
 The transient `429`/`503` responses of rate-limited providers are retried
 automatically (honoring `Retry-After`).

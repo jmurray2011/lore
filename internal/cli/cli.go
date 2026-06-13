@@ -6,6 +6,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,9 +29,31 @@ type Deps struct {
 	Remove  *app.Remover
 }
 
+// GlobalOptions are the resolved global flags the composition root needs to
+// build the runtime: which config file to read and how to log. The Builder
+// turns these into Deps.
+type GlobalOptions struct {
+	ConfigPath string // --config; empty means the default location
+	LogLevel   string // --log-level; empty means unset
+	LogFormat  string // --log-format; empty means unset
+	Verbose    bool   // -v/--verbose
+}
+
+// Builder constructs the runtime dependencies from the resolved global options.
+// The composition root provides it; the root command invokes it once, in
+// PersistentPreRunE — after global flags are parsed — so --config can redirect
+// configuration loading before anything is wired.
+type Builder func(context.Context, GlobalOptions) (Deps, error)
+
 // NewRootCommand builds the lore command tree, writing data to out and errors to
-// errOut. Errors returned from Execute map to process exit codes via ExitCode.
-func NewRootCommand(deps Deps, version string, out, errOut io.Writer) *cobra.Command {
+// errOut. The build function is invoked once before any subcommand runs to
+// produce the dependencies the commands share. Errors returned from Execute map
+// to process exit codes via ExitCode.
+func NewRootCommand(build Builder, version string, out, errOut io.Writer) *cobra.Command {
+	// deps is populated by PersistentPreRunE before any subcommand's RunE; the
+	// subcommands capture &deps so they see the built value at run time.
+	var deps Deps
+
 	root := &cobra.Command{
 		Use:           "lore",
 		Short:         "Fast, scriptable RAG and LLM operations over specific document sets",
@@ -40,23 +63,53 @@ func NewRootCommand(deps Deps, version string, out, errOut io.Writer) *cobra.Com
 	}
 	root.SetOut(out)
 	root.SetErr(errOut)
-	root.PersistentFlags().Bool("json", false, "emit machine-readable JSON to stdout")
-	root.PersistentFlags().Bool("no-color", false, "disable ANSI color in human output")
+	pf := root.PersistentFlags()
+	pf.Bool("json", false, "emit machine-readable JSON to stdout")
+	pf.Bool("no-color", false, "disable ANSI color in human output")
+	pf.String("config", "", "path to the TOML config file (default: <user-config-dir>/lore/config.toml)")
+	pf.String("log-level", "", "log level: debug, info, warn, or error")
+	pf.String("log-format", "", "log format: text or json")
+	pf.BoolP("verbose", "v", false, "verbose logging (shorthand for --log-level debug)")
 	root.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
 		return fmt.Errorf("%w: %v", domain.ErrInvalidArgument, err)
 	})
+	root.PersistentPreRunE = func(cmd *cobra.Command, _ []string) error {
+		d, err := build(cmd.Context(), GlobalOptions{
+			ConfigPath: flagString(cmd, "config"),
+			LogLevel:   flagString(cmd, "log-level"),
+			LogFormat:  flagString(cmd, "log-format"),
+			Verbose:    flagBool(cmd, "verbose"),
+		})
+		if err != nil {
+			return err
+		}
+		deps = d
+		return nil
+	}
 	root.AddCommand(
-		newInitCmd(deps),
-		newAddCmd(deps),
-		newSyncCmd(deps),
-		newLsCmd(deps),
-		newStatusCmd(deps),
-		newDocsCmd(deps),
-		newQueryCmd(deps),
-		newAskCmd(deps),
-		newRmCmd(deps),
+		newInitCmd(&deps),
+		newAddCmd(&deps),
+		newSyncCmd(&deps),
+		newLsCmd(&deps),
+		newStatusCmd(&deps),
+		newDocsCmd(&deps),
+		newCatCmd(&deps),
+		newQueryCmd(&deps),
+		newAskCmd(&deps),
+		newSynthesizeCmd(&deps),
+		newRmCmd(&deps),
 	)
 	return root
+}
+
+func flagString(cmd *cobra.Command, name string) string {
+	v, _ := cmd.Flags().GetString(name)
+	return v
+}
+
+func flagBool(cmd *cobra.Command, name string) bool {
+	v, _ := cmd.Flags().GetBool(name)
+	return v
 }
 
 // ExitCode maps a command error to a lore exit code (DESIGN.md): 0 ok,
@@ -118,12 +171,26 @@ func viewCollection(c *domain.Collection) collectionView {
 	}
 }
 
+// statusView is the collection view plus the document count, shown only by
+// `status` (a single collection). ls deliberately omits the count — it would
+// cost one query per listed collection.
+type statusView struct {
+	collectionView
+	Documents int `json:"documents"`
+}
+
 type hitView struct {
 	ChunkID string  `json:"chunk_id"`
 	Source  string  `json:"source"`
 	Seq     int     `json:"seq"`
 	Score   float64 `json:"score"`
 	Text    string  `json:"text"`
+}
+
+type chunkView struct {
+	ChunkID string `json:"chunk_id"`
+	Seq     int    `json:"seq"`
+	Text    string `json:"text"`
 }
 
 type citationView struct {
@@ -135,6 +202,7 @@ type citationView struct {
 type answerView struct {
 	Text      string         `json:"text"`
 	Citations []citationView `json:"citations"`
+	Grounded  bool           `json:"grounded"`
 }
 
 type docView struct {

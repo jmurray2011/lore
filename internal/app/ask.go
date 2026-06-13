@@ -23,14 +23,35 @@ func NewAsker(querier *Querier, generator Generator) *Asker {
 // Retrieval errors short-circuit before the generator is called; generator
 // errors are wrapped. With k <= 0 no chunks are retrieved, so attachments alone
 // ground the answer.
-func (a *Asker) Ask(ctx context.Context, collection, question string, k int, attachments []domain.Attachment) (Answer, error) {
-	hits, err := a.querier.Query(ctx, collection, question, k)
+//
+// When retrieval yields no chunks and no attachments were supplied there is
+// nothing to ground on: in strict mode this is ErrNoGrounding (the generator is
+// not called, saving the request); otherwise the answer is still produced but
+// marked Grounded=false so the caller can warn that it rests on model knowledge
+// alone. A non-empty source restricts retrieval to documents matching that glob
+// (see Querier.Query).
+func (a *Asker) Ask(ctx context.Context, collection, question string, k int, attachments []domain.Attachment, strict bool, source string) (Answer, error) {
+	hits, err := a.querier.Query(ctx, collection, question, k, source)
 	if err != nil {
 		return Answer{}, err
 	}
+
+	if len(hits) == 0 && len(attachments) == 0 && strict {
+		return Answer{}, fmt.Errorf("ask %q: %w: no chunks matched and no attachments supplied", collection, ErrNoGrounding)
+	}
+	return a.Synthesize(ctx, question, hits, attachments)
+}
+
+// Synthesize generates an answer from already-retrieved hits and optional
+// attachments, without performing retrieval — the generation half of Ask,
+// exposed so callers can interpose between retrieval and synthesis (filter,
+// re-rank, or merge hits). Grounded reflects whether any hits or attachments
+// were given. Unlike Ask it has no strict mode: the caller chose the hits.
+func (a *Asker) Synthesize(ctx context.Context, question string, hits []domain.ChunkHit, attachments []domain.Attachment) (Answer, error) {
 	answer, err := a.generator.Synthesize(ctx, question, hits, attachments)
 	if err != nil {
 		return Answer{}, fmt.Errorf("synthesize: %w", err)
 	}
+	answer.Grounded = len(hits) > 0 || len(attachments) > 0
 	return answer, nil
 }

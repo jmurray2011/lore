@@ -2,6 +2,7 @@ package app_test
 
 import (
 	"context"
+	"sort"
 	"sync"
 	"sync/atomic"
 
@@ -226,6 +227,25 @@ func (f *fakeDocs) GetChunks(_ context.Context, ids []domain.ChunkID) ([]domain.
 			out = append(out, c)
 		}
 	}
+	return out, nil
+}
+
+func (f *fakeDocs) GetChunksByDocument(_ context.Context, collection string, id domain.DocumentID) ([]domain.Chunk, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.getErr != nil {
+		return nil, f.getErr
+	}
+	if d, ok := f.docs[id]; !ok || d.Collection != collection {
+		return nil, nil
+	}
+	var out []domain.Chunk
+	for _, c := range f.chunks {
+		if c.DocumentID == id {
+			out = append(out, c)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Seq < out[j].Seq })
 	return out, nil
 }
 

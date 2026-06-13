@@ -53,7 +53,7 @@ func TestQuerier(t *testing.T) {
 		emb := &fakeEmbedder{space: space, byText: map[string][]float32{"hello": {1, 0, 0}}}
 		q := newQuerier(idx, docs, emb)
 
-		hits, err := q.Query(ctx, "docs", "hello", 2)
+		hits, err := q.Query(ctx, "docs", "hello", 2, "")
 		if err != nil {
 			t.Fatalf("Query: %v", err)
 		}
@@ -89,7 +89,7 @@ func TestQuerier(t *testing.T) {
 		emb := &fakeEmbedder{space: space, byText: map[string][]float32{"q": {1, 0, 0}}}
 		q := newQuerier(idx, docs, emb)
 
-		hits, err := q.Query(ctx, "docs", "q", 2)
+		hits, err := q.Query(ctx, "docs", "q", 2, "")
 		if err != nil {
 			t.Fatalf("Query: %v", err)
 		}
@@ -115,7 +115,7 @@ func TestQuerier(t *testing.T) {
 		emb := &fakeEmbedder{space: space, byText: map[string][]float32{"q": {1, 0, 0}}}
 		q := newQuerier(idx, docs, emb)
 
-		hits, err := q.Query(ctx, "docs", "q", 3)
+		hits, err := q.Query(ctx, "docs", "q", 3, "")
 		if err != nil {
 			t.Fatalf("Query: %v", err)
 		}
@@ -130,12 +130,42 @@ func TestQuerier(t *testing.T) {
 		}
 	})
 
+	t.Run("source filter keeps only matching hits, over-fetching to fill k", func(t *testing.T) {
+		da := domain.DeriveDocumentID("docs", "file:///a.md")
+		db := domain.DeriveDocumentID("docs", "file:///b.pdf")
+		ca := mustChunk(t, da, 0, "alpha")
+		cb := mustChunk(t, db, 0, "beta")
+		docA, _ := domain.NewDocument("docs", "file:///a.md", domain.HashContent([]byte("a")), time.Unix(0, 0).UTC())
+		docB, _ := domain.NewDocument("docs", "file:///b.pdf", domain.HashContent([]byte("b")), time.Unix(0, 0).UTC())
+		idx := &fakeIndex{matches: map[string][]domain.VectorMatch{
+			// a.md ranks higher, so an unfiltered k=1 would return it.
+			"docs": {{ChunkID: ca.ID, Score: 0.9}, {ChunkID: cb.ID, Score: 0.5}},
+		}}
+		docs := &fakeDocs{
+			docs:   map[domain.DocumentID]domain.Document{docA.ID: *docA, docB.ID: *docB},
+			chunks: map[domain.ChunkID]domain.Chunk{ca.ID: ca, cb.ID: cb},
+		}
+		emb := &fakeEmbedder{space: space, byText: map[string][]float32{"q": {1, 0, 0}}}
+		q := newQuerier(idx, docs, emb)
+
+		hits, err := q.Query(ctx, "docs", "q", 1, "*.pdf")
+		if err != nil {
+			t.Fatalf("Query: %v", err)
+		}
+		if len(hits) != 1 || hits[0].Chunk.ID != cb.ID {
+			t.Errorf("want only the .pdf hit, got %+v", hits)
+		}
+		if idx.gotK <= 1 {
+			t.Errorf("expected over-fetch (k > 1) when filtering, got gotK=%d", idx.gotK)
+		}
+	})
+
 	t.Run("no matches yields no hits, no error", func(t *testing.T) {
 		idx := &fakeIndex{matches: map[string][]domain.VectorMatch{}}
 		emb := &fakeEmbedder{space: space, byText: map[string][]float32{"q": {1, 0, 0}}}
 		q := newQuerier(idx, &fakeDocs{}, emb)
 
-		hits, err := q.Query(ctx, "docs", "q", 5)
+		hits, err := q.Query(ctx, "docs", "q", 5, "")
 		if err != nil || len(hits) != 0 {
 			t.Errorf("want no hits, nil; got %v, %v", hits, err)
 		}
@@ -143,14 +173,14 @@ func TestQuerier(t *testing.T) {
 
 	t.Run("empty query is ErrInvalidArgument", func(t *testing.T) {
 		q := newQuerier(&fakeIndex{}, &fakeDocs{}, &fakeEmbedder{space: space})
-		if _, err := q.Query(ctx, "docs", "   ", 5); !errors.Is(err, domain.ErrInvalidArgument) {
+		if _, err := q.Query(ctx, "docs", "   ", 5, ""); !errors.Is(err, domain.ErrInvalidArgument) {
 			t.Errorf("want ErrInvalidArgument, got %v", err)
 		}
 	})
 
 	t.Run("unknown collection is ErrNotFound", func(t *testing.T) {
 		q := app.NewQuerier(newFakeCollections(), &fakeIndex{}, &fakeDocs{}, &fakeEmbedder{space: space})
-		if _, err := q.Query(ctx, "missing", "q", 5); !errors.Is(err, app.ErrNotFound) {
+		if _, err := q.Query(ctx, "missing", "q", 5, ""); !errors.Is(err, app.ErrNotFound) {
 			t.Errorf("want ErrNotFound, got %v", err)
 		}
 	})
@@ -161,7 +191,7 @@ func TestQuerier(t *testing.T) {
 			byText: map[string][]float32{"q": {1, 0, 0, 0, 0}},
 		}
 		q := newQuerier(&fakeIndex{}, &fakeDocs{}, emb)
-		if _, err := q.Query(ctx, "docs", "q", 5); !errors.Is(err, domain.ErrSpaceMismatch) {
+		if _, err := q.Query(ctx, "docs", "q", 5, ""); !errors.Is(err, domain.ErrSpaceMismatch) {
 			t.Errorf("want ErrSpaceMismatch, got %v", err)
 		}
 	})

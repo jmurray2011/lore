@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -77,7 +78,26 @@ func newDeps(emb app.Embedder, gen app.Generator) (cli.Deps, *memstore.Collectio
 // exec runs one command with a fresh root (clean flag state) over shared deps.
 func exec(deps cli.Deps, args ...string) (string, int) {
 	var out bytes.Buffer
-	root := cli.NewRootCommand(deps, "test", &out, io.Discard)
+	root := cli.NewRootCommand(depsBuilder(deps), "test", &out, io.Discard)
+	root.SetArgs(args)
+	code := cli.ExitCode(root.Execute())
+	return out.String(), code
+}
+
+// execErr is exec but also returns whatever the command wrote to stderr.
+func execErr(deps cli.Deps, args ...string) (stdout, stderr string, code int) {
+	var out, errb bytes.Buffer
+	root := cli.NewRootCommand(depsBuilder(deps), "test", &out, &errb)
+	root.SetArgs(args)
+	code = cli.ExitCode(root.Execute())
+	return out.String(), errb.String(), code
+}
+
+// execStdin is exec with the given string fed to the command on stdin.
+func execStdin(deps cli.Deps, stdin string, args ...string) (string, int) {
+	var out bytes.Buffer
+	root := cli.NewRootCommand(depsBuilder(deps), "test", &out, io.Discard)
+	root.SetIn(strings.NewReader(stdin))
 	root.SetArgs(args)
 	code := cli.ExitCode(root.Execute())
 	return out.String(), code
@@ -85,6 +105,48 @@ func exec(deps cli.Deps, args ...string) (string, int) {
 
 func testSpace() domain.EmbeddingSpace {
 	return domain.EmbeddingSpace{Model: "test-embed", Dimensions: 3}
+}
+
+func TestRootBuildsDepsFromGlobalFlags(t *testing.T) {
+	deps, _, _, _ := newDeps(stubEmbedder{space: testSpace()}, stubGenerator{})
+	var got cli.GlobalOptions
+	build := func(_ context.Context, opts cli.GlobalOptions) (cli.Deps, error) {
+		got = opts
+		return deps, nil
+	}
+	var out bytes.Buffer
+	root := cli.NewRootCommand(build, "test", &out, io.Discard)
+	root.SetArgs([]string{"--config", "/tmp/x.toml", "--log-level", "debug", "--log-format", "json", "-v", "ls"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if got.ConfigPath != "/tmp/x.toml" {
+		t.Errorf("ConfigPath = %q, want /tmp/x.toml", got.ConfigPath)
+	}
+	if got.LogLevel != "debug" || got.LogFormat != "json" {
+		t.Errorf("log opts = %+v", got)
+	}
+	if !got.Verbose {
+		t.Error("Verbose should be true with -v")
+	}
+}
+
+func TestRootBuildErrorPropagates(t *testing.T) {
+	build := func(context.Context, cli.GlobalOptions) (cli.Deps, error) {
+		return cli.Deps{}, fmt.Errorf("%w: bad config", domain.ErrInvalidArgument)
+	}
+	var out bytes.Buffer
+	root := cli.NewRootCommand(build, "test", &out, io.Discard)
+	root.SetArgs([]string{"ls"})
+	if code := cli.ExitCode(root.Execute()); code != 2 {
+		t.Errorf("build error should surface as exit 2, got %d", code)
+	}
+}
+
+// depsBuilder wraps already-built deps in a Builder for tests that don't care
+// about config resolution.
+func depsBuilder(deps cli.Deps) cli.Builder {
+	return func(context.Context, cli.GlobalOptions) (cli.Deps, error) { return deps, nil }
 }
 
 func TestCLICollectionLifecycle(t *testing.T) {
@@ -124,6 +186,82 @@ func TestCLICollectionLifecycle(t *testing.T) {
 			t.Errorf("want exit 3, got %d", code)
 		}
 	})
+}
+
+func TestCLICat(t *testing.T) {
+	deps, _, docs, _ := newDeps(stubEmbedder{space: testSpace()}, stubGenerator{})
+	if _, code := exec(deps, "init", "docs"); code != 0 {
+		t.Fatal("init failed")
+	}
+	ctx := context.Background()
+	docID := domain.DeriveDocumentID("docs", "file:///a.md")
+	doc, err := domain.NewDocument("docs", "file:///a.md", domain.HashContent([]byte("a")), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	c0, _ := domain.NewChunk(docID, 0, "the first chunk")
+	c1, _ := domain.NewChunk(docID, 1, "the second chunk")
+	if err := docs.Upsert(ctx, doc, []domain.Chunk{c0, c1}); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("prints a document's chunks in seq order as JSON", func(t *testing.T) {
+		out, code := exec(deps, "cat", "docs", "--doc", "file:///a.md", "--json")
+		if code != 0 {
+			t.Fatalf("cat exit %d, out %q", code, out)
+		}
+		var got []chunkViewJSON
+		if err := json.Unmarshal([]byte(out), &got); err != nil {
+			t.Fatalf("bad JSON %q: %v", out, err)
+		}
+		if len(got) != 2 || got[0].Seq != 0 || got[0].Text != "the first chunk" || got[1].Text != "the second chunk" {
+			t.Errorf("chunks = %+v", got)
+		}
+	})
+
+	t.Run("unknown document exits 3", func(t *testing.T) {
+		if _, code := exec(deps, "cat", "docs", "--doc", "file:///ghost.md"); code != 3 {
+			t.Errorf("want exit 3, got %d", code)
+		}
+	})
+
+	t.Run("missing --doc is a usage error", func(t *testing.T) {
+		if _, code := exec(deps, "cat", "docs"); code != 2 {
+			t.Errorf("want exit 2, got %d", code)
+		}
+	})
+}
+
+func TestCLIStatusDocCount(t *testing.T) {
+	deps, _, docs, _ := newDeps(stubEmbedder{space: testSpace()}, stubGenerator{})
+	if _, code := exec(deps, "init", "docs"); code != 0 {
+		t.Fatal("init failed")
+	}
+	ctx := context.Background()
+	for _, uri := range []string{"file:///a.md", "file:///b.md"} {
+		doc, err := domain.NewDocument("docs", uri, domain.HashContent([]byte(uri)), time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := docs.Upsert(ctx, doc, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	out, code := exec(deps, "status", "docs", "--json")
+	if code != 0 {
+		t.Fatalf("status exit %d, out %q", code, out)
+	}
+	var v statusViewJSON
+	if err := json.Unmarshal([]byte(out), &v); err != nil {
+		t.Fatalf("bad JSON %q: %v", out, err)
+	}
+	if v.Documents != 2 {
+		t.Errorf("documents = %d, want 2", v.Documents)
+	}
+	if v.Model != "test-embed" {
+		t.Errorf("status still carries collection details: %+v", v)
+	}
 }
 
 func TestCLIDocs(t *testing.T) {
@@ -222,6 +360,51 @@ func TestCLISync(t *testing.T) {
 	})
 }
 
+func TestCLISyncDryRun(t *testing.T) {
+	deps, _, _, _ := newDeps(stubEmbedder{space: testSpace(), vec: []float32{1, 0, 0}}, stubGenerator{})
+	if _, code := exec(deps, "init", "notes"); code != 0 {
+		t.Fatal("init failed")
+	}
+	dir := t.TempDir()
+	b := filepath.Join(dir, "b.txt")
+	for name, body := range map[string]string{"a.txt": "alpha content here", "b.txt": "beta content here"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, code := exec(deps, "add", "notes", dir); code != 0 {
+		t.Fatalf("add exit %d", code)
+	}
+	if err := os.Remove(b); err != nil {
+		t.Fatal(err)
+	}
+
+	// Dry run reports b.txt as prunable but removes nothing.
+	out, code := exec(deps, "sync", "notes", "--prune", "--dry-run", "--json")
+	if code != 0 {
+		t.Fatalf("dry-run exit %d, out %q", code, out)
+	}
+	var sv syncViewJSON
+	if err := json.Unmarshal([]byte(out), &sv); err != nil {
+		t.Fatalf("bad JSON %q: %v", out, err)
+	}
+	if sv.Pruned != 1 || len(sv.PrunedURIs) != 1 || !strings.Contains(sv.PrunedURIs[0], "b.txt") {
+		t.Errorf("want one prunable b.txt, got %+v", sv)
+	}
+	if !sv.DryRun {
+		t.Error("dry_run flag should be set")
+	}
+	if n := docCount(t, deps, "notes"); n != 2 {
+		t.Errorf("dry run must not remove anything; doc count = %d, want 2", n)
+	}
+
+	t.Run("--dry-run without --prune is a usage error", func(t *testing.T) {
+		if _, code := exec(deps, "sync", "notes", "--dry-run"); code != 2 {
+			t.Errorf("want exit 2, got %d", code)
+		}
+	})
+}
+
 // docCount returns how many documents `docs <collection> --json` reports.
 func docCount(t *testing.T, deps cli.Deps, collection string) int {
 	t.Helper()
@@ -302,6 +485,44 @@ func TestCLIQuery(t *testing.T) {
 	})
 }
 
+func TestCLIQuerySourceFilter(t *testing.T) {
+	qvec := []float32{1, 0, 0}
+	deps, _, docs, index := newDeps(stubEmbedder{space: testSpace(), vec: qvec}, stubGenerator{})
+	if _, code := exec(deps, "init", "docs"); code != 0 {
+		t.Fatal("init failed")
+	}
+	ctx := context.Background()
+	for _, uri := range []string{"file:///a.md", "file:///b.pdf"} {
+		did := domain.DeriveDocumentID("docs", uri)
+		doc, err := domain.NewDocument("docs", uri, domain.HashContent([]byte(uri)), time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		ch, err := domain.NewChunk(did, 0, "content of "+uri)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := docs.Upsert(ctx, doc, []domain.Chunk{ch}); err != nil {
+			t.Fatal(err)
+		}
+		if err := index.Upsert(ctx, "docs", []app.VectorEntry{{ChunkID: ch.ID, Vector: qvec}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	out, code := exec(deps, "query", "docs", "anything", "--source", "*.pdf", "--json")
+	if code != 0 {
+		t.Fatalf("query exit %d, out %q", code, out)
+	}
+	var hits []hitViewJSON
+	if err := json.Unmarshal([]byte(out), &hits); err != nil {
+		t.Fatalf("bad JSON %q: %v", out, err)
+	}
+	if len(hits) != 1 || !strings.Contains(hits[0].Source, "b.pdf") {
+		t.Errorf("--source *.pdf should keep only the pdf hit, got %+v", hits)
+	}
+}
+
 func TestCLISpaceMismatchExits4(t *testing.T) {
 	// Collection pinned to one space; embedder reports a different one.
 	deps, colls, _, _ := newDeps(stubEmbedder{space: domain.EmbeddingSpace{Model: "other", Dimensions: 9}}, stubGenerator{})
@@ -356,6 +577,107 @@ func TestCLIAsk(t *testing.T) {
 	if len(ans.Citations) != 1 || ans.Citations[0].Source != "file:///a.md" || ans.Citations[0].Seq != 0 {
 		t.Errorf("citation provenance = %+v, want one file:///a.md#0", ans.Citations)
 	}
+	if !ans.Grounded {
+		t.Error("an answer over a seeded chunk should be grounded")
+	}
+}
+
+func TestCLIAskGroundingGuard(t *testing.T) {
+	// A collection that exists but holds no chunks: a query matches nothing.
+	t.Run("strict refuses an ungrounded question (exit 1)", func(t *testing.T) {
+		deps, _, _, _ := newDeps(stubEmbedder{space: testSpace(), vec: []float32{1, 0, 0}}, stubGenerator{text: "ungrounded guess"})
+		if _, code := exec(deps, "init", "empty"); code != 0 {
+			t.Fatal("init failed")
+		}
+		out, _, code := execErr(deps, "ask", "empty", "anything", "--strict")
+		if code != 1 {
+			t.Errorf("strict + no grounding should exit 1, got %d", code)
+		}
+		if strings.Contains(out, "ungrounded guess") {
+			t.Errorf("strict must not emit an answer, got stdout %q", out)
+		}
+	})
+
+	t.Run("non-strict answers but warns on stderr", func(t *testing.T) {
+		deps, _, _, _ := newDeps(stubEmbedder{space: testSpace(), vec: []float32{1, 0, 0}}, stubGenerator{text: "ungrounded guess"})
+		if _, code := exec(deps, "init", "empty"); code != 0 {
+			t.Fatal("init failed")
+		}
+		out, errOut, code := execErr(deps, "ask", "empty", "anything")
+		if code != 0 {
+			t.Fatalf("non-strict should still answer (exit 0), got %d", code)
+		}
+		if !strings.Contains(out, "ungrounded guess") {
+			t.Errorf("want the answer on stdout, got %q", out)
+		}
+		if !strings.Contains(errOut, "not grounded") {
+			t.Errorf("want an ungrounded warning on stderr, got %q", errOut)
+		}
+	})
+}
+
+func TestCLISynthesize(t *testing.T) {
+	qvec := []float32{1, 0, 0}
+	deps, _, docs, index := newDeps(stubEmbedder{space: testSpace(), vec: qvec}, stubGenerator{text: "the answer"})
+	if _, code := exec(deps, "init", "docs"); code != 0 {
+		t.Fatal("init failed")
+	}
+	ctx := context.Background()
+	doc, err := domain.NewDocument("docs", "file:///a.md", domain.HashContent([]byte("x")), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	chunk, err := domain.NewChunk(doc.ID, 0, "the grounded answer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := docs.Upsert(ctx, doc, []domain.Chunk{chunk}); err != nil {
+		t.Fatal(err)
+	}
+	if err := index.Upsert(ctx, "docs", []app.VectorEntry{{ChunkID: chunk.ID, Vector: qvec}}); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("query --json piped into synthesize round-trips hits", func(t *testing.T) {
+		hitsJSON, code := exec(deps, "query", "docs", "anything", "--json")
+		if code != 0 {
+			t.Fatalf("query exit %d", code)
+		}
+		out, code := execStdin(deps, hitsJSON, "synthesize", "why", "--json")
+		if code != 0 {
+			t.Fatalf("synthesize exit %d, out %q", code, out)
+		}
+		var ans answerViewJSON
+		if err := json.Unmarshal([]byte(out), &ans); err != nil {
+			t.Fatalf("bad JSON %q: %v", out, err)
+		}
+		if ans.Text != "the answer" || !ans.Grounded {
+			t.Errorf("answer = %+v", ans)
+		}
+		if len(ans.Citations) != 1 || ans.Citations[0].Source != "file:///a.md" || ans.Citations[0].Seq != 0 {
+			t.Errorf("citation should round-trip from the piped hit: %+v", ans.Citations)
+		}
+	})
+
+	t.Run("empty stdin yields an ungrounded answer", func(t *testing.T) {
+		out, code := execStdin(deps, "", "synthesize", "why", "--json")
+		if code != 0 {
+			t.Fatalf("synthesize exit %d, out %q", code, out)
+		}
+		var ans answerViewJSON
+		if err := json.Unmarshal([]byte(out), &ans); err != nil {
+			t.Fatal(err)
+		}
+		if ans.Grounded {
+			t.Error("no piped hits should be ungrounded")
+		}
+	})
+
+	t.Run("malformed stdin is a usage error", func(t *testing.T) {
+		if _, code := execStdin(deps, "{not valid", "synthesize", "why"); code != 2 {
+			t.Errorf("want exit 2, got %d", code)
+		}
+	})
 }
 
 func TestCLIAskAttach(t *testing.T) {
@@ -440,6 +762,114 @@ func TestCLIAddThenQuery(t *testing.T) {
 	}
 }
 
+func TestCLIAddCountsUnsupportedSeparately(t *testing.T) {
+	deps, _, _, _ := newDeps(stubEmbedder{space: testSpace(), vec: []float32{1, 0, 0}}, stubGenerator{})
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("hello grounded world"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "b.bin"), []byte{0, 1, 2, 3}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, code := exec(deps, "init", "docs"); code != 0 {
+		t.Fatal("init failed")
+	}
+
+	out, code := exec(deps, "add", "docs", dir, "--json")
+	if code != 0 {
+		t.Fatalf("add exit %d, out %q", code, out)
+	}
+	var sum ingestViewJSON
+	if err := json.Unmarshal([]byte(out), &sum); err != nil {
+		t.Fatalf("bad JSON %q: %v", out, err)
+	}
+	if sum.Added != 1 || sum.Unsupported != 1 || sum.Skipped != 0 {
+		t.Errorf("want Added 1 Unsupported 1 Skipped 0, got %+v", sum)
+	}
+}
+
+func TestCLIStdinInput(t *testing.T) {
+	qvec := []float32{1, 0, 0}
+
+	t.Run("add --stdin ingests piped content, then it is queryable", func(t *testing.T) {
+		deps, _, _, _ := newDeps(stubEmbedder{space: testSpace(), vec: qvec}, stubGenerator{})
+		if _, code := exec(deps, "init", "kb"); code != 0 {
+			t.Fatal("init failed")
+		}
+		out, code := execStdin(deps, "hello grounded world from a pipe", "add", "kb", "--stdin", "--json")
+		if code != 0 {
+			t.Fatalf("add --stdin exit %d, out %q", code, out)
+		}
+		var sum ingestViewJSON
+		if err := json.Unmarshal([]byte(out), &sum); err != nil {
+			t.Fatalf("bad JSON %q: %v", out, err)
+		}
+		if sum.Added != 1 || sum.Chunks < 1 {
+			t.Errorf("add --stdin summary = %+v", sum)
+		}
+
+		hits, code := exec(deps, "query", "kb", "anything", "--json")
+		if code != 0 {
+			t.Fatalf("query exit %d", code)
+		}
+		var hv []hitViewJSON
+		if err := json.Unmarshal([]byte(hits), &hv); err != nil {
+			t.Fatal(err)
+		}
+		if len(hv) < 1 || !strings.Contains(hv[0].Text, "hello grounded world") {
+			t.Errorf("piped content not retrievable: %+v", hv)
+		}
+	})
+
+	t.Run("--stdin rejects path arguments", func(t *testing.T) {
+		deps, _, _, _ := newDeps(stubEmbedder{space: testSpace(), vec: qvec}, stubGenerator{})
+		exec(deps, "init", "kb")
+		if _, code := execStdin(deps, "x", "add", "kb", "--stdin", "some/path"); code != 2 {
+			t.Errorf("want exit 2, got %d", code)
+		}
+	})
+
+	t.Run("ask and query read text from stdin when the arg is -", func(t *testing.T) {
+		deps, _, docs, index := newDeps(stubEmbedder{space: testSpace(), vec: qvec}, stubGenerator{text: "the answer"})
+		if _, code := exec(deps, "init", "docs"); code != 0 {
+			t.Fatal("init failed")
+		}
+		ctx := context.Background()
+		doc, _ := domain.NewDocument("docs", "file:///a.md", domain.HashContent([]byte("x")), time.Now())
+		chunk, _ := domain.NewChunk(doc.ID, 0, "the grounded answer")
+		if err := docs.Upsert(ctx, doc, []domain.Chunk{chunk}); err != nil {
+			t.Fatal(err)
+		}
+		if err := index.Upsert(ctx, "docs", []app.VectorEntry{{ChunkID: chunk.ID, Vector: qvec}}); err != nil {
+			t.Fatal(err)
+		}
+
+		out, code := execStdin(deps, "why does it work?\n", "ask", "docs", "-", "--json")
+		if code != 0 {
+			t.Fatalf("ask - exit %d, out %q", code, out)
+		}
+		var ans answerViewJSON
+		if err := json.Unmarshal([]byte(out), &ans); err != nil {
+			t.Fatal(err)
+		}
+		if ans.Text != "the answer" {
+			t.Errorf("ask - answer = %+v", ans)
+		}
+
+		out, code = execStdin(deps, "anything\n", "query", "docs", "-", "--json")
+		if code != 0 {
+			t.Fatalf("query - exit %d", code)
+		}
+		var hv []hitViewJSON
+		if err := json.Unmarshal([]byte(out), &hv); err != nil {
+			t.Fatal(err)
+		}
+		if len(hv) < 1 {
+			t.Errorf("query - returned no hits")
+		}
+	})
+}
+
 func TestCLIRemove(t *testing.T) {
 	t.Run("rm collection removes it", func(t *testing.T) {
 		deps, _, _, _ := newDeps(stubEmbedder{space: testSpace(), vec: []float32{1, 0, 0}}, stubGenerator{})
@@ -508,11 +938,28 @@ type docViewJSON struct {
 	IngestedAt string `json:"ingested_at"`
 }
 
+type statusViewJSON struct {
+	Name       string `json:"name"`
+	Model      string `json:"model"`
+	Dimensions int    `json:"dimensions"`
+	CreatedAt  string `json:"created_at"`
+	Documents  int    `json:"documents"`
+}
+
 type syncViewJSON struct {
-	Added   int `json:"added"`
-	Skipped int `json:"skipped"`
-	Chunks  int `json:"chunks"`
-	Pruned  int `json:"pruned"`
+	Added       int      `json:"added"`
+	Skipped     int      `json:"skipped"`
+	Unsupported int      `json:"unsupported"`
+	Chunks      int      `json:"chunks"`
+	Pruned      int      `json:"pruned"`
+	PrunedURIs  []string `json:"pruned_uris"`
+	DryRun      bool     `json:"dry_run"`
+}
+
+type chunkViewJSON struct {
+	ChunkID string `json:"chunk_id"`
+	Seq     int    `json:"seq"`
+	Text    string `json:"text"`
 }
 
 type hitViewJSON struct {
@@ -530,10 +977,12 @@ type answerViewJSON struct {
 		Source  string `json:"source"`
 		Seq     int    `json:"seq"`
 	} `json:"citations"`
+	Grounded bool `json:"grounded"`
 }
 
 type ingestViewJSON struct {
-	Added   int `json:"added"`
-	Skipped int `json:"skipped"`
-	Chunks  int `json:"chunks"`
+	Added       int `json:"added"`
+	Skipped     int `json:"skipped"`
+	Unsupported int `json:"unsupported"`
+	Chunks      int `json:"chunks"`
 }

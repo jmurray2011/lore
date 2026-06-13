@@ -100,6 +100,41 @@ func RunDocumentRepositorySuite(t *testing.T, factory func(t *testing.T) app.Doc
 		}
 	})
 
+	t.Run("get chunks by document returns them in seq order, isolated by document", func(t *testing.T) {
+		repo := factory(t)
+		docA, chunksA := newDoc(t, "docs", "file:///a.md", "alpha", 3)
+		docB, chunksB := newDoc(t, "docs", "file:///b.md", "beta", 2)
+		mustUpsert(t, repo, docA, chunksA)
+		mustUpsert(t, repo, docB, chunksB)
+
+		got, err := repo.GetChunksByDocument(ctx, "docs", docA.ID)
+		if err != nil {
+			t.Fatalf("GetChunksByDocument: %v", err)
+		}
+		if len(got) != 3 {
+			t.Fatalf("got %d chunks, want 3", len(got))
+		}
+		for i, ch := range got {
+			if ch.Seq != i {
+				t.Errorf("chunk at index %d has seq %d, want %d (must be seq order)", i, ch.Seq, i)
+			}
+			if ch.DocumentID != docA.ID {
+				t.Errorf("a chunk from another document leaked: %v", ch.DocumentID)
+			}
+		}
+	})
+
+	t.Run("get chunks by document is empty for an unknown document, no error", func(t *testing.T) {
+		repo := factory(t)
+		got, err := repo.GetChunksByDocument(ctx, "docs", domain.DeriveDocumentID("docs", "file:///ghost.md"))
+		if err != nil {
+			t.Fatalf("GetChunksByDocument: %v", err)
+		}
+		if len(got) != 0 {
+			t.Errorf("want no chunks for an unknown document, got %d", len(got))
+		}
+	})
+
 	t.Run("get documents by id preserves input order and skips missing IDs", func(t *testing.T) {
 		repo := factory(t)
 		docA, chunksA := newDoc(t, "docs", "file:///a.md", "alpha", 1)
