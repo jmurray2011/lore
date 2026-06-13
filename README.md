@@ -37,6 +37,7 @@ lore init notes
 
 # 2. ingest files or directories (idempotent — safe to re-run)
 lore add notes ./docs report.pdf spreadsheet.xlsx
+cat meeting.md | lore add notes --stdin --name meeting.md   # ingest piped content
 
 # re-ingest changed files later; --prune also drops documents deleted at source
 lore sync notes              # replays the sources add remembered (no path needed)
@@ -46,6 +47,7 @@ lore sync notes --prune --dry-run   # preview exactly what --prune would remove
 # 3. retrieve the most similar chunks
 lore query notes "rotation policy for signing keys" -k 5
 lore query notes "rotation policy" --source '*.pdf'   # scope to matching documents
+echo "rotation policy" | lore query notes -          # read the query from stdin
 
 # 4. ask a grounded question (retrieval + synthesis with citations)
 lore ask notes "what is our key rotation policy?"

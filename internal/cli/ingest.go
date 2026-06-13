@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"io"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -37,17 +38,40 @@ func unsupportedClause(n int) string {
 }
 
 func newAddCmd(deps *Deps) *cobra.Command {
-	return &cobra.Command{
-		Use:   "add <collection> <path>...",
-		Short: "Ingest files into a collection (idempotent)",
+	var (
+		stdin bool
+		name  string
+		ctype string
+	)
+	cmd := &cobra.Command{
+		Use:   "add <collection> <path>...  |  add <collection> --stdin",
+		Short: "Ingest files (or piped stdin content) into a collection (idempotent)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if len(args) < 2 {
-				return fmt.Errorf("%w: add takes <collection> and at least one path", domain.ErrInvalidArgument)
+			if len(args) < 1 {
+				return fmt.Errorf("%w: add takes a collection and at least one path (or --stdin)", domain.ErrInvalidArgument)
 			}
-			collection := args[0]
+			collection, paths := args[0], args[1:]
 
+			if stdin {
+				if len(paths) > 0 {
+					return fmt.Errorf("%w: --stdin takes no path arguments", domain.ErrInvalidArgument)
+				}
+				content, err := io.ReadAll(cmd.InOrStdin())
+				if err != nil {
+					return fmt.Errorf("read stdin: %w", err)
+				}
+				sum, err := deps.Ingest.IngestContent(cmd.Context(), collection, name, ctype, content)
+				if err != nil {
+					return err
+				}
+				return renderIngest(cmd, sum)
+			}
+
+			if len(paths) == 0 {
+				return fmt.Errorf("%w: add takes at least one path (or --stdin)", domain.ErrInvalidArgument)
+			}
 			var total app.IngestSummary
-			for _, path := range args[1:] {
+			for _, path := range paths {
 				sum, err := deps.Ingest.Ingest(cmd.Context(), collection, path)
 				if err != nil {
 					return err
@@ -57,13 +81,21 @@ func newAddCmd(deps *Deps) *cobra.Command {
 				total.Unsupported += sum.Unsupported
 				total.Chunks += sum.Chunks
 			}
-
-			view := ingestView{Added: total.Added, Skipped: total.Skipped, Unsupported: total.Unsupported, Chunks: total.Chunks}
-			human := fmt.Sprintf("Added **%d**, skipped **%d**%s — **%d** chunks.",
-				total.Added, total.Skipped, unsupportedClause(total.Unsupported), total.Chunks)
-			return render(cmd, view, human)
+			return renderIngest(cmd, total)
 		},
 	}
+	cmd.Flags().BoolVar(&stdin, "stdin", false, "read one document's content from stdin instead of walking paths")
+	cmd.Flags().StringVar(&name, "name", "stdin", "source name/URI to record for --stdin content")
+	cmd.Flags().StringVar(&ctype, "type", "text/markdown", "content type of --stdin content")
+	return cmd
+}
+
+// renderIngest renders an ingestion summary (shared by path and stdin add).
+func renderIngest(cmd *cobra.Command, sum app.IngestSummary) error {
+	view := ingestView{Added: sum.Added, Skipped: sum.Skipped, Unsupported: sum.Unsupported, Chunks: sum.Chunks}
+	human := fmt.Sprintf("Added **%d**, skipped **%d**%s — **%d** chunks.",
+		sum.Added, sum.Skipped, unsupportedClause(sum.Unsupported), sum.Chunks)
+	return render(cmd, view, human)
 }
 
 func newSyncCmd(deps *Deps) *cobra.Command {

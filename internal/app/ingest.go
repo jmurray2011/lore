@@ -144,6 +144,48 @@ const (
 	kindUnsupported                   // content type handled by no extractor
 )
 
+// IngestContent ingests a single in-memory document (e.g. read from stdin) into
+// the collection, identified by uri with the given content type. Like Ingest it
+// enforces space coherence (invariant 1) and is idempotent by content hash
+// (invariant 2). Unlike Ingest it records no sync source — there is no path to
+// replay — and an unsupported content type is reported, not an error.
+func (i *Ingestor) IngestContent(ctx context.Context, collection, uri, contentType string, content []byte) (IngestSummary, error) {
+	coll, err := i.collections.Get(ctx, collection)
+	if err != nil {
+		return IngestSummary{}, err
+	}
+	space, err := i.embedder.Space(ctx)
+	if err != nil {
+		return IngestSummary{}, fmt.Errorf("embedder space: %w", err)
+	}
+	if err := coll.AcceptsSpace(space); err != nil {
+		return IngestSummary{}, err
+	}
+
+	// Empty fingerprint: stdin has no cheap source-side signature, so fast-skip
+	// is disabled; content-hash idempotency still applies once content is read.
+	item := SourceItem{
+		URI:         uri,
+		ContentType: contentType,
+		Open:        func() ([]byte, error) { return content, nil },
+	}
+	out, err := i.ingestItem(ctx, coll, item)
+	if err != nil {
+		return IngestSummary{}, err
+	}
+
+	sum := IngestSummary{Chunks: out.chunks}
+	switch out.kind {
+	case kindAdded:
+		sum.Added = 1
+	case kindUnsupported:
+		sum.Unsupported = 1
+	default:
+		sum.Skipped = 1
+	}
+	return sum, nil
+}
+
 type ingestOutcome struct {
 	chunks int
 	kind   ingestKind

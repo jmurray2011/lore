@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"io"
 	"mime"
 	"os"
 	"path/filepath"
@@ -24,7 +25,11 @@ func newQueryCmd(deps *Deps) *cobra.Command {
 			if len(args) != 2 {
 				return fmt.Errorf("%w: query takes <collection> and a query string", domain.ErrInvalidArgument)
 			}
-			hits, err := deps.Query.Query(cmd.Context(), args[0], args[1], k, source)
+			queryText, err := argOrStdin(cmd, args[1])
+			if err != nil {
+				return err
+			}
+			hits, err := deps.Query.Query(cmd.Context(), args[0], queryText, k, source)
 			if err != nil {
 				return err
 			}
@@ -63,7 +68,11 @@ func newAskCmd(deps *Deps) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			ans, err := deps.Ask.Ask(cmd.Context(), args[0], args[1], k, attachments, strict, source)
+			question, err := argOrStdin(cmd, args[1])
+			if err != nil {
+				return err
+			}
+			ans, err := deps.Ask.Ask(cmd.Context(), args[0], question, k, attachments, strict, source)
 			if err != nil {
 				return err
 			}
@@ -87,6 +96,19 @@ func newAskCmd(deps *Deps) *cobra.Command {
 	cmd.Flags().BoolVar(&strict, "strict", false, "fail (exit 1) instead of answering when nothing grounds the question")
 	cmd.Flags().StringVar(&source, "source", "", "restrict grounding to documents whose source matches this glob (e.g. '*.pdf')")
 	return cmd
+}
+
+// argOrStdin returns arg unchanged, or the trimmed contents of stdin when arg is
+// "-", so query/ask can take their text from a pipe.
+func argOrStdin(cmd *cobra.Command, arg string) (string, error) {
+	if arg != "-" {
+		return arg, nil
+	}
+	data, err := io.ReadAll(cmd.InOrStdin())
+	if err != nil {
+		return "", fmt.Errorf("read stdin: %w", err)
+	}
+	return strings.TrimSpace(string(data)), nil
 }
 
 // hitLabel renders a hit's provenance for human output: "file.docx · chunk 3"

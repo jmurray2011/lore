@@ -278,6 +278,51 @@ func TestIngestor(t *testing.T) {
 		}
 	})
 
+	t.Run("IngestContent stores an in-memory document, idempotently", func(t *testing.T) {
+		coll := mustCollection(t, "docs", space)
+		docs := &fakeDocs{}
+		ing := newIngestor(coll, &fakeSource{}, &fakeExtractor{}, &fakeEmbedder{space: space}, docs, &fakeIndex{})
+
+		sum, err := ing.IngestContent(ctx, "docs", "stdin:notes", "text/plain", []byte(words(10)))
+		if err != nil {
+			t.Fatalf("IngestContent: %v", err)
+		}
+		if sum.Added != 1 || sum.Chunks < 1 {
+			t.Errorf("summary = %+v, want Added 1 with chunks", sum)
+		}
+		if _, err := docs.GetBySource(ctx, "docs", "stdin:notes"); err != nil {
+			t.Errorf("document not stored: %v", err)
+		}
+
+		// Same content again is a no-op.
+		again, err := ing.IngestContent(ctx, "docs", "stdin:notes", "text/plain", []byte(words(10)))
+		if err != nil {
+			t.Fatalf("IngestContent: %v", err)
+		}
+		if again.Added != 0 || again.Skipped != 1 {
+			t.Errorf("re-ingest = %+v, want Added 0 Skipped 1", again)
+		}
+	})
+
+	t.Run("IngestContent counts an unsupported type and records no sync source", func(t *testing.T) {
+		coll := mustCollection(t, "docs", space)
+		colls := newFakeCollections(coll)
+		ext := &fakeExtractor{unsupported: map[string]bool{"image/png": true}}
+		ing := app.NewIngestor(colls, &fakeDocs{}, &fakeIndex{}, &fakeEmbedder{space: space}, ext, &fakeSource{}, chunker41(t))
+
+		sum, err := ing.IngestContent(ctx, "docs", "stdin", "image/png", []byte{0x89})
+		if err != nil {
+			t.Fatalf("IngestContent: %v", err)
+		}
+		if sum.Unsupported != 1 || sum.Added != 0 {
+			t.Errorf("summary = %+v, want Unsupported 1 Added 0", sum)
+		}
+		got, _ := colls.Get(ctx, "docs")
+		if len(got.Sources) != 0 {
+			t.Errorf("stdin must not be recorded as a sync source, got %v", got.Sources)
+		}
+	})
+
 	t.Run("space mismatch is ErrSpaceMismatch and ingests nothing", func(t *testing.T) {
 		coll := mustCollection(t, "docs", space)
 		src := &fakeSource{items: []app.SourceItem{textItem("file:///a.txt", words(10))}}

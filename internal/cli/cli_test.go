@@ -788,6 +788,88 @@ func TestCLIAddCountsUnsupportedSeparately(t *testing.T) {
 	}
 }
 
+func TestCLIStdinInput(t *testing.T) {
+	qvec := []float32{1, 0, 0}
+
+	t.Run("add --stdin ingests piped content, then it is queryable", func(t *testing.T) {
+		deps, _, _, _ := newDeps(stubEmbedder{space: testSpace(), vec: qvec}, stubGenerator{})
+		if _, code := exec(deps, "init", "kb"); code != 0 {
+			t.Fatal("init failed")
+		}
+		out, code := execStdin(deps, "hello grounded world from a pipe", "add", "kb", "--stdin", "--json")
+		if code != 0 {
+			t.Fatalf("add --stdin exit %d, out %q", code, out)
+		}
+		var sum ingestViewJSON
+		if err := json.Unmarshal([]byte(out), &sum); err != nil {
+			t.Fatalf("bad JSON %q: %v", out, err)
+		}
+		if sum.Added != 1 || sum.Chunks < 1 {
+			t.Errorf("add --stdin summary = %+v", sum)
+		}
+
+		hits, code := exec(deps, "query", "kb", "anything", "--json")
+		if code != 0 {
+			t.Fatalf("query exit %d", code)
+		}
+		var hv []hitViewJSON
+		if err := json.Unmarshal([]byte(hits), &hv); err != nil {
+			t.Fatal(err)
+		}
+		if len(hv) < 1 || !strings.Contains(hv[0].Text, "hello grounded world") {
+			t.Errorf("piped content not retrievable: %+v", hv)
+		}
+	})
+
+	t.Run("--stdin rejects path arguments", func(t *testing.T) {
+		deps, _, _, _ := newDeps(stubEmbedder{space: testSpace(), vec: qvec}, stubGenerator{})
+		exec(deps, "init", "kb")
+		if _, code := execStdin(deps, "x", "add", "kb", "--stdin", "some/path"); code != 2 {
+			t.Errorf("want exit 2, got %d", code)
+		}
+	})
+
+	t.Run("ask and query read text from stdin when the arg is -", func(t *testing.T) {
+		deps, _, docs, index := newDeps(stubEmbedder{space: testSpace(), vec: qvec}, stubGenerator{text: "the answer"})
+		if _, code := exec(deps, "init", "docs"); code != 0 {
+			t.Fatal("init failed")
+		}
+		ctx := context.Background()
+		doc, _ := domain.NewDocument("docs", "file:///a.md", domain.HashContent([]byte("x")), time.Now())
+		chunk, _ := domain.NewChunk(doc.ID, 0, "the grounded answer")
+		if err := docs.Upsert(ctx, doc, []domain.Chunk{chunk}); err != nil {
+			t.Fatal(err)
+		}
+		if err := index.Upsert(ctx, "docs", []app.VectorEntry{{ChunkID: chunk.ID, Vector: qvec}}); err != nil {
+			t.Fatal(err)
+		}
+
+		out, code := execStdin(deps, "why does it work?\n", "ask", "docs", "-", "--json")
+		if code != 0 {
+			t.Fatalf("ask - exit %d, out %q", code, out)
+		}
+		var ans answerViewJSON
+		if err := json.Unmarshal([]byte(out), &ans); err != nil {
+			t.Fatal(err)
+		}
+		if ans.Text != "the answer" {
+			t.Errorf("ask - answer = %+v", ans)
+		}
+
+		out, code = execStdin(deps, "anything\n", "query", "docs", "-", "--json")
+		if code != 0 {
+			t.Fatalf("query - exit %d", code)
+		}
+		var hv []hitViewJSON
+		if err := json.Unmarshal([]byte(out), &hv); err != nil {
+			t.Fatal(err)
+		}
+		if len(hv) < 1 {
+			t.Errorf("query - returned no hits")
+		}
+	})
+}
+
 func TestCLIRemove(t *testing.T) {
 	t.Run("rm collection removes it", func(t *testing.T) {
 		deps, _, _, _ := newDeps(stubEmbedder{space: testSpace(), vec: []float32{1, 0, 0}}, stubGenerator{})
