@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -35,6 +36,12 @@ type Deps struct {
 	// Export and Import move a collection to/from a single portable artifact file.
 	Export *app.Exporter
 	Import *app.Importer
+	// Index is the vector index, exposed read-only for the mcp server's
+	// collection_status chunk count. Other commands reach vectors via use cases.
+	Index app.VectorIndex
+	// Log is lore's configured logger (stderr), handed to the long-running mcp
+	// server so it honors --log-level/--log-format; nil is tolerated.
+	Log *slog.Logger
 }
 
 // GlobalOptions are the resolved global flags the composition root needs to
@@ -112,6 +119,7 @@ func NewRootCommand(build Builder, version string, out, errOut io.Writer) *cobra
 		newExportCmd(&deps),
 		newImportCmd(&deps),
 		newRmCmd(&deps),
+		newMCPCmd(&deps),
 	)
 	return root
 }
