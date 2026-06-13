@@ -21,8 +21,10 @@ var _ app.CollectionRepository = (*CollectionRepository)(nil)
 // taken. The INSERT ... ON CONFLICT DO NOTHING + RowsAffected check is atomic.
 func (r *CollectionRepository) Create(ctx context.Context, c *domain.Collection) error {
 	res, err := r.db.ExecContext(ctx,
-		`INSERT INTO collections(name, model, dimensions, created_at) VALUES(?,?,?,?) ON CONFLICT(name) DO NOTHING`,
-		c.Name, c.Space.Model, c.Space.Dimensions, c.CreatedAt.UTC().Format(time.RFC3339Nano))
+		`INSERT INTO collections(name, model, dimensions, created_at, chunker_strategy, chunker_version, chunker_size, chunker_overlap, chunker_tokenizer, chunker_context_prefix)
+		 VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(name) DO NOTHING`,
+		c.Name, c.Space.Model, c.Space.Dimensions, c.CreatedAt.UTC().Format(time.RFC3339Nano),
+		c.Chunker.Strategy, c.Chunker.Version, c.Chunker.Size, c.Chunker.Overlap, c.Chunker.Tokenizer, boolToInt(c.Chunker.ContextPrefix))
 	if err != nil {
 		return fmt.Errorf("sqlite: create collection: %w", err)
 	}
@@ -38,7 +40,7 @@ func (r *CollectionRepository) Create(ctx context.Context, c *domain.Collection)
 
 // Get returns the named collection (with its recorded sources), or ErrNotFound.
 func (r *CollectionRepository) Get(ctx context.Context, name string) (*domain.Collection, error) {
-	row := r.db.QueryRowContext(ctx, `SELECT name, model, dimensions, created_at FROM collections WHERE name=?`, name)
+	row := r.db.QueryRowContext(ctx, collectionColumns+` WHERE name=?`, name)
 	c, err := scanCollection(row)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
@@ -54,7 +56,7 @@ func (r *CollectionRepository) Get(ctx context.Context, name string) (*domain.Co
 
 // List returns every collection (with its recorded sources), in unspecified order.
 func (r *CollectionRepository) List(ctx context.Context) ([]*domain.Collection, error) {
-	rows, err := r.db.QueryContext(ctx, `SELECT name, model, dimensions, created_at FROM collections`)
+	rows, err := r.db.QueryContext(ctx, collectionColumns)
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: list collections: %w", err)
 	}
@@ -146,15 +148,22 @@ func (r *CollectionRepository) loadSources(ctx context.Context, c *domain.Collec
 	return rows.Err()
 }
 
+// collectionColumns is the SELECT prefix shared by Get and List, so scanCollection
+// always reads the same column order.
+const collectionColumns = `SELECT name, model, dimensions, created_at, chunker_strategy, chunker_version, chunker_size, chunker_overlap, chunker_tokenizer, chunker_context_prefix FROM collections`
+
 // scanner abstracts *sql.Row and *sql.Rows so one scan helper serves Get + List.
 type scanner interface{ Scan(dest ...any) error }
 
 func scanCollection(s scanner) (*domain.Collection, error) {
 	var (
-		name, model, createdAt string
-		dims                   int
+		name, model, createdAt          string
+		dims                            int
+		chunkStrategy, chunkTokenizer   string
+		chunkVersion, chunkSize         int
+		chunkOverlap, chunkContextPrefx int
 	)
-	if err := s.Scan(&name, &model, &dims, &createdAt); err != nil {
+	if err := s.Scan(&name, &model, &dims, &createdAt, &chunkStrategy, &chunkVersion, &chunkSize, &chunkOverlap, &chunkTokenizer, &chunkContextPrefx); err != nil {
 		return nil, err
 	}
 	t, err := time.Parse(time.RFC3339Nano, createdAt)
@@ -162,8 +171,24 @@ func scanCollection(s scanner) (*domain.Collection, error) {
 		return nil, fmt.Errorf("parse created_at: %w", err)
 	}
 	return &domain.Collection{
-		Name:      name,
-		Space:     domain.EmbeddingSpace{Model: model, Dimensions: dims},
+		Name:  name,
+		Space: domain.EmbeddingSpace{Model: model, Dimensions: dims},
+		Chunker: domain.ChunkerSpec{
+			Strategy:      chunkStrategy,
+			Version:       chunkVersion,
+			Size:          chunkSize,
+			Overlap:       chunkOverlap,
+			Tokenizer:     chunkTokenizer,
+			ContextPrefix: chunkContextPrefx != 0,
+		},
 		CreatedAt: t,
 	}, nil
+}
+
+// boolToInt encodes a bool as 0/1 for SQLite's integer columns.
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
