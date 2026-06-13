@@ -164,6 +164,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			Tokens:  counter,
 			Export:  app.NewExporter(store.collections, store.docs, store.index),
 			Import:  app.NewImporter(store.collections, store.docs, store.index, remover),
+			Index:   store.index,
+			Log:     logger,
 		}, nil
 	}
 
