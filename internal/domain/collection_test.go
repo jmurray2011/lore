@@ -94,6 +94,19 @@ func TestCollectionAcceptsSpace(t *testing.T) {
 	})
 }
 
+func TestValidateCollectionName(t *testing.T) {
+	for _, name := range []string{"docs", "my-project.v2", "a", "0x", strings.Repeat("a", 64)} {
+		if err := domain.ValidateCollectionName(name); err != nil {
+			t.Errorf("name %q: unexpected error: %v", name, err)
+		}
+	}
+	for _, name := range []string{"", "Docs", "-leading", ".hidden", "has space", "sl/ash", strings.Repeat("a", 65)} {
+		if err := domain.ValidateCollectionName(name); !errors.Is(err, domain.ErrInvalidArgument) {
+			t.Errorf("name %q: want ErrInvalidArgument, got %v", name, err)
+		}
+	}
+}
+
 func TestSameSpace(t *testing.T) {
 	now := time.Now()
 	other := domain.EmbeddingSpace{Model: "other-model", Dimensions: 4}

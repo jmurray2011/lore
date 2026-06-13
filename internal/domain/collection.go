@@ -10,6 +10,18 @@ import (
 // (invariant 4, DESIGN.md).
 var collectionNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 
+// ValidateCollectionName reports whether name satisfies invariant 4 (non-empty,
+// filesystem- and shell-safe, max 64 chars). It is the shared rule behind
+// NewCollection and the import path, which reconstructs a (possibly renamed)
+// collection from an artifact and must validate the target name without building
+// a full collection.
+func ValidateCollectionName(name string) error {
+	if !collectionNameRE.MatchString(name) {
+		return fmt.Errorf("collection name %q: %w: must match %s", name, ErrInvalidArgument, collectionNameRE)
+	}
+	return nil
+}
+
 // Collection is the aggregate root: a named corpus bound to exactly one
 // EmbeddingSpace, and pinned to exactly one ChunkerSpec, for its entire lifetime.
 type Collection struct {
@@ -28,8 +40,8 @@ type Collection struct {
 // loaded from storage that predate chunker pinning carry a zero spec (built as a
 // literal by the repository, not through this constructor).
 func NewCollection(name string, space EmbeddingSpace, chunker ChunkerSpec, now time.Time) (*Collection, error) {
-	if !collectionNameRE.MatchString(name) {
-		return nil, fmt.Errorf("collection name %q: %w: must match %s", name, ErrInvalidArgument, collectionNameRE)
+	if err := ValidateCollectionName(name); err != nil {
+		return nil, err
 	}
 	if space.IsZero() {
 		return nil, fmt.Errorf("collection %q: %w: embedding space is required", name, ErrInvalidArgument)
