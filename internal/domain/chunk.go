@@ -1,10 +1,35 @@
 package domain
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // ChunkID is deterministic, derived from (DocumentID, Seq), so re-chunking an
 // unchanged document yields identical identities (supports invariant 2).
 type ChunkID string
+
+// Valid reports whether id has the canonical shape produced by DeriveChunkID: a
+// 64-character lowercase-hex document hash, a colon, and a non-negative sequence
+// number (e.g. "3f2a…9c:5"). It is a format check, not an existence check.
+func (id ChunkID) Valid() bool {
+	hash, seq, ok := strings.Cut(string(id), ":")
+	if !ok || len(hash) != 64 || seq == "" {
+		return false
+	}
+	for i := 0; i < len(hash); i++ {
+		c := hash[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	for i := 0; i < len(seq); i++ {
+		if seq[i] < '0' || seq[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
 
 // Chunk is the unit of retrieval. It belongs to exactly one Document
 // (invariant 3: deleting the Document deletes its Chunks).

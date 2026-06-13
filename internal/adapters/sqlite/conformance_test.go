@@ -36,3 +36,9 @@ func TestVectorIndexConformance(t *testing.T) {
 		return newStore(t).Vectors()
 	})
 }
+
+func TestAnswerCacheConformance(t *testing.T) {
+	conformance.RunAnswerCacheSuite(t, func(t *testing.T) app.AnswerCache {
+		return newStore(t).Cache()
+	})
+}

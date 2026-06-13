@@ -6,6 +6,7 @@ package app
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/jmurray2011/lore/internal/domain"
 )
@@ -52,6 +53,11 @@ type DocumentRepository interface {
 	// unknown document (or collection) yields no chunks and no error; existence
 	// is the caller's concern (resolve the document via GetBySource first).
 	GetChunksByDocument(ctx context.Context, collection string, id domain.DocumentID) ([]domain.Chunk, error)
+	// GetChunksByIDs returns the chunks with the given IDs that belong to the
+	// collection, in input order. IDs with no stored chunk in the collection are
+	// omitted (the caller diffs requested vs returned). An unknown collection
+	// yields no chunks and no error; collection existence is the caller's concern.
+	GetChunksByIDs(ctx context.Context, collection string, ids []string) ([]domain.Chunk, error)
 	// GetDocuments hydrates documents by ID, preserving input order. IDs with no
 	// stored document are skipped, so the result may be shorter than the input.
 	// Used to attach source provenance to retrieval results.
@@ -65,6 +71,15 @@ type DocumentRepository interface {
 	// (invariant 3 — this port cannot reach it). Fails with ErrNotFound if no
 	// such document exists in the collection.
 	Delete(ctx context.Context, collection string, id domain.DocumentID) ([]domain.ChunkID, error)
+	// DeleteChunks removes the chunks with the given IDs that belong to the
+	// collection, returning the IDs actually removed so the use case can delete
+	// their vectors (invariant 3). The owning documents are left in place — a
+	// document keeps its record even after losing chunks (sub-document
+	// redaction, not document deletion). IDs absent from the collection
+	// (unknown, or owned by another collection) are skipped, so the caller can
+	// diff requested vs removed; an unknown collection removes nothing. No error
+	// for skips — a malformed-ID guard is the caller's concern.
+	DeleteChunks(ctx context.Context, collection string, ids []domain.ChunkID) ([]domain.ChunkID, error)
 	// DeleteCollection removes every document and its chunks in the collection,
 	// returning all removed chunk IDs for the same cascade. A collection with no
 	// documents is a no-op (no IDs, no error); collection existence is the
@@ -117,6 +132,23 @@ type Answer struct {
 // ephemeral context, not part of the collection.
 type Generator interface {
 	Synthesize(ctx context.Context, question string, hits []domain.ChunkHit, attachments []domain.Attachment) (Answer, error)
+}
+
+// AnswerCache stores synthesized answers keyed by an opaque content hash, for
+// reuse across runs (each lore invocation is a fresh process, so this must be
+// persistent to pay off). It is deliberately time-explicit: the TTL policy lives
+// in the caller, not the store, which keeps the store a dumb time-indexed KV and
+// the conformance suite deterministic.
+//
+// Semantics (verified by conformance.RunAnswerCacheSuite):
+//   - Get returns a hit only when an entry exists AND was stored at or after
+//     notBefore; an older entry is a miss (expired), as is an unknown key.
+//   - Put replaces any existing entry for key.
+//   - Prune deletes every entry stored before cutoff.
+type AnswerCache interface {
+	Get(ctx context.Context, key string, notBefore time.Time) (Answer, bool, error)
+	Put(ctx context.Context, key string, answer Answer, storedAt time.Time) error
+	Prune(ctx context.Context, cutoff time.Time) error
 }
 
 // SourceItem is one raw document yielded by a Source. Content is read lazily via

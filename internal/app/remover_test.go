@@ -97,4 +97,40 @@ func TestRemover(t *testing.T) {
 			t.Errorf("want ErrNotFound, got %v", err)
 		}
 	})
+
+	t.Run("RemoveChunks deletes the named chunks and their vectors, keeping the document and its other chunks", func(t *testing.T) {
+		colls := newFakeCollections(mustCollection(t, "docs", space))
+		docs := &fakeDocs{}
+		idx := &fakeIndex{}
+		seed(t, docs, idx, "docs", "file:///a.md", 3)
+		rm := app.NewRemover(colls, docs, idx)
+
+		docID := domain.DeriveDocumentID("docs", "file:///a.md")
+		target := domain.DeriveChunkID(docID, 1)
+
+		removed, err := rm.RemoveChunks(ctx, "docs", []domain.ChunkID{target})
+		if err != nil {
+			t.Fatalf("RemoveChunks: %v", err)
+		}
+		if len(removed) != 1 || removed[0] != target {
+			t.Errorf("removed = %v, want [%s]", removed, target)
+		}
+		if idx.count("docs") != 2 {
+			t.Errorf("want 2 surviving vectors, got %d", idx.count("docs"))
+		}
+		if _, err := docs.GetBySource(ctx, "docs", "file:///a.md"); err != nil {
+			t.Errorf("document must survive chunk removal: %v", err)
+		}
+		survivors, _ := docs.GetChunks(ctx, []domain.ChunkID{domain.DeriveChunkID(docID, 0), target, domain.DeriveChunkID(docID, 2)})
+		if len(survivors) != 2 {
+			t.Errorf("want 2 surviving chunks, got %d", len(survivors))
+		}
+	})
+
+	t.Run("RemoveChunks on an unknown collection is ErrNotFound", func(t *testing.T) {
+		rm := app.NewRemover(newFakeCollections(), &fakeDocs{}, &fakeIndex{})
+		if _, err := rm.RemoveChunks(ctx, "ghost", []domain.ChunkID{"x:0"}); !errors.Is(err, app.ErrNotFound) {
+			t.Errorf("want ErrNotFound, got %v", err)
+		}
+	})
 }

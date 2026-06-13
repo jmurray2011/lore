@@ -119,6 +119,48 @@ func (r *DocumentRepository) GetChunksByDocument(ctx context.Context, collection
 	return out, rows.Err()
 }
 
+// GetChunksByIDs returns the chunks with the given IDs that belong to the
+// collection, in input order. IDs absent from the collection (unknown, or owned
+// by another collection) are omitted. An unknown collection yields no chunks.
+func (r *DocumentRepository) GetChunksByIDs(ctx context.Context, collection string, ids []string) ([]domain.Chunk, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	args := make([]any, 0, len(ids)+1)
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	args = append(args, collection)
+	query := `SELECT c.id, c.document_id, c.seq, c.text FROM chunks c
+		 JOIN documents d ON c.document_id = d.id
+		 WHERE c.id IN (?` + strings.Repeat(",?", len(ids)-1) + `) AND d.collection = ?`
+	rows, err := r.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: get chunks by ids: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	byID := make(map[domain.ChunkID]domain.Chunk, len(ids))
+	for rows.Next() {
+		var c domain.Chunk
+		if err := rows.Scan(&c.ID, &c.DocumentID, &c.Seq, &c.Text); err != nil {
+			return nil, fmt.Errorf("sqlite: scan chunk: %w", err)
+		}
+		byID[c.ID] = c
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	out := make([]domain.Chunk, 0, len(ids))
+	for _, id := range ids {
+		if c, ok := byID[domain.ChunkID(id)]; ok {
+			out = append(out, c)
+		}
+	}
+	return out, nil
+}
+
 // GetDocuments hydrates documents by ID, preserving input order and skipping IDs
 // with no stored document.
 func (r *DocumentRepository) GetDocuments(ctx context.Context, ids []domain.DocumentID) ([]*domain.Document, error) {
@@ -253,10 +295,49 @@ func (r *DocumentRepository) DeleteCollection(ctx context.Context, collection st
 	return ids, nil
 }
 
+// DeleteChunks removes the given chunks that belong to the collection (their
+// documents are left in place), returning the IDs actually removed. IDs absent
+// from the collection are skipped. Resolving which IDs belong to the collection
+// before deleting keeps the returned set exact — the vector cascade needs it.
+func (r *DocumentRepository) DeleteChunks(ctx context.Context, collection string, ids []domain.ChunkID) ([]domain.ChunkID, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	var removed []domain.ChunkID
+	err := r.tx(ctx, func(tx *sql.Tx) error {
+		args := make([]any, 0, len(ids)+1)
+		for _, id := range ids {
+			args = append(args, id)
+		}
+		args = append(args, collection)
+		got, err := selectChunkIDs(ctx, tx,
+			`SELECT c.id FROM chunks c JOIN documents d ON c.document_id=d.id
+			 WHERE c.id IN (?`+strings.Repeat(",?", len(ids)-1)+`) AND d.collection=?`, args...)
+		if err != nil {
+			return err
+		}
+		removed = got
+		if len(removed) == 0 {
+			return nil
+		}
+		delArgs := make([]any, len(removed))
+		for i, id := range removed {
+			delArgs[i] = id
+		}
+		_, err = tx.ExecContext(ctx,
+			`DELETE FROM chunks WHERE id IN (?`+strings.Repeat(",?", len(removed)-1)+`)`, delArgs...)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return removed, nil
+}
+
 // selectChunkIDs reads a single-column chunk-ID query to completion, closing its
 // rows before the caller issues further statements on the same connection.
-func selectChunkIDs(ctx context.Context, tx *sql.Tx, query string, arg any) ([]domain.ChunkID, error) {
-	rows, err := tx.QueryContext(ctx, query, arg)
+func selectChunkIDs(ctx context.Context, tx *sql.Tx, query string, args ...any) ([]domain.ChunkID, error) {
+	rows, err := tx.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}

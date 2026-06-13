@@ -249,6 +249,26 @@ func (f *fakeDocs) GetChunksByDocument(_ context.Context, collection string, id 
 	return out, nil
 }
 
+func (f *fakeDocs) GetChunksByIDs(_ context.Context, collection string, ids []string) ([]domain.Chunk, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.getErr != nil {
+		return nil, f.getErr
+	}
+	out := make([]domain.Chunk, 0, len(ids))
+	for _, id := range ids {
+		c, ok := f.chunks[domain.ChunkID(id)]
+		if !ok {
+			continue
+		}
+		if d, ok := f.docs[c.DocumentID]; !ok || d.Collection != collection {
+			continue
+		}
+		out = append(out, c)
+	}
+	return out, nil
+}
+
 func (f *fakeDocs) GetDocuments(_ context.Context, ids []domain.DocumentID) ([]*domain.Document, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -293,6 +313,24 @@ func (f *fakeDocs) DeleteCollection(_ context.Context, collection string) ([]dom
 		if d.Collection == collection {
 			removed = append(removed, f.removeLocked(id)...)
 		}
+	}
+	return removed, nil
+}
+
+func (f *fakeDocs) DeleteChunks(_ context.Context, collection string, ids []domain.ChunkID) ([]domain.ChunkID, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var removed []domain.ChunkID
+	for _, id := range ids {
+		c, ok := f.chunks[id]
+		if !ok {
+			continue
+		}
+		if d, ok := f.docs[c.DocumentID]; !ok || d.Collection != collection {
+			continue
+		}
+		delete(f.chunks, id)
+		removed = append(removed, id)
 	}
 	return removed, nil
 }

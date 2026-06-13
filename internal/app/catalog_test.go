@@ -147,3 +147,36 @@ func TestCatalogDocumentChunks(t *testing.T) {
 		}
 	})
 }
+
+func TestCatalogChunksByIDs(t *testing.T) {
+	ctx := context.Background()
+	space := testSpace()
+
+	docID := domain.DeriveDocumentID("docs", "file:///a.md")
+	doc, err := domain.NewDocument("docs", "file:///a.md", domain.HashContent([]byte("a")), time.Unix(0, 0).UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	chunks := []domain.Chunk{mustChunk(t, docID, 0, "first"), mustChunk(t, docID, 1, "second")}
+	docs := &fakeDocs{}
+	if err := docs.Upsert(ctx, doc, chunks); err != nil {
+		t.Fatal(err)
+	}
+	cat := app.NewCatalog(newFakeCollections(mustCollection(t, "docs", space)), docs, &fakeEmbedder{space: space})
+
+	t.Run("returns requested chunks in input order, omitting absent", func(t *testing.T) {
+		got, err := cat.ChunksByIDs(ctx, "docs", []string{string(chunks[1].ID), "no-such-chunk", string(chunks[0].ID)})
+		if err != nil {
+			t.Fatalf("ChunksByIDs: %v", err)
+		}
+		if len(got) != 2 || got[0].ID != chunks[1].ID || got[1].ID != chunks[0].ID {
+			t.Errorf("chunks = %+v, want [second, first]", got)
+		}
+	})
+
+	t.Run("unknown collection is ErrNotFound", func(t *testing.T) {
+		if _, err := cat.ChunksByIDs(ctx, "missing", []string{string(chunks[0].ID)}); !errors.Is(err, app.ErrNotFound) {
+			t.Errorf("want ErrNotFound, got %v", err)
+		}
+	})
+}

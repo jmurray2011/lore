@@ -37,6 +37,7 @@ type GlobalOptions struct {
 	LogLevel   string // --log-level; empty means unset
 	LogFormat  string // --log-format; empty means unset
 	Verbose    bool   // -v/--verbose
+	NoCache    bool   // --no-cache; bypass the answer cache for this run
 }
 
 // Builder constructs the runtime dependencies from the resolved global options.
@@ -70,6 +71,7 @@ func NewRootCommand(build Builder, version string, out, errOut io.Writer) *cobra
 	pf.String("log-level", "", "log level: debug, info, warn, or error")
 	pf.String("log-format", "", "log format: text or json")
 	pf.BoolP("verbose", "v", false, "verbose logging (shorthand for --log-level debug)")
+	pf.Bool("no-cache", false, "bypass the answer cache for this run (ask/synthesize)")
 	root.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
 		return fmt.Errorf("%w: %v", domain.ErrInvalidArgument, err)
 	})
@@ -79,6 +81,7 @@ func NewRootCommand(build Builder, version string, out, errOut io.Writer) *cobra
 			LogLevel:   flagString(cmd, "log-level"),
 			LogFormat:  flagString(cmd, "log-format"),
 			Verbose:    flagBool(cmd, "verbose"),
+			NoCache:    flagBool(cmd, "no-cache"),
 		})
 		if err != nil {
 			return err
@@ -203,6 +206,27 @@ type answerView struct {
 	Text      string         `json:"text"`
 	Citations []citationView `json:"citations"`
 	Grounded  bool           `json:"grounded"`
+	// Expansions carries the full text of cited chunks when --expand is set.
+	// omitempty keeps existing --json output byte-for-byte unchanged otherwise.
+	Expansions []chunkView `json:"expansions,omitempty"`
+	// Retrieval carries the retrieval diagnostics when --explain is set: every
+	// chunk that grounded the answer, with its score and whether it was cited. A
+	// pointer so the key is present (as []) when --explain is on but nothing was
+	// retrieved, yet absent — output unchanged — when --explain is off.
+	Retrieval *[]retrievalHitView `json:"retrieval,omitempty"`
+}
+
+// retrievalHitView is one grounding chunk in an --explain report: its rank,
+// score, and whether the answer cited it — enough to tell retrieval starvation
+// (every score low) from a synthesis miss (a high-scoring chunk left uncited).
+// It omits the chunk text deliberately; --expand is the flag for that.
+type retrievalHitView struct {
+	Rank    int     `json:"rank"`
+	ChunkID string  `json:"chunk_id"`
+	Source  string  `json:"source"`
+	Seq     int     `json:"seq"`
+	Score   float64 `json:"score"`
+	Cited   bool    `json:"cited"`
 }
 
 type docView struct {
@@ -212,7 +236,10 @@ type docView struct {
 }
 
 type rmView struct {
-	Removed    string `json:"removed"` // "collection" or "document"
+	Removed    string `json:"removed"` // "collection", "document", or "chunks"
 	Collection string `json:"collection"`
 	Document   string `json:"document,omitempty"`
+	// ChunkIDs lists the chunks actually removed by rm --chunk; omitted for the
+	// collection/document cases so their output is unchanged.
+	ChunkIDs []string `json:"chunk_ids,omitempty"`
 }

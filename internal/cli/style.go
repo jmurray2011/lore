@@ -71,6 +71,26 @@ var citeRefRE = regexp.MustCompile(`\[([^\[\]]+)\]`)
 // readable labels. Citations the prose never referenced inline (e.g. from
 // structured-output JSON) are appended. Unknown bracketed tokens are untouched.
 func answerMarkdown(ans app.Answer) string {
+	text, order := numberedAnswer(ans)
+	if len(order) == 0 {
+		return text
+	}
+	var b strings.Builder
+	b.WriteString(text)
+	b.WriteString("\n\n## Sources\n\n")
+	for i, c := range order {
+		fmt.Fprintf(&b, "%d. %s\n", i+1, citationLabel(c))
+	}
+	return b.String()
+}
+
+// numberedAnswer rewrites the model's inline [chunkID] references to compact
+// numbered [n] markers (numbered by first appearance, deduped) and returns the
+// rewritten prose plus the cited citations in that display order (citations
+// never referenced inline — e.g. from structured output — are appended). It is
+// the shared basis for both the plain "## Sources" list and --expand, so their
+// ordinals always match the answer's.
+func numberedAnswer(ans app.Answer) (string, []domain.Citation) {
 	byID := make(map[domain.ChunkID]domain.Citation, len(ans.Citations))
 	for _, c := range ans.Citations {
 		byID[c.ChunkID] = c
@@ -105,17 +125,75 @@ func answerMarkdown(ans app.Answer) string {
 	for _, c := range ans.Citations { // cited but not referenced inline
 		assign(c)
 	}
+	return text, order
+}
 
+// expandedSources renders the answer (with inline [n] markers) followed by a
+// Sources: block that includes each cited chunk's full text, numbered with the
+// same ordinals the answer uses. textByChunk supplies the chunk text fetched via
+// the slice-1 GetChunksByIDs. With nothing cited, just the answer is returned.
+func expandedSources(ans app.Answer, textByChunk map[domain.ChunkID]string) string {
+	text, order := numberedAnswer(ans)
 	if len(order) == 0 {
 		return text
 	}
 	var b strings.Builder
 	b.WriteString(text)
-	b.WriteString("\n\n## Sources\n\n")
+	b.WriteString("\n\nSources:\n")
 	for i, c := range order {
-		fmt.Fprintf(&b, "%d. %s\n", i+1, citationLabel(c))
+		fmt.Fprintf(&b, "\n[%d] (%s) — %s#%d\n\n%s\n", i+1, shortLabel(c.Source), c.Source, c.Seq, textByChunk[c.ChunkID])
 	}
-	return b.String()
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// citedChunkIDs returns the cited chunk IDs in the answer's display order — used
+// to fetch their full text for --expand without re-parsing the rendered answer.
+func citedChunkIDs(ans app.Answer) []string {
+	_, order := numberedAnswer(ans)
+	ids := make([]string, len(order))
+	for i, c := range order {
+		ids[i] = string(c.ChunkID)
+	}
+	return ids
+}
+
+// citedSet returns the set of chunk IDs the answer cited, for cross-referencing
+// against the retrieved hits in --explain.
+func citedSet(ans app.Answer) map[domain.ChunkID]bool {
+	cited := make(map[domain.ChunkID]bool, len(ans.Citations))
+	for _, c := range ans.Citations {
+		cited[c.ChunkID] = true
+	}
+	return cited
+}
+
+// retrievalMarkdown renders the --explain diagnostics: the chunks that grounded
+// the answer, best first, each with its similarity score and whether the answer
+// cited it. A row whose score is high but uncited points at synthesis; a table
+// of uniformly low scores points at retrieval starvation. With no hits (e.g.
+// -k 0 or an ungrounded question) it says so plainly.
+func retrievalMarkdown(hits []domain.ChunkHit, cited map[domain.ChunkID]bool) string {
+	var b strings.Builder
+	b.WriteString("## Retrieval\n\n")
+	if len(hits) == 0 {
+		b.WriteString("No chunks retrieved.")
+		return b.String()
+	}
+	rows := make([][]string, len(hits))
+	for i, h := range hits {
+		mark := ""
+		if cited[h.Chunk.ID] {
+			mark = "✓"
+		}
+		rows[i] = []string{
+			fmt.Sprintf("%d", i+1),
+			fmt.Sprintf("%.4f", h.Score),
+			mark,
+			hitLabel(h),
+		}
+	}
+	b.WriteString(mdTable([]string{"#", "score", "cited", "source"}, rows))
+	return strings.TrimRight(b.String(), "\n")
 }
 
 // citationLabel is the short, human form of a citation: "file.docx · chunk 3".

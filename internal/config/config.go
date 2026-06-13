@@ -25,7 +25,18 @@ type Config struct {
 	Provider Provider
 	Storage  Storage
 	Ingest   Ingest
+	Cache    Cache
 	Log      Log
+}
+
+// Cache configures the answer cache: reuse of synthesized ask/synthesize answers
+// across runs. Off by default (opt-in); the cache self-invalidates when the
+// question, grounding text, or model/prompt change, and TTL bounds entry age.
+type Cache struct {
+	Enabled bool
+	// TTL is the maximum age of a reusable cached answer. Must be positive to be
+	// useful (a non-positive TTL means every entry reads as expired).
+	TTL time.Duration
 }
 
 // Ingest tunes the ingestion pipeline.
@@ -81,6 +92,9 @@ type Log struct {
 // can't block a non-interactive run forever.
 const DefaultProviderTimeout = 120 * time.Second
 
+// DefaultCacheTTL is how long a cached answer stays reusable unless overridden.
+const DefaultCacheTTL = 30 * 24 * time.Hour
+
 // Defaults returns the baseline configuration before file and environment
 // overlays. The provider defaults target OpenAI; point BaseURL elsewhere for
 // Ollama, vLLM, LM Studio, etc.
@@ -95,6 +109,7 @@ func Defaults() Config {
 			Timeout:    DefaultProviderTimeout,
 		},
 		Storage: Storage{Backend: "sqlite"},
+		Cache:   Cache{TTL: DefaultCacheTTL},
 		Log:     Log{Level: slog.LevelInfo, Format: "text"},
 	}
 }
@@ -183,6 +198,10 @@ type fileConfig struct {
 	Ingest struct {
 		Concurrency int `toml:"concurrency"`
 	} `toml:"ingest"`
+	Cache struct {
+		Enabled bool   `toml:"enabled"`
+		TTL     string `toml:"ttl"`
+	} `toml:"cache"`
 	Log struct {
 		Level  string `toml:"level"`
 		Format string `toml:"format"`
@@ -206,6 +225,16 @@ func applyFile(cfg *Config, fc fileConfig) error {
 	setString(&cfg.Storage.Path, fc.Storage.Path)
 	if fc.Ingest.Concurrency != 0 {
 		cfg.Ingest.Concurrency = fc.Ingest.Concurrency
+	}
+	if fc.Cache.Enabled {
+		cfg.Cache.Enabled = true
+	}
+	if fc.Cache.TTL != "" {
+		d, err := parseCacheTTL(fc.Cache.TTL)
+		if err != nil {
+			return err
+		}
+		cfg.Cache.TTL = d
 	}
 	setString(&cfg.Log.Format, fc.Log.Format)
 	if fc.Provider.Dimensions != 0 {
@@ -270,6 +299,16 @@ func applyEnv(cfg *Config, getenv func(string) string) error {
 	if err := applyBoolEnv(&cfg.Provider.DocumentInput, getenv, "LORE_DOCUMENT_INPUT"); err != nil {
 		return err
 	}
+	if err := applyBoolEnv(&cfg.Cache.Enabled, getenv, "LORE_CACHE"); err != nil {
+		return err
+	}
+	if v := getenv("LORE_CACHE_TTL"); v != "" {
+		d, err := parseCacheTTL(v)
+		if err != nil {
+			return err
+		}
+		cfg.Cache.TTL = d
+	}
 	if v := getenv("LORE_LOG_LEVEL"); v != "" {
 		lvl, err := parseLevel(v)
 		if err != nil {
@@ -313,6 +352,18 @@ func parseTimeout(s string) (time.Duration, error) {
 	return d, nil
 }
 
+// parseCacheTTL parses a Go duration string into a non-negative cache TTL.
+func parseCacheTTL(s string) (time.Duration, error) {
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return 0, fmt.Errorf("config: %w: cache ttl %q is not a duration", domain.ErrInvalidArgument, s)
+	}
+	if d < 0 {
+		return 0, fmt.Errorf("config: %w: cache ttl must not be negative, got %s", domain.ErrInvalidArgument, s)
+	}
+	return d, nil
+}
+
 func parseLevel(s string) (slog.Level, error) {
 	switch strings.ToLower(strings.TrimSpace(s)) {
 	case "debug":
@@ -343,6 +394,9 @@ func validate(cfg Config) error {
 	}
 	if cfg.Storage.Backend != "sqlite" && cfg.Storage.Backend != "memory" {
 		return fmt.Errorf("config: %w: storage backend %q (want \"sqlite\" or \"memory\")", domain.ErrInvalidArgument, cfg.Storage.Backend)
+	}
+	if cfg.Cache.TTL < 0 {
+		return fmt.Errorf("config: %w: cache ttl must not be negative, got %s", domain.ErrInvalidArgument, cfg.Cache.TTL)
 	}
 	return nil
 }

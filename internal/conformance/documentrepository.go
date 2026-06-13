@@ -135,6 +135,45 @@ func RunDocumentRepositorySuite(t *testing.T, factory func(t *testing.T) app.Doc
 		}
 	})
 
+	t.Run("get chunks by IDs returns input order, omitting absent and cross-collection IDs", func(t *testing.T) {
+		repo := factory(t)
+		docA, chunksA := newDoc(t, "docs", "file:///a.md", "alpha", 3)
+		other, chunksOther := newDoc(t, "notes", "file:///b.md", "beta", 1) // a different collection
+		mustUpsert(t, repo, docA, chunksA)
+		mustUpsert(t, repo, other, chunksOther)
+
+		ids := []string{
+			string(chunksA[2].ID),
+			"no-such-chunk",
+			string(chunksA[0].ID),
+			string(chunksOther[0].ID), // belongs to "notes", not "docs"
+		}
+		got, err := repo.GetChunksByIDs(ctx, "docs", ids)
+		if err != nil {
+			t.Fatalf("GetChunksByIDs: %v", err)
+		}
+		if len(got) != 2 {
+			t.Fatalf("want 2 chunks (absent + cross-collection omitted), got %d", len(got))
+		}
+		if got[0].ID != chunksA[2].ID || got[1].ID != chunksA[0].ID {
+			t.Errorf("input order not preserved: got [%s %s]", got[0].ID, got[1].ID)
+		}
+	})
+
+	t.Run("get chunks by IDs is empty for an unknown collection, no error", func(t *testing.T) {
+		repo := factory(t)
+		doc, chunks := newDoc(t, "docs", "file:///a.md", "alpha", 1)
+		mustUpsert(t, repo, doc, chunks)
+
+		got, err := repo.GetChunksByIDs(ctx, "ghost", []string{string(chunks[0].ID)})
+		if err != nil {
+			t.Fatalf("GetChunksByIDs: %v", err)
+		}
+		if len(got) != 0 {
+			t.Errorf("want no chunks for an unknown collection, got %d", len(got))
+		}
+	})
+
 	t.Run("get documents by id preserves input order and skips missing IDs", func(t *testing.T) {
 		repo := factory(t)
 		docA, chunksA := newDoc(t, "docs", "file:///a.md", "alpha", 1)
@@ -289,6 +328,68 @@ func RunDocumentRepositorySuite(t *testing.T, factory func(t *testing.T) app.Doc
 		ids, err := repo.DeleteCollection(ctx, "empty")
 		if err != nil || len(ids) != 0 {
 			t.Errorf("want empty, nil; got %v, %v", ids, err)
+		}
+	})
+
+	t.Run("delete chunks removes only the named chunks, keeps the document and its other chunks", func(t *testing.T) {
+		repo := factory(t)
+		doc, chunks := newDoc(t, "docs", "file:///a.md", "alpha", 3)
+		mustUpsert(t, repo, doc, chunks)
+
+		removed, err := repo.DeleteChunks(ctx, "docs", []domain.ChunkID{chunks[1].ID})
+		if err != nil {
+			t.Fatalf("DeleteChunks: %v", err)
+		}
+		assertSameChunkIDs(t, removed, []domain.ChunkID{chunks[1].ID})
+
+		// The document record survives losing a chunk (this is sub-document
+		// redaction, not document deletion).
+		if _, err := repo.GetBySource(ctx, "docs", "file:///a.md"); err != nil {
+			t.Errorf("document must survive chunk deletion: %v", err)
+		}
+		got, err := repo.GetChunks(ctx, []domain.ChunkID{chunks[0].ID, chunks[1].ID, chunks[2].ID})
+		if err != nil {
+			t.Fatalf("GetChunks: %v", err)
+		}
+		gotIDs := make([]domain.ChunkID, len(got))
+		for i, c := range got {
+			gotIDs[i] = c.ID
+		}
+		assertSameChunkIDs(t, gotIDs, []domain.ChunkID{chunks[0].ID, chunks[2].ID})
+	})
+
+	t.Run("delete chunks skips IDs absent from the collection, removing none of them", func(t *testing.T) {
+		repo := factory(t)
+		docA, chunksA := newDoc(t, "docs", "file:///a.md", "alpha", 1)
+		docB, chunksB := newDoc(t, "notes", "file:///b.md", "beta", 1)
+		mustUpsert(t, repo, docA, chunksA)
+		mustUpsert(t, repo, docB, chunksB)
+
+		unknown := domain.DeriveChunkID(domain.DeriveDocumentID("docs", "file:///ghost.md"), 0)
+		removed, err := repo.DeleteChunks(ctx, "docs", []domain.ChunkID{chunksB[0].ID, unknown})
+		if err != nil {
+			t.Fatalf("DeleteChunks: %v", err)
+		}
+		if len(removed) != 0 {
+			t.Errorf("must not remove cross-collection or unknown chunks, removed %v", removed)
+		}
+		got, err := repo.GetChunks(ctx, []domain.ChunkID{chunksB[0].ID})
+		if err != nil {
+			t.Fatalf("GetChunks: %v", err)
+		}
+		if len(got) != 1 {
+			t.Errorf("a chunk in another collection must be untouched, got %d", len(got))
+		}
+	})
+
+	t.Run("delete chunks on an unknown collection removes nothing, no error", func(t *testing.T) {
+		repo := factory(t)
+		doc, chunks := newDoc(t, "docs", "file:///a.md", "alpha", 1)
+		mustUpsert(t, repo, doc, chunks)
+
+		removed, err := repo.DeleteChunks(ctx, "ghost", []domain.ChunkID{chunks[0].ID})
+		if err != nil || len(removed) != 0 {
+			t.Errorf("unknown collection: want empty/nil, got %v / %v", removed, err)
 		}
 	})
 

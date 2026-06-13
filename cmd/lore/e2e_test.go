@@ -152,23 +152,105 @@ func TestEndToEnd(t *testing.T) {
 	}
 }
 
-// chatRecorder captures the most recent /v1/chat/completions request body so a
-// test can assert what the binary actually sent.
+// TestEndToEndAnswerCache proves the headline cache claim across processes: with
+// the cache enabled (LORE_CACHE), a second identical ask in a fresh process is
+// served from the SQLite-backed cache without calling the provider, and
+// --no-cache bypasses it. Each ask still re-embeds + re-retrieves; only the
+// synthesis (the chat call) is cached.
+func TestEndToEndAnswerCache(t *testing.T) {
+	if testing.Short() {
+		t.Skip("e2e: builds the binary and runs it as subprocesses")
+	}
+
+	const dims = 8
+	provider, chat := stubProvider(t, dims)
+	defer provider.Close()
+
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "lore")
+	if runtime.GOOS == "windows" {
+		bin += ".exe"
+	}
+	build := exec.Command("go", "build", "-o", bin, ".")
+	build.Stderr = os.Stderr
+	if err := build.Run(); err != nil {
+		t.Fatalf("build binary: %v", err)
+	}
+
+	env := append(os.Environ(),
+		"LORE_BASE_URL="+provider.URL+"/v1",
+		"LORE_API_KEY=test",
+		"LORE_EMBED_MODEL=stub-embed",
+		"LORE_CHAT_MODEL=stub-chat",
+		"LORE_DIMENSIONS="+strconv.Itoa(dims),
+		"LORE_STORAGE_BACKEND=sqlite",
+		"LORE_DB_PATH="+filepath.Join(dir, "lore.db"),
+		"LORE_CACHE=true",
+		"XDG_CONFIG_HOME="+filepath.Join(dir, "config"),
+	)
+	mustSucceed := func(t *testing.T, args ...string) {
+		t.Helper()
+		var out, errb bytes.Buffer
+		cmd := exec.Command(bin, args...)
+		cmd.Env = env
+		cmd.Stdout = &out
+		cmd.Stderr = &errb
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("%v: %v, stderr=%s", args, err, errb.String())
+		}
+	}
+
+	txtPath := filepath.Join(dir, "alpha.txt")
+	if err := os.WriteFile(txtPath, []byte("alpha beta gamma delta epsilon"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mustSucceed(t, "init", "docs")
+	mustSucceed(t, "add", "docs", txtPath)
+
+	mustSucceed(t, "ask", "docs", "what is alpha?")
+	first := chat.count()
+	if first == 0 {
+		t.Fatal("the first ask should reach the provider")
+	}
+
+	// Fresh process, same question + unchanged corpus: served from the cache.
+	mustSucceed(t, "ask", "docs", "what is alpha?")
+	if got := chat.count(); got != first {
+		t.Errorf("a repeated ask should hit the cross-process cache; provider calls %d → %d", first, got)
+	}
+
+	// --no-cache forces synthesis even with the cache enabled.
+	mustSucceed(t, "ask", "docs", "what is alpha?", "--no-cache")
+	if got := chat.count(); got != first+1 {
+		t.Errorf("--no-cache should bypass the cache: provider calls %d, want %d", got, first+1)
+	}
+}
+
+// chatRecorder captures the most recent /v1/chat/completions request body and
+// counts requests, so a test can assert what the binary sent and how often.
 type chatRecorder struct {
-	mu   sync.Mutex
-	body string
+	mu    sync.Mutex
+	body  string
+	calls int
 }
 
 func (c *chatRecorder) record(b []byte) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.body = string(b)
+	c.calls++
 }
 
 func (c *chatRecorder) last() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.body
+}
+
+func (c *chatRecorder) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.calls
 }
 
 // stubProvider serves an OpenAI-compatible /v1/embeddings and

@@ -60,7 +60,9 @@ lore ls
 lore status notes
 lore docs notes                                        # list ingested documents
 lore cat notes --doc file:///abs/path/to/report.pdf  # print a document's stored chunks
+lore cat notes --chunk 3f2a…9c --chunk 7b1e…04        # print specific chunks by ID
 lore rm notes --doc file:///abs/path/to/report.pdf   # one document
+lore rm notes --chunk 3f2a…9c --chunk 7b1e…04        # specific chunks by ID
 lore rm notes                                          # whole collection
 ```
 
@@ -80,6 +82,57 @@ lore query kb "tenant isolation" --json \
 Add `--json` to any command for machine-readable output. Human output is
 colorized on an interactive terminal and plain everywhere else; force it off with
 `--no-color` or `NO_COLOR=1`.
+
+## Inspecting chunks / auditing citations
+
+Citations point at chunks; these let you read the chunk behind a claim without
+dumping the whole document.
+
+```bash
+# print specific chunks by ID (repeatable) — e.g. the ones an answer cited
+lore cat notes --chunk 3f2a…9c --chunk 7b1e…04
+lore cat notes --chunk 3f2a…9c --json        # same {chunk_id, seq, text} shape as cat --doc
+
+# answer, then append the full text of each cited chunk under a Sources: block,
+# numbered with the same [n] the answer used
+lore ask notes "what is our key rotation policy?" --expand
+lore ask notes "…" --expand --json           # answer object gains an "expansions": [...] array
+
+# explain why the answer looks the way it does: list the chunks that grounded
+# it, their similarity scores, and which the answer cited
+lore ask notes "what is our key rotation policy?" --explain
+lore ask notes "…" --explain --json           # answer object gains a "retrieval": [...] array
+```
+
+When an answer disappoints, `--explain` tells you which failure you're looking
+at: uniformly low scores mean retrieval found nothing relevant (raise `-k`,
+re-scope `--source`, or ingest more), while a high-scoring chunk left uncited
+means the model ignored good context (a synthesis problem). It reports scores,
+not chunk text — pair it with `--expand` to see both.
+
+`cat --chunk` and `cat --doc` are mutually exclusive. A malformed chunk ID is a
+usage error (exit 2); a well-formed but absent one warns on stderr, still prints
+the chunks that were found, and exits 3. `--expand` and `--explain` are
+orthogonal to each other, to `--source`, and to `--strict` (strict still
+hard-errors on an ungrounded question before either runs).
+
+To delete a specific chunk rather than read it — e.g. a passage that should no
+longer be retrievable — use `rm --chunk` (the write-side counterpart of
+`cat --chunk`):
+
+```bash
+# remove specific chunks by ID (repeatable); the rest of the document stays
+lore rm notes --chunk 3f2a…9c --chunk 7b1e…04
+lore rm notes --chunk 3f2a…9c --json          # {removed: "chunks", chunk_ids: [...]}
+```
+
+`rm --chunk` and `rm --doc` are mutually exclusive; ID validation and the
+missing-ID behavior match `cat --chunk` (malformed → exit 2; some absent →
+stderr warning, the found ones still removed, exit 3). It deletes the chunk and
+its vector from the index, **not** from the source document — re-ingesting that
+source (`add`/`sync`) re-chunks it and brings the text back. For permanent
+redaction, also remove or edit the source, or drop the whole document with
+`rm --doc`.
 
 ## Supported document formats
 
@@ -116,6 +169,8 @@ config file is TOML at `<user-config-dir>/lore/config.toml`.
 | `LORE_STORAGE_BACKEND` | `storage.backend` | `sqlite` | `sqlite` or `memory` |
 | `LORE_DB_PATH` | `storage.path` | `<user-config-dir>/lore/lore.db` | SQLite database file |
 | `LORE_INGEST_CONCURRENCY` | `ingest.concurrency` | `8` | parallel embeds during ingest (lower for tight rate limits) |
+| `LORE_CACHE` | `cache.enabled` | `false` | reuse synthesized `ask`/`synthesize` answers across runs |
+| `LORE_CACHE_TTL` | `cache.ttl` | `720h` (30d) | max age of a reusable cached answer (Go duration) |
 | `LORE_LOG_LEVEL` | `log.level` | `info` | `debug`/`info`/`warn`/`error` |
 | `LORE_LOG_FORMAT` | `log.format` | `text` | `text` or `json` |
 
@@ -127,9 +182,32 @@ Global flags override env, file, and defaults for the current command:
 | `--log-level <level>` | `log.level` | `debug`/`info`/`warn`/`error` |
 | `--log-format <fmt>` | `log.format` | `text` or `json` |
 | `-v`, `--verbose` | `log.level` | shorthand for `--log-level debug` |
+| `--no-cache` | `cache.enabled` | bypass the answer cache for this run (`ask`/`synthesize`) |
 
 The transient `429`/`503` responses of rate-limited providers are retried
 automatically (honoring `Retry-After`).
+
+### Answer cache
+
+`ask` and `synthesize` can reuse a previously synthesized answer instead of
+calling the model again — useful for repeated questions in scripts and CI. It is
+**opt-in** (off by default); enable it once:
+
+```bash
+export LORE_CACHE=true          # or [cache] enabled = true in config.toml
+lore ask notes "what is our key rotation policy?"   # first run: calls the model, caches
+lore ask notes "what is our key rotation policy?"   # repeat: served from the cache, no model call
+lore ask notes "…" --no-cache                        # force a fresh answer this run
+```
+
+The cache is keyed on the question, the exact text of the chunks that ground the
+answer, and the model + prompt identity — so it **self-invalidates**: edit a
+source document (changing its chunk text), switch models, or change `-k`/
+`--source` enough to retrieve different chunks, and the next ask re-synthesizes.
+Entries expire after `LORE_CACHE_TTL` (default 30 days). Requests with `--attach`
+are never cached. The cache is stored in the SQLite database, so it persists
+across invocations (it does nothing for the `memory` storage backend, which is
+per-process).
 
 ### Azure OpenAI
 

@@ -39,17 +39,22 @@ func (s stubEmbedder) Embed(_ context.Context, texts []string) ([][]float32, err
 }
 
 type stubGenerator struct {
-	text string
-	rec  *[]domain.Attachment // when set, records the attachments it was given
+	text      string
+	rec       *[]domain.Attachment // when set, records the attachments it was given
+	citeFirst int                  // when >0, cite only the first N hits (else all)
 }
 
 func (s stubGenerator) Synthesize(_ context.Context, _ string, hits []domain.ChunkHit, attachments []domain.Attachment) (app.Answer, error) {
 	if s.rec != nil {
 		*s.rec = attachments
 	}
-	cites := make([]domain.Citation, len(hits))
-	for i, h := range hits {
-		cites[i] = domain.Citation{ChunkID: h.Chunk.ID, Source: h.Source, Seq: h.Chunk.Seq}
+	n := len(hits)
+	if s.citeFirst > 0 && s.citeFirst < n {
+		n = s.citeFirst
+	}
+	cites := make([]domain.Citation, n)
+	for i := 0; i < n; i++ {
+		cites[i] = domain.Citation{ChunkID: hits[i].Chunk.ID, Source: hits[i].Source, Seq: hits[i].Chunk.Seq}
 	}
 	return app.Answer{Text: s.text, Citations: cites}, nil
 }
@@ -228,6 +233,73 @@ func TestCLICat(t *testing.T) {
 	t.Run("missing --doc is a usage error", func(t *testing.T) {
 		if _, code := exec(deps, "cat", "docs"); code != 2 {
 			t.Errorf("want exit 2, got %d", code)
+		}
+	})
+
+	t.Run("--chunk prints chunks by ID in input order, as JSON", func(t *testing.T) {
+		out, code := exec(deps, "cat", "docs", "--chunk", string(c1.ID), "--chunk", string(c0.ID), "--json")
+		if code != 0 {
+			t.Fatalf("cat --chunk exit %d, out %q", code, out)
+		}
+		var got []chunkViewJSON
+		if err := json.Unmarshal([]byte(out), &got); err != nil {
+			t.Fatalf("bad JSON %q: %v", out, err)
+		}
+		if len(got) != 2 || got[0].ChunkID != string(c1.ID) || got[1].ChunkID != string(c0.ID) {
+			t.Errorf("chunks (input order) = %+v", got)
+		}
+	})
+
+	t.Run("--chunk human output reuses the per-chunk serializer", func(t *testing.T) {
+		out, code := exec(deps, "cat", "docs", "--chunk", string(c0.ID))
+		if code != 0 {
+			t.Fatalf("exit %d", code)
+		}
+		if !strings.Contains(out, "**chunk 0**") || !strings.Contains(out, "the first chunk") {
+			t.Errorf("human output = %q", out)
+		}
+	})
+
+	t.Run("--chunk and --doc together is a usage error", func(t *testing.T) {
+		if _, code := exec(deps, "cat", "docs", "--doc", "file:///a.md", "--chunk", string(c0.ID)); code != 2 {
+			t.Errorf("want exit 2, got %d", code)
+		}
+	})
+
+	t.Run("malformed chunk ID is a usage error", func(t *testing.T) {
+		if _, code := exec(deps, "cat", "docs", "--chunk", "not-a-valid-id"); code != 2 {
+			t.Errorf("want exit 2, got %d", code)
+		}
+	})
+
+	t.Run("partial miss prints found on stdout, warns on stderr, exits 3", func(t *testing.T) {
+		ghost := string(domain.DeriveChunkID(docID, 99))
+		out, errOut, code := execErr(deps, "cat", "docs", "--chunk", string(c0.ID), "--chunk", ghost, "--json")
+		if code != 3 {
+			t.Fatalf("want exit 3, got %d", code)
+		}
+		var got []chunkViewJSON
+		if err := json.Unmarshal([]byte(out), &got); err != nil {
+			t.Fatalf("bad JSON %q: %v", out, err)
+		}
+		if len(got) != 1 || got[0].ChunkID != string(c0.ID) {
+			t.Errorf("found chunk should still print: %+v", got)
+		}
+		if !strings.Contains(errOut, ghost) || !strings.Contains(errOut, "not found") {
+			t.Errorf("want a per-ID warning on stderr, got %q", errOut)
+		}
+	})
+
+	t.Run("all missing exits 3", func(t *testing.T) {
+		ghost := string(domain.DeriveChunkID(docID, 99))
+		if _, code := exec(deps, "cat", "docs", "--chunk", ghost); code != 3 {
+			t.Errorf("want exit 3, got %d", code)
+		}
+	})
+
+	t.Run("unknown collection exits 3", func(t *testing.T) {
+		if _, code := exec(deps, "cat", "ghostcoll", "--chunk", string(c0.ID)); code != 3 {
+			t.Errorf("want exit 3, got %d", code)
 		}
 	})
 }
@@ -580,6 +652,282 @@ func TestCLIAsk(t *testing.T) {
 	if !ans.Grounded {
 		t.Error("an answer over a seeded chunk should be grounded")
 	}
+	// Without --expand the JSON must be byte-for-byte unaffected: no expansions key.
+	if strings.Contains(out, "expansions") {
+		t.Errorf("--json without --expand must not include an expansions key: %s", out)
+	}
+	// Likewise --explain off: no retrieval key.
+	if strings.Contains(out, "retrieval") {
+		t.Errorf("--json without --explain must not include a retrieval key: %s", out)
+	}
+}
+
+func TestCLIAskExpand(t *testing.T) {
+	qvec := []float32{1, 0, 0}
+
+	// Seeds two chunks with distinct vectors so retrieval order is deterministic:
+	// d0 (alpha) cosine-matches the query vector, d1 (beta) less so.
+	seed := func(t *testing.T, citeFirst int) cli.Deps {
+		t.Helper()
+		deps, _, docs, index := newDeps(stubEmbedder{space: testSpace(), vec: qvec}, stubGenerator{text: "the answer", citeFirst: citeFirst})
+		if _, code := exec(deps, "init", "docs"); code != 0 {
+			t.Fatal("init failed")
+		}
+		ctx := context.Background()
+		for i, spec := range []struct {
+			body string
+			vec  []float32
+		}{
+			{"alpha chunk body", []float32{1, 0, 0}},
+			{"beta chunk body", []float32{0, 1, 0}},
+		} {
+			uri := fmt.Sprintf("file:///d%d.md", i)
+			did := domain.DeriveDocumentID("docs", uri)
+			doc, err := domain.NewDocument("docs", uri, domain.HashContent([]byte(uri)), time.Now())
+			if err != nil {
+				t.Fatal(err)
+			}
+			ch, err := domain.NewChunk(did, 0, spec.body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := docs.Upsert(ctx, doc, []domain.Chunk{ch}); err != nil {
+				t.Fatal(err)
+			}
+			if err := index.Upsert(ctx, "docs", []app.VectorEntry{{ChunkID: ch.ID, Vector: spec.vec}}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return deps
+	}
+
+	t.Run("human output appends a Sources block with cited chunk text and ordinals", func(t *testing.T) {
+		deps := seed(t, 0) // cite all retrieved
+		out, code := exec(deps, "ask", "docs", "anything", "-k", "2", "--expand")
+		if code != 0 {
+			t.Fatalf("exit %d, out %q", code, out)
+		}
+		if !strings.Contains(out, "Sources:") {
+			t.Errorf("missing Sources block:\n%s", out)
+		}
+		if !strings.Contains(out, "[1]") || !strings.Contains(out, "[2]") {
+			t.Errorf("Sources block should number with the answer's ordinals:\n%s", out)
+		}
+		if !strings.Contains(out, "alpha chunk body") || !strings.Contains(out, "beta chunk body") {
+			t.Errorf("expand must include both cited chunks' full text:\n%s", out)
+		}
+	})
+
+	t.Run("only cited chunks appear; an uncited retrieved chunk is absent", func(t *testing.T) {
+		deps := seed(t, 1) // model cites only the first (d0/alpha) of two retrieved
+		out, code := exec(deps, "ask", "docs", "anything", "-k", "2", "--expand")
+		if code != 0 {
+			t.Fatalf("exit %d", code)
+		}
+		if !strings.Contains(out, "alpha chunk body") {
+			t.Errorf("cited chunk text should appear:\n%s", out)
+		}
+		if strings.Contains(out, "beta chunk body") {
+			t.Errorf("uncited chunk text must not appear:\n%s", out)
+		}
+	})
+
+	t.Run("--json adds an expansions array without disturbing existing fields", func(t *testing.T) {
+		deps := seed(t, 0)
+		out, code := exec(deps, "ask", "docs", "anything", "-k", "2", "--expand", "--json")
+		if code != 0 {
+			t.Fatalf("exit %d, out %q", code, out)
+		}
+		var ans answerViewJSON
+		if err := json.Unmarshal([]byte(out), &ans); err != nil {
+			t.Fatalf("bad JSON %q: %v", out, err)
+		}
+		if ans.Text != "the answer" || len(ans.Citations) != 2 || !ans.Grounded {
+			t.Errorf("existing fields disturbed: %+v", ans)
+		}
+		if len(ans.Expansions) != 2 {
+			t.Fatalf("want 2 expansions, got %d", len(ans.Expansions))
+		}
+		texts := ans.Expansions[0].Text + "|" + ans.Expansions[1].Text
+		if !strings.Contains(texts, "alpha chunk body") || !strings.Contains(texts, "beta chunk body") {
+			t.Errorf("expansions missing chunk text: %+v", ans.Expansions)
+		}
+		// Each expansion uses the slice-1 chunk shape (chunk_id, seq, text).
+		if ans.Expansions[0].ChunkID == "" {
+			t.Errorf("expansion missing chunk_id: %+v", ans.Expansions[0])
+		}
+	})
+
+	t.Run("ungrounded answer omits the block (and the json key)", func(t *testing.T) {
+		deps, _, _, _ := newDeps(stubEmbedder{space: testSpace(), vec: qvec}, stubGenerator{text: "ungrounded guess"})
+		if _, code := exec(deps, "init", "empty"); code != 0 {
+			t.Fatal("init failed")
+		}
+		out, errOut, code := execErr(deps, "ask", "empty", "anything", "--expand")
+		if code != 0 {
+			t.Fatalf("non-strict ungrounded should exit 0, got %d", code)
+		}
+		if strings.Contains(out, "Sources:") {
+			t.Errorf("nothing cited: the Sources block must be omitted:\n%s", out)
+		}
+		if !strings.Contains(errOut, "not grounded") {
+			t.Errorf("want the ungrounded warning on stderr, got %q", errOut)
+		}
+	})
+
+	t.Run("--strict still errors before expansion", func(t *testing.T) {
+		deps, _, _, _ := newDeps(stubEmbedder{space: testSpace(), vec: qvec}, stubGenerator{text: "x"})
+		if _, code := exec(deps, "init", "empty"); code != 0 {
+			t.Fatal("init failed")
+		}
+		out, code := exec(deps, "ask", "empty", "anything", "--strict", "--expand")
+		if code != 1 {
+			t.Errorf("strict + ungrounded should exit 1, got %d", code)
+		}
+		if strings.Contains(out, "Sources:") {
+			t.Errorf("strict must error before any expansion runs:\n%s", out)
+		}
+	})
+
+	t.Run("--expand composes with --source scoping", func(t *testing.T) {
+		deps := seed(t, 0)
+		out, code := exec(deps, "ask", "docs", "anything", "-k", "2", "--source", "d0.md", "--expand")
+		if code != 0 {
+			t.Fatalf("exit %d, out %q", code, out)
+		}
+		if !strings.Contains(out, "alpha chunk body") {
+			t.Errorf("scoped expand should include the d0 chunk:\n%s", out)
+		}
+		if strings.Contains(out, "beta chunk body") {
+			t.Errorf("--source d0.md should exclude d1's chunk:\n%s", out)
+		}
+	})
+}
+
+func TestCLIAskExplain(t *testing.T) {
+	qvec := []float32{1, 0, 0}
+
+	// Same deterministic seed as --expand: d0 (alpha) cosine-matches the query
+	// (rank 1, high score), d1 (beta) is orthogonal (rank 2, ~0 score).
+	seed := func(t *testing.T, citeFirst int) cli.Deps {
+		t.Helper()
+		deps, _, docs, index := newDeps(stubEmbedder{space: testSpace(), vec: qvec}, stubGenerator{text: "the answer", citeFirst: citeFirst})
+		if _, code := exec(deps, "init", "docs"); code != 0 {
+			t.Fatal("init failed")
+		}
+		ctx := context.Background()
+		for i, spec := range []struct {
+			body string
+			vec  []float32
+		}{
+			{"alpha chunk body", []float32{1, 0, 0}},
+			{"beta chunk body", []float32{0, 1, 0}},
+		} {
+			uri := fmt.Sprintf("file:///d%d.md", i)
+			did := domain.DeriveDocumentID("docs", uri)
+			doc, err := domain.NewDocument("docs", uri, domain.HashContent([]byte(uri)), time.Now())
+			if err != nil {
+				t.Fatal(err)
+			}
+			ch, err := domain.NewChunk(did, 0, spec.body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := docs.Upsert(ctx, doc, []domain.Chunk{ch}); err != nil {
+				t.Fatal(err)
+			}
+			if err := index.Upsert(ctx, "docs", []app.VectorEntry{{ChunkID: ch.ID, Vector: spec.vec}}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return deps
+	}
+
+	t.Run("human output appends a Retrieval section with scores and a cited mark", func(t *testing.T) {
+		deps := seed(t, 1) // model cites only the first (highest-scoring) hit
+		out, code := exec(deps, "ask", "docs", "anything", "-k", "2", "--explain")
+		if code != 0 {
+			t.Fatalf("exit %d, out %q", code, out)
+		}
+		if !strings.Contains(out, "Retrieval") {
+			t.Errorf("missing Retrieval section:\n%s", out)
+		}
+		if !strings.Contains(out, "d0.md") || !strings.Contains(out, "d1.md") {
+			t.Errorf("Retrieval should list both retrieved chunks' sources:\n%s", out)
+		}
+		if !strings.Contains(out, "✓") {
+			t.Errorf("the cited hit should carry a cited mark:\n%s", out)
+		}
+	})
+
+	t.Run("--json carries a retrieval array with rank/score/cited, fields intact", func(t *testing.T) {
+		deps := seed(t, 1)
+		out, code := exec(deps, "ask", "docs", "anything", "-k", "2", "--explain", "--json")
+		if code != 0 {
+			t.Fatalf("exit %d, out %q", code, out)
+		}
+		var ans answerViewJSON
+		if err := json.Unmarshal([]byte(out), &ans); err != nil {
+			t.Fatalf("bad JSON %q: %v", out, err)
+		}
+		if ans.Text != "the answer" || len(ans.Citations) != 1 || !ans.Grounded {
+			t.Errorf("existing fields disturbed: %+v", ans)
+		}
+		if len(ans.Retrieval) != 2 {
+			t.Fatalf("want 2 retrieval rows, got %d (%+v)", len(ans.Retrieval), ans.Retrieval)
+		}
+		if ans.Retrieval[0].Rank != 1 || ans.Retrieval[1].Rank != 2 {
+			t.Errorf("ranks should be 1,2 best-first: %+v", ans.Retrieval)
+		}
+		if ans.Retrieval[0].Score <= ans.Retrieval[1].Score {
+			t.Errorf("scores should descend by rank: %+v", ans.Retrieval)
+		}
+		if !ans.Retrieval[0].Cited || ans.Retrieval[1].Cited {
+			t.Errorf("only the first (cited) hit should be marked cited: %+v", ans.Retrieval)
+		}
+		if ans.Retrieval[0].ChunkID == "" || !strings.Contains(ans.Retrieval[0].Source, "d0.md") {
+			t.Errorf("retrieval row missing provenance: %+v", ans.Retrieval[0])
+		}
+	})
+
+	t.Run("composes with --expand: both Sources and Retrieval appear", func(t *testing.T) {
+		deps := seed(t, 0) // cite all
+		out, code := exec(deps, "ask", "docs", "anything", "-k", "2", "--expand", "--explain")
+		if code != 0 {
+			t.Fatalf("exit %d, out %q", code, out)
+		}
+		if !strings.Contains(out, "Sources:") || !strings.Contains(out, "Retrieval") {
+			t.Errorf("expand+explain should show both blocks:\n%s", out)
+		}
+	})
+
+	t.Run("ungrounded question reports an empty retrieval array, not absent", func(t *testing.T) {
+		deps, _, _, _ := newDeps(stubEmbedder{space: testSpace(), vec: qvec}, stubGenerator{text: "guess"})
+		if _, code := exec(deps, "init", "empty"); code != 0 {
+			t.Fatal("init failed")
+		}
+		out, _, code := execErr(deps, "ask", "empty", "anything", "--explain", "--json")
+		if code != 0 {
+			t.Fatalf("non-strict ungrounded should exit 0, got %d", code)
+		}
+		if !strings.Contains(out, "\"retrieval\": []") {
+			t.Errorf("--explain with no hits should emit an explicit empty retrieval array:\n%s", out)
+		}
+	})
+
+	t.Run("--strict still errors before explain", func(t *testing.T) {
+		deps, _, _, _ := newDeps(stubEmbedder{space: testSpace(), vec: qvec}, stubGenerator{text: "x"})
+		if _, code := exec(deps, "init", "empty"); code != 0 {
+			t.Fatal("init failed")
+		}
+		out, code := exec(deps, "ask", "empty", "anything", "--strict", "--explain")
+		if code != 1 {
+			t.Errorf("strict + ungrounded should exit 1, got %d", code)
+		}
+		if strings.Contains(out, "Retrieval") {
+			t.Errorf("strict must error before any explain output:\n%s", out)
+		}
+	})
 }
 
 func TestCLIAskGroundingGuard(t *testing.T) {
@@ -924,6 +1272,103 @@ func TestCLIRemove(t *testing.T) {
 	})
 }
 
+func TestCLIRemoveChunk(t *testing.T) {
+	qvec := []float32{1, 0, 0}
+	docID := domain.DeriveDocumentID("docs", "file:///a.md")
+
+	seed := func(t *testing.T) (cli.Deps, domain.Chunk, domain.Chunk) {
+		t.Helper()
+		deps, _, docs, index := newDeps(stubEmbedder{space: testSpace(), vec: qvec}, stubGenerator{})
+		if _, code := exec(deps, "init", "docs"); code != 0 {
+			t.Fatal("init failed")
+		}
+		ctx := context.Background()
+		doc, err := domain.NewDocument("docs", "file:///a.md", domain.HashContent([]byte("a")), time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		c0, _ := domain.NewChunk(docID, 0, "first chunk body")
+		c1, _ := domain.NewChunk(docID, 1, "second chunk body")
+		if err := docs.Upsert(ctx, doc, []domain.Chunk{c0, c1}); err != nil {
+			t.Fatal(err)
+		}
+		for _, c := range []domain.Chunk{c0, c1} {
+			if err := index.Upsert(ctx, "docs", []app.VectorEntry{{ChunkID: c.ID, Vector: qvec}}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return deps, c0, c1
+	}
+
+	t.Run("removes the named chunk, leaving the document and its other chunks", func(t *testing.T) {
+		deps, c0, c1 := seed(t)
+		out, code := exec(deps, "rm", "docs", "--chunk", string(c1.ID), "--json")
+		if code != 0 {
+			t.Fatalf("rm --chunk exit %d, out %q", code, out)
+		}
+		var v rmViewJSON
+		if err := json.Unmarshal([]byte(out), &v); err != nil {
+			t.Fatalf("bad JSON %q: %v", out, err)
+		}
+		if v.Removed != "chunks" || v.Collection != "docs" || len(v.ChunkIDs) != 1 || v.ChunkIDs[0] != string(c1.ID) {
+			t.Errorf("rm view = %+v", v)
+		}
+
+		// The document survives with only its remaining chunk.
+		catOut, code := exec(deps, "cat", "docs", "--doc", "file:///a.md", "--json")
+		if code != 0 {
+			t.Fatalf("cat exit %d", code)
+		}
+		var chunks []chunkViewJSON
+		if err := json.Unmarshal([]byte(catOut), &chunks); err != nil {
+			t.Fatal(err)
+		}
+		if len(chunks) != 1 || chunks[0].ChunkID != string(c0.ID) {
+			t.Errorf("want only c0 left, got %+v", chunks)
+		}
+	})
+
+	t.Run("--chunk and --doc together is a usage error", func(t *testing.T) {
+		deps, c0, _ := seed(t)
+		if _, code := exec(deps, "rm", "docs", "--doc", "file:///a.md", "--chunk", string(c0.ID)); code != 2 {
+			t.Errorf("want exit 2, got %d", code)
+		}
+	})
+
+	t.Run("malformed chunk ID is a usage error", func(t *testing.T) {
+		deps, _, _ := seed(t)
+		if _, code := exec(deps, "rm", "docs", "--chunk", "not-a-valid-id"); code != 2 {
+			t.Errorf("want exit 2, got %d", code)
+		}
+	})
+
+	t.Run("partial miss removes the found, warns on stderr, exits 3", func(t *testing.T) {
+		deps, c0, _ := seed(t)
+		ghost := string(domain.DeriveChunkID(docID, 99))
+		out, errOut, code := execErr(deps, "rm", "docs", "--chunk", string(c0.ID), "--chunk", ghost, "--json")
+		if code != 3 {
+			t.Fatalf("want exit 3, got %d", code)
+		}
+		var v rmViewJSON
+		if err := json.Unmarshal([]byte(out), &v); err != nil {
+			t.Fatalf("bad JSON %q: %v", out, err)
+		}
+		if len(v.ChunkIDs) != 1 || v.ChunkIDs[0] != string(c0.ID) {
+			t.Errorf("the found chunk should still be removed: %+v", v)
+		}
+		if !strings.Contains(errOut, ghost) || !strings.Contains(errOut, "not found") {
+			t.Errorf("want a per-ID warning on stderr, got %q", errOut)
+		}
+	})
+
+	t.Run("unknown collection exits 3", func(t *testing.T) {
+		deps, c0, _ := seed(t)
+		if _, code := exec(deps, "rm", "ghostcoll", "--chunk", string(c0.ID)); code != 3 {
+			t.Errorf("want exit 3, got %d", code)
+		}
+	})
+}
+
 // Mirror of the CLI's JSON output shapes, for decoding in tests.
 type collectionViewJSON struct {
 	Name       string `json:"name"`
@@ -977,7 +1422,18 @@ type answerViewJSON struct {
 		Source  string `json:"source"`
 		Seq     int    `json:"seq"`
 	} `json:"citations"`
-	Grounded bool `json:"grounded"`
+	Grounded   bool                   `json:"grounded"`
+	Expansions []chunkViewJSON        `json:"expansions"`
+	Retrieval  []retrievalHitViewJSON `json:"retrieval"`
+}
+
+type retrievalHitViewJSON struct {
+	Rank    int     `json:"rank"`
+	ChunkID string  `json:"chunk_id"`
+	Source  string  `json:"source"`
+	Seq     int     `json:"seq"`
+	Score   float64 `json:"score"`
+	Cited   bool    `json:"cited"`
 }
 
 type ingestViewJSON struct {
@@ -985,4 +1441,11 @@ type ingestViewJSON struct {
 	Skipped     int `json:"skipped"`
 	Unsupported int `json:"unsupported"`
 	Chunks      int `json:"chunks"`
+}
+
+type rmViewJSON struct {
+	Removed    string   `json:"removed"`
+	Collection string   `json:"collection"`
+	Document   string   `json:"document"`
+	ChunkIDs   []string `json:"chunk_ids"`
 }

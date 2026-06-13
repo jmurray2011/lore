@@ -22,6 +22,13 @@ const systemPrompt = "You are a precise assistant. Answer the question using onl
 	"Each chunk is labeled with a bracketed number and its source document. " +
 	"If the context is insufficient, say so plainly. Cite the chunk numbers you relied on inline, in square brackets, e.g. [2] or [2, 5]."
 
+// PromptVersion identifies the prompt/contract this Generator emits answers
+// under. The composition root folds it into the answer-cache salt so a prompt
+// change invalidates cached answers rather than serving ones the new prompt
+// would not have produced. Bump it whenever systemPrompt/structuredInstruction
+// or the citation contract changes meaningfully.
+const PromptVersion = "1"
+
 // citationRE matches bracketed citations like [2] or [2, 5] in answer prose. The
 // captured group may hold several comma-separated numbers.
 var citationRE = regexp.MustCompile(`\[([^\[\]]+)\]`)

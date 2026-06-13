@@ -12,7 +12,10 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
+	"time"
 
+	"github.com/jmurray2011/lore/internal/adapters/cache"
 	"github.com/jmurray2011/lore/internal/adapters/docx"
 	"github.com/jmurray2011/lore/internal/adapters/extract"
 	"github.com/jmurray2011/lore/internal/adapters/fs"
@@ -102,9 +105,18 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			ImageInput:       cfg.Provider.ImageInput,
 			DocumentInput:    cfg.Provider.DocumentInput,
 		}
-		generator, err := openai.NewGenerator(cfg.Provider.BaseURL, cfg.Provider.APIKey, cfg.Provider.ChatModel, caps, auth, httpClient)
+		gen, err := openai.NewGenerator(cfg.Provider.BaseURL, cfg.Provider.APIKey, cfg.Provider.ChatModel, caps, auth, httpClient)
 		if err != nil {
 			return cli.Deps{}, err
+		}
+		// Opt-in answer cache (decision): reuse a synthesized answer for the same
+		// question + grounding across runs, unless --no-cache is set. The salt
+		// scopes the cache to this model + prompt identity so a model or prompt
+		// change can't serve a now-wrong answer.
+		var generator app.Generator = gen
+		if cfg.Cache.Enabled && !opts.NoCache {
+			salt := cfg.Provider.ChatModel + "\x00" + strconv.FormatBool(cfg.Provider.StructuredOutput) + "\x00" + openai.PromptVersion
+			generator = cache.NewGenerator(gen, store.cache, salt, cfg.Cache.TTL, time.Now)
 		}
 
 		chunker, err := domain.NewChunker(domain.DefaultChunkSize, domain.DefaultChunkOverlap)
@@ -140,11 +152,12 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// storage holds the three persistence ports for one backend plus a close hook.
+// storage holds the persistence ports for one backend plus a close hook.
 type storage struct {
 	collections app.CollectionRepository
 	docs        app.DocumentRepository
 	index       app.VectorIndex
+	cache       app.AnswerCache
 	close       func() error
 }
 
@@ -159,6 +172,7 @@ func openStorage(cfg config.Storage) (storage, error) {
 			collections: memstore.NewCollectionRepository(),
 			docs:        memstore.NewDocumentRepository(),
 			index:       memstore.NewVectorIndex(),
+			cache:       memstore.NewAnswerCache(),
 			close:       func() error { return nil },
 		}, nil
 	case "sqlite":
@@ -181,6 +195,7 @@ func openStorage(cfg config.Storage) (storage, error) {
 			collections: s.Collections(),
 			docs:        s.Documents(),
 			index:       s.Vectors(),
+			cache:       s.Cache(),
 			close:       s.Close,
 		}, nil
 	default:

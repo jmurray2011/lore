@@ -31,15 +31,31 @@ func NewAsker(querier *Querier, generator Generator) *Asker {
 // alone. A non-empty source restricts retrieval to documents matching that glob
 // (see Querier.Query).
 func (a *Asker) Ask(ctx context.Context, collection, question string, k int, attachments []domain.Attachment, strict bool, source string) (Answer, error) {
+	ans, _, err := a.askWithHits(ctx, collection, question, k, attachments, strict, source)
+	return ans, err
+}
+
+// AskExplain is Ask, additionally returning the retrieved hits it grounded on,
+// so a caller can show which chunks fed the answer and at what score —
+// distinguishing retrieval starvation (every score low) from a synthesis miss
+// (a high-scoring chunk the model left uncited). Strict/source/attachment
+// semantics match Ask. The hits are the post-filter top-k, best first; they are
+// nil when retrieval found nothing or strict mode returns ErrNoGrounding.
+func (a *Asker) AskExplain(ctx context.Context, collection, question string, k int, attachments []domain.Attachment, strict bool, source string) (Answer, []domain.ChunkHit, error) {
+	return a.askWithHits(ctx, collection, question, k, attachments, strict, source)
+}
+
+func (a *Asker) askWithHits(ctx context.Context, collection, question string, k int, attachments []domain.Attachment, strict bool, source string) (Answer, []domain.ChunkHit, error) {
 	hits, err := a.querier.Query(ctx, collection, question, k, source)
 	if err != nil {
-		return Answer{}, err
+		return Answer{}, nil, err
 	}
 
 	if len(hits) == 0 && len(attachments) == 0 && strict {
-		return Answer{}, fmt.Errorf("ask %q: %w: no chunks matched and no attachments supplied", collection, ErrNoGrounding)
+		return Answer{}, nil, fmt.Errorf("ask %q: %w: no chunks matched and no attachments supplied", collection, ErrNoGrounding)
 	}
-	return a.Synthesize(ctx, question, hits, attachments)
+	ans, err := a.Synthesize(ctx, question, hits, attachments)
+	return ans, hits, err
 }
 
 // Synthesize generates an answer from already-retrieved hits and optional

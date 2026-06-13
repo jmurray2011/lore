@@ -103,6 +103,27 @@ func (r *DocumentRepository) GetChunksByDocument(_ context.Context, collection s
 	return out, nil
 }
 
+// GetChunksByIDs returns the chunks with the given IDs that belong to the
+// collection, in input order. IDs absent from the collection (unknown, or owned
+// by another collection) are omitted. An unknown collection yields no chunks.
+func (r *DocumentRepository) GetChunksByIDs(_ context.Context, collection string, ids []string) ([]domain.Chunk, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	out := make([]domain.Chunk, 0, len(ids))
+	for _, id := range ids {
+		c, ok := r.byChunkID[domain.ChunkID(id)]
+		if !ok {
+			continue
+		}
+		if d, ok := r.docs[c.DocumentID]; !ok || d.Collection != collection {
+			continue // chunk belongs to another collection
+		}
+		out = append(out, c)
+	}
+	return out, nil
+}
+
 // GetDocuments hydrates documents by ID, preserving input order and skipping IDs
 // with no stored document (the result may be shorter than the input).
 func (r *DocumentRepository) GetDocuments(_ context.Context, ids []domain.DocumentID) ([]*domain.Document, error) {
@@ -160,6 +181,43 @@ func (r *DocumentRepository) DeleteCollection(_ context.Context, collection stri
 		if d.Collection == collection {
 			removed = append(removed, r.deleteLocked(id)...)
 		}
+	}
+	return removed, nil
+}
+
+// DeleteChunks removes the given chunks that belong to the collection, returning
+// the IDs actually removed. The owning documents are left in place (their record
+// stands even after losing chunks). IDs absent from the collection are skipped.
+func (r *DocumentRepository) DeleteChunks(_ context.Context, collection string, ids []domain.ChunkID) ([]domain.ChunkID, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	removedSet := make(map[domain.ChunkID]bool, len(ids))
+	affected := make(map[domain.DocumentID]bool)
+	var removed []domain.ChunkID
+	for _, id := range ids {
+		c, ok := r.byChunkID[id]
+		if !ok {
+			continue
+		}
+		if d, ok := r.docs[c.DocumentID]; !ok || d.Collection != collection {
+			continue // chunk belongs to another collection
+		}
+		delete(r.byChunkID, id)
+		removedSet[id] = true
+		affected[c.DocumentID] = true
+		removed = append(removed, id)
+	}
+	// Detach the removed chunks from their documents' chunk lists so a later
+	// document Delete/cascade doesn't report them again.
+	for docID := range affected {
+		kept := r.docChunks[docID][:0]
+		for _, cid := range r.docChunks[docID] {
+			if !removedSet[cid] {
+				kept = append(kept, cid)
+			}
+		}
+		r.docChunks[docID] = kept
 	}
 	return removed, nil
 }
