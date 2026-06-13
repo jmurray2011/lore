@@ -19,9 +19,11 @@ import (
 	"github.com/jmurray2011/lore/internal/adapters/docx"
 	"github.com/jmurray2011/lore/internal/adapters/extract"
 	"github.com/jmurray2011/lore/internal/adapters/fs"
+	"github.com/jmurray2011/lore/internal/adapters/httpjson"
 	"github.com/jmurray2011/lore/internal/adapters/memstore"
 	"github.com/jmurray2011/lore/internal/adapters/openai"
 	"github.com/jmurray2011/lore/internal/adapters/pdf"
+	"github.com/jmurray2011/lore/internal/adapters/rerank"
 	"github.com/jmurray2011/lore/internal/adapters/sqlite"
 	"github.com/jmurray2011/lore/internal/adapters/xlsx"
 	"github.com/jmurray2011/lore/internal/app"
@@ -119,6 +121,22 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			generator = cache.NewGenerator(gen, store.cache, salt, cfg.Cache.TTL, time.Now)
 		}
 
+		// Optional rerank provider — a separate Cohere-style endpoint (its own
+		// base URL/key/model, decision). Wired only when configured; the rerank
+		// command and query/ask --rerank report a usage error when it is nil.
+		var reranker *app.Reranker
+		if cfg.Rerank.BaseURL != "" && cfg.Rerank.Model != "" {
+			rerankAuth := httpjson.AuthBearer
+			if cfg.Rerank.Auth == "api-key" {
+				rerankAuth = httpjson.AuthAPIKey
+			}
+			provider, err := rerank.NewReranker(cfg.Rerank.BaseURL, cfg.Rerank.APIKey, cfg.Rerank.Model, rerankAuth, &http.Client{Timeout: cfg.Rerank.Timeout})
+			if err != nil {
+				return cli.Deps{}, err
+			}
+			reranker = app.NewReranker(provider)
+		}
+
 		chunker, err := domain.NewChunker(domain.DefaultChunkSize, domain.DefaultChunkOverlap)
 		if err != nil {
 			return cli.Deps{}, err
@@ -137,6 +155,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			Sync:    app.NewSyncer(catalog, ingestor, remover, source),
 			Query:   querier,
 			Ask:     app.NewAsker(querier, generator),
+			Rerank:  reranker,
 			Remove:  remover,
 		}, nil
 	}

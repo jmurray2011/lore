@@ -154,6 +154,44 @@ Diagnostics always go to **stderr** (as text, or JSON with `--json`) for
 goes to stderr — either way a piped answer or hit list stays clean. `--explain`
 adds no model calls; it only fetches one extra candidate (k+1) for the runner-up.
 
+## Two-stage retrieval (reranking)
+
+Vector search is a *bi-encoder*: the query and each chunk are embedded
+separately, so the similarity score misses relevance that only shows up when the
+two are read *together*. A **cross-encoder reranker** scores each `(query,
+chunk)` pair jointly and is the single biggest precision lever in a RAG stack.
+The standard pattern is to cast a wide cheap net with vector search, then rerank
+that pool down to a precise few:
+
+```bash
+# composable: vector top-50 → rerank → top-5 → synthesize
+lore query kb "tenant isolation" -k 50 --json \
+  | lore rerank "tenant isolation" -n 5 \
+  | lore synthesize "how is tenant isolation enforced?"
+
+# or in one step — retrieve a wide pool, rerank, return the final -k
+lore query kb "tenant isolation" -k 5 --rerank                 # pool of 50 by default
+lore ask   kb "how is tenant isolation enforced?" -k 5 --rerank --rerank-candidates 80
+```
+
+- `lore rerank "<query>"` reads the `query --json` hit array on stdin, reorders
+  it by cross-encoder relevance, and re-emits it with an added `rerank_score`
+  (the original `score` is preserved). `-n/--top-n` truncates; without it, all
+  hits are re-emitted reordered.
+- `query --rerank` / `ask --rerank` do the two stages in one command: `-k` is the
+  **final** count, `--rerank-candidates` (default 50, must be ≥ `-k`) is the
+  pre-rerank vector pool. `--source` still scopes the candidate retrieval.
+
+**The reranker is a separate provider.** Rerank APIs are *not* OpenAI-shaped
+(OpenAI has no rerank endpoint); the de-facto standard is the Cohere-style
+`POST /rerank`, which Jina, Voyage, and others mimic. So reranking has its own
+`rerank.*` / `LORE_RERANK_*` config (base URL, key, model) — a common setup is
+"embed with OpenAI, rerank with Cohere/Jina". Requesting `--rerank`/`rerank`
+without it configured is a usage error (exit 2); a rerank request that fails
+after retries exits 1 and emits nothing — lore never silently falls back to
+vector order. Pair it with `--explain`, which then shows both `sim=` and
+`rerank=` scores and a rerank-ordered runner-up.
+
 ## Supported document formats
 
 | Format | Extensions | Notes |
@@ -186,6 +224,11 @@ config file is TOML at `<user-config-dir>/lore/config.toml`.
 | `LORE_STRUCTURED_OUTPUT` | `provider.structured_output` | `false` | request JSON-schema output (real citations) where supported |
 | `LORE_IMAGE_INPUT` | `provider.image_input` | `false` | allow image attachments |
 | `LORE_DOCUMENT_INPUT` | `provider.document_input` | `false` | allow document attachments |
+| `LORE_RERANK_BASE_URL` | `rerank.base_url` | — | rerank endpoint base URL (Cohere-style) |
+| `LORE_RERANK_API_KEY` | `rerank.api_key` | — | rerank API key |
+| `LORE_RERANK_AUTH` | `rerank.auth` | `bearer` | rerank auth scheme: `bearer` or `api-key` |
+| `LORE_RERANK_MODEL` | `rerank.model` | — | reranker model name |
+| `LORE_RERANK_TIMEOUT` | `rerank.timeout` | `120s` | rerank per-request timeout (Go duration; `0` disables) |
 | `LORE_STORAGE_BACKEND` | `storage.backend` | `sqlite` | `sqlite` or `memory` |
 | `LORE_DB_PATH` | `storage.path` | `<user-config-dir>/lore/lore.db` | SQLite database file |
 | `LORE_INGEST_CONCURRENCY` | `ingest.concurrency` | `8` | parallel embeds during ingest (lower for tight rate limits) |

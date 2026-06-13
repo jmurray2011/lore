@@ -173,20 +173,28 @@ func citedSet(ans app.Answer) map[domain.ChunkID]bool {
 // nil and Cited is omitted.
 func buildExplain(hits []domain.ChunkHit, nextScore *float64, cited map[domain.ChunkID]bool) explainView {
 	ev := explainView{Returned: make([]explainHit, len(hits)), NextScore: nextScore}
+	// Stats follow the active ordering: when two-stage retrieval reordered the
+	// hits, the distribution that matters is the rerank scores (and NextScore is
+	// already the runner-up's rerank score); otherwise the similarity scores.
+	reranked := len(hits) > 0 && hits[0].RerankScore != nil
 	var sum, min, max float64
 	for i, h := range hits {
-		eh := explainHit{Score: h.Score, Source: h.Source, Seq: h.Chunk.Seq}
+		eh := explainHit{Score: h.Score, RerankScore: h.RerankScore, Source: h.Source, Seq: h.Chunk.Seq}
 		if cited != nil {
 			c := cited[h.Chunk.ID]
 			eh.Cited = &c
 		}
 		ev.Returned[i] = eh
-		sum += h.Score
-		if i == 0 || h.Score < min {
-			min = h.Score
+		s := h.Score
+		if reranked {
+			s = *h.RerankScore
 		}
-		if i == 0 || h.Score > max {
-			max = h.Score
+		sum += s
+		if i == 0 || s < min {
+			min = s
+		}
+		if i == 0 || s > max {
+			max = s
 		}
 	}
 	if len(hits) > 0 {
@@ -206,17 +214,27 @@ func explainText(ev explainView) string {
 	if ev.NextScore != nil {
 		next = fmt.Sprintf("%.4f", *ev.NextScore)
 	}
-	fmt.Fprintf(&b, "retrieval: %d returned, scores %.4f–%.4f (mean %.4f); next candidate %s\n",
-		len(ev.Returned), ev.Stats.Min, ev.Stats.Max, ev.Stats.Mean, next)
+	// Label the header distribution by the active ordering, matching the per-hit
+	// sim=/rerank= scores and the rerank-based runner-up.
+	scoreLabel := "sim"
+	if len(ev.Returned) > 0 && ev.Returned[0].RerankScore != nil {
+		scoreLabel = "rerank"
+	}
+	fmt.Fprintf(&b, "retrieval: %d returned, %s %.4f–%.4f (mean %.4f); next candidate %s\n",
+		len(ev.Returned), scoreLabel, ev.Stats.Min, ev.Stats.Max, ev.Stats.Mean, next)
 	for i, h := range ev.Returned {
 		label := fmt.Sprintf("%s#%d", shortLabel(h.Source), h.Seq)
+		score := fmt.Sprintf("sim=%.4f", h.Score)
+		if h.RerankScore != nil {
+			score += fmt.Sprintf(" rerank=%.4f", *h.RerankScore)
+		}
 		switch {
 		case h.Cited == nil:
-			fmt.Fprintf(&b, "  [%d] %.4f  %s\n", i+1, h.Score, label)
+			fmt.Fprintf(&b, "  [%d] %s  %s\n", i+1, score, label)
 		case *h.Cited:
-			fmt.Fprintf(&b, "  [%d] %.4f  cited    %s\n", i+1, h.Score, label)
+			fmt.Fprintf(&b, "  [%d] %s  cited    %s\n", i+1, score, label)
 		default:
-			fmt.Fprintf(&b, "  [%d] %.4f  uncited  %s\n", i+1, h.Score, label)
+			fmt.Fprintf(&b, "  [%d] %s  uncited  %s\n", i+1, score, label)
 		}
 	}
 	return b.String()

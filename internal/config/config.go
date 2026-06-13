@@ -23,10 +23,24 @@ import (
 // Config is lore's resolved configuration.
 type Config struct {
 	Provider Provider
+	Rerank   Rerank
 	Storage  Storage
 	Ingest   Ingest
 	Cache    Cache
 	Log      Log
+}
+
+// Rerank configures the cross-encoder rerank provider for two-stage retrieval.
+// It is deliberately separate from Provider: rerank APIs are Cohere-style, not
+// OpenAI-compatible, and are commonly a different vendor (embed with OpenAI,
+// rerank with Cohere/Jina). Empty BaseURL/Model means reranking is unconfigured;
+// requesting it then is a usage error.
+type Rerank struct {
+	BaseURL string
+	APIKey  string
+	Auth    string // "bearer" (default) or "api-key"
+	Model   string
+	Timeout time.Duration
 }
 
 // Cache configures the answer cache: reuse of synthesized ask/synthesize answers
@@ -108,6 +122,7 @@ func Defaults() Config {
 			Auth:       "bearer",
 			Timeout:    DefaultProviderTimeout,
 		},
+		Rerank:  Rerank{Auth: "bearer", Timeout: DefaultProviderTimeout},
 		Storage: Storage{Backend: "sqlite"},
 		Cache:   Cache{TTL: DefaultCacheTTL},
 		Log:     Log{Level: slog.LevelInfo, Format: "text"},
@@ -195,6 +210,13 @@ type fileConfig struct {
 		Backend string `toml:"backend"`
 		Path    string `toml:"path"`
 	} `toml:"storage"`
+	Rerank struct {
+		BaseURL string `toml:"base_url"`
+		APIKey  string `toml:"api_key"`
+		Auth    string `toml:"auth"`
+		Model   string `toml:"model"`
+		Timeout string `toml:"timeout"`
+	} `toml:"rerank"`
 	Ingest struct {
 		Concurrency int `toml:"concurrency"`
 	} `toml:"ingest"`
@@ -223,6 +245,17 @@ func applyFile(cfg *Config, fc fileConfig) error {
 	}
 	setString(&cfg.Storage.Backend, fc.Storage.Backend)
 	setString(&cfg.Storage.Path, fc.Storage.Path)
+	setString(&cfg.Rerank.BaseURL, fc.Rerank.BaseURL)
+	setString(&cfg.Rerank.APIKey, fc.Rerank.APIKey)
+	setString(&cfg.Rerank.Auth, fc.Rerank.Auth)
+	setString(&cfg.Rerank.Model, fc.Rerank.Model)
+	if fc.Rerank.Timeout != "" {
+		d, err := parseTimeout(fc.Rerank.Timeout)
+		if err != nil {
+			return err
+		}
+		cfg.Rerank.Timeout = d
+	}
 	if fc.Ingest.Concurrency != 0 {
 		cfg.Ingest.Concurrency = fc.Ingest.Concurrency
 	}
@@ -271,6 +304,17 @@ func applyEnv(cfg *Config, getenv func(string) string) error {
 			return err
 		}
 		cfg.Provider.Timeout = d
+	}
+	setString(&cfg.Rerank.BaseURL, getenv("LORE_RERANK_BASE_URL"))
+	setString(&cfg.Rerank.APIKey, getenv("LORE_RERANK_API_KEY"))
+	setString(&cfg.Rerank.Auth, getenv("LORE_RERANK_AUTH"))
+	setString(&cfg.Rerank.Model, getenv("LORE_RERANK_MODEL"))
+	if v := getenv("LORE_RERANK_TIMEOUT"); v != "" {
+		d, err := parseTimeout(v)
+		if err != nil {
+			return err
+		}
+		cfg.Rerank.Timeout = d
 	}
 	setString(&cfg.Storage.Backend, getenv("LORE_STORAGE_BACKEND"))
 	setString(&cfg.Storage.Path, getenv("LORE_DB_PATH"))
@@ -388,6 +432,9 @@ func validate(cfg Config) error {
 	}
 	if cfg.Provider.Auth != "bearer" && cfg.Provider.Auth != "api-key" {
 		return fmt.Errorf("config: %w: provider auth %q (want \"bearer\" or \"api-key\")", domain.ErrInvalidArgument, cfg.Provider.Auth)
+	}
+	if cfg.Rerank.Auth != "bearer" && cfg.Rerank.Auth != "api-key" {
+		return fmt.Errorf("config: %w: rerank auth %q (want \"bearer\" or \"api-key\")", domain.ErrInvalidArgument, cfg.Rerank.Auth)
 	}
 	if cfg.Ingest.Concurrency < 0 {
 		return fmt.Errorf("config: %w: ingest concurrency must not be negative, got %d", domain.ErrInvalidArgument, cfg.Ingest.Concurrency)

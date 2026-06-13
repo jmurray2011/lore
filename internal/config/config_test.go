@@ -238,6 +238,39 @@ func TestLoadCache(t *testing.T) {
 	})
 }
 
+func TestLoadRerank(t *testing.T) {
+	d := config.Defaults().Rerank
+	if d.Auth != "bearer" || d.Timeout != config.DefaultProviderTimeout {
+		t.Errorf("rerank defaults wrong: %+v", d)
+	}
+	if d.BaseURL != "" || d.Model != "" {
+		t.Error("rerank must be unconfigured by default (no base URL / model)")
+	}
+
+	t.Run("env populates the rerank block", func(t *testing.T) {
+		cfg, err := config.Load("", env(map[string]string{
+			"LORE_RERANK_BASE_URL": "https://rerank.example/v1",
+			"LORE_RERANK_API_KEY":  "rk",
+			"LORE_RERANK_AUTH":     "api-key",
+			"LORE_RERANK_MODEL":    "rerank-3",
+			"LORE_RERANK_TIMEOUT":  "30s",
+		}))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		r := cfg.Rerank
+		if r.BaseURL != "https://rerank.example/v1" || r.APIKey != "rk" || r.Auth != "api-key" || r.Model != "rerank-3" || r.Timeout != 30*time.Second {
+			t.Errorf("rerank env not applied: %+v", r)
+		}
+	})
+
+	t.Run("invalid rerank auth is ErrInvalidArgument", func(t *testing.T) {
+		if _, err := config.Load("", env(map[string]string{"LORE_RERANK_AUTH": "oauth"})); !errors.Is(err, domain.ErrInvalidArgument) {
+			t.Errorf("want ErrInvalidArgument, got %v", err)
+		}
+	})
+}
+
 func TestDefaultDBPath(t *testing.T) {
 	p, err := config.DefaultDBPath()
 	if err != nil {

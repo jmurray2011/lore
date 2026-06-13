@@ -26,7 +26,10 @@ type Deps struct {
 	Sync    *app.Syncer
 	Query   *app.Querier
 	Ask     *app.Asker
-	Remove  *app.Remover
+	// Rerank is nil when no rerank provider is configured; commands that need it
+	// (rerank, query/ask --rerank) report a usage error in that case.
+	Rerank *app.Reranker
+	Remove *app.Remover
 }
 
 // GlobalOptions are the resolved global flags the composition root needs to
@@ -100,6 +103,7 @@ func NewRootCommand(build Builder, version string, out, errOut io.Writer) *cobra
 		newQueryCmd(&deps),
 		newAskCmd(&deps),
 		newSynthesizeCmd(&deps),
+		newRerankCmd(&deps),
 		newRmCmd(&deps),
 	)
 	return root
@@ -187,7 +191,10 @@ type hitView struct {
 	Source  string  `json:"source"`
 	Seq     int     `json:"seq"`
 	Score   float64 `json:"score"`
-	Text    string  `json:"text"`
+	// RerankScore is present only on hits that went through a reranker; omitempty
+	// keeps the schema additive for query/synthesize consumers that never rerank.
+	RerankScore *float64 `json:"rerank_score,omitempty"`
+	Text        string   `json:"text"`
 }
 
 type chunkView struct {
@@ -227,13 +234,15 @@ type explainView struct {
 	Stats     explainStats `json:"stats"`
 }
 
-// explainHit is one returned chunk in the distribution. Cited is set only for
-// ask (which has an answer to cite from); it is omitted for query.
+// explainHit is one returned chunk in the distribution. RerankScore is set when
+// two-stage retrieval (--rerank) reordered the hits; Cited is set only for ask
+// (which has an answer to cite from). Both are omitted otherwise.
 type explainHit struct {
-	Score  float64 `json:"score"`
-	Source string  `json:"source"`
-	Seq    int     `json:"seq"`
-	Cited  *bool   `json:"cited,omitempty"`
+	Score       float64  `json:"score"`
+	RerankScore *float64 `json:"rerank_score,omitempty"`
+	Source      string   `json:"source"`
+	Seq         int      `json:"seq"`
+	Cited       *bool    `json:"cited,omitempty"`
 }
 
 type explainStats struct {

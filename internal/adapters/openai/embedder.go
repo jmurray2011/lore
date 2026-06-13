@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/jmurray2011/lore/internal/adapters/httpjson"
 	"github.com/jmurray2011/lore/internal/app"
 	"github.com/jmurray2011/lore/internal/domain"
 )
@@ -17,9 +18,9 @@ var _ app.Embedder = (*Embedder)(nil)
 // endpoint. Its EmbeddingSpace (model + dimensions) is fixed at construction so
 // Space is a cheap, network-free check the use cases can run before any work.
 type Embedder struct {
-	client
-	model string
-	space domain.EmbeddingSpace
+	client *httpjson.Client
+	model  string
+	space  domain.EmbeddingSpace
 }
 
 // NewEmbedder constructs an Embedder. dimensions pins the space the operator
@@ -35,7 +36,7 @@ func NewEmbedder(baseURL, apiKey, model string, dimensions int, auth AuthStyle, 
 		return nil, err
 	}
 	return &Embedder{
-		client: newClient(baseURL, apiKey, auth, httpClient),
+		client: httpjson.NewClient(baseURL, apiKey, auth, httpClient),
 		model:  model,
 		space:  space,
 	}, nil
@@ -67,7 +68,7 @@ func (e *Embedder) Embed(ctx context.Context, texts []string) ([][]float32, erro
 	}
 
 	var resp embeddingsResponse
-	if err := e.post(ctx, "/embeddings", embeddingsRequest{Model: e.model, Input: texts}, &resp); err != nil {
+	if err := e.client.Post(ctx, "/embeddings", embeddingsRequest{Model: e.model, Input: texts}, &resp); err != nil {
 		return nil, err
 	}
 	if len(resp.Data) != len(texts) {

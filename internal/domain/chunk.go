@@ -66,12 +66,16 @@ type VectorMatch struct {
 	Score   float64
 }
 
-// ChunkHit is a hydrated retrieval result: the chunk itself, its score, and the
-// URI of the source document it came from (provenance for display and citation).
+// ChunkHit is a hydrated retrieval result: the chunk itself, its similarity
+// score, and the URI of the source document it came from (provenance for display
+// and citation). RerankScore is set only after a cross-encoder rerank — nil
+// means the hit was never reranked, so it serializes additively (rerank_score
+// omitted) and the original Score is always preserved alongside it.
 type ChunkHit struct {
-	Chunk  Chunk
-	Score  float64
-	Source string // source URI of the chunk's document
+	Chunk       Chunk
+	Score       float64
+	Source      string // source URI of the chunk's document
+	RerankScore *float64
 }
 
 // Citation references a chunk an answer was grounded in, carrying the provenance

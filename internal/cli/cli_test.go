@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -57,6 +58,31 @@ func (s stubGenerator) Synthesize(_ context.Context, _ string, hits []domain.Chu
 		cites[i] = domain.Citation{ChunkID: hits[i].Chunk.ID, Source: hits[i].Source, Seq: hits[i].Chunk.Seq}
 	}
 	return app.Answer{Text: s.text, Citations: cites}, nil
+}
+
+// stubRerankProvider reverses the input order (last document = most relevant,
+// descending scores), so reranking is visibly distinct from vector order.
+type stubRerankProvider struct {
+	err    error
+	called bool
+}
+
+func (s *stubRerankProvider) Rerank(_ context.Context, _ string, docs []string, _ int) ([]app.RankResult, error) {
+	s.called = true
+	if s.err != nil {
+		return nil, s.err
+	}
+	out := make([]app.RankResult, len(docs))
+	for i := range docs {
+		out[i] = app.RankResult{Index: len(docs) - 1 - i, Score: float64(len(docs) - i)}
+	}
+	return out, nil
+}
+
+// withReranker attaches a Reranker use case (over prov) to deps.
+func withReranker(deps cli.Deps, prov app.RerankProvider) cli.Deps {
+	deps.Rerank = app.NewReranker(prov)
+	return deps
 }
 
 func newDeps(emb app.Embedder, gen app.Generator) (cli.Deps, *memstore.CollectionRepository, *memstore.DocumentRepository, *memstore.VectorIndex) {
@@ -1483,6 +1509,241 @@ func TestCLIRemoveChunk(t *testing.T) {
 	})
 }
 
+func TestCLIRerankCommand(t *testing.T) {
+	qvec := []float32{1, 0, 0}
+	// Two hits as the `query --json` array would carry them.
+	stdin := `[{"chunk_id":"aaaa:0","source":"file:///a.md","seq":0,"score":0.9,"text":"alpha"},` +
+		`{"chunk_id":"bbbb:0","source":"file:///b.md","seq":0,"score":0.2,"text":"beta"}]`
+
+	t.Run("reorders stdin hits by rerank score and adds rerank_score", func(t *testing.T) {
+		deps := withReranker(mustInitDeps(t, qvec), &stubRerankProvider{})
+		out, code := execStdin(deps, stdin, "rerank", "the query", "--json")
+		if code != 0 {
+			t.Fatalf("exit %d, out %q", code, out)
+		}
+		var hits []hitViewJSON
+		if err := json.Unmarshal([]byte(out), &hits); err != nil {
+			t.Fatalf("bad JSON %q: %v", out, err)
+		}
+		// Stub reverses input order: beta first now, alpha second.
+		if len(hits) != 2 || hits[0].ChunkID != "bbbb:0" || hits[1].ChunkID != "aaaa:0" {
+			t.Errorf("rerank did not reorder: %+v", hits)
+		}
+		if hits[0].RerankScore == nil || *hits[0].RerankScore <= *hits[1].RerankScore {
+			t.Errorf("rerank_score missing or not descending: %+v", hits)
+		}
+		// Original similarity score preserved alongside.
+		if hits[0].Score != 0.2 {
+			t.Errorf("similarity score lost: %v", hits[0].Score)
+		}
+	})
+
+	t.Run("-n truncates after reranking", func(t *testing.T) {
+		deps := withReranker(mustInitDeps(t, qvec), &stubRerankProvider{})
+		out, code := execStdin(deps, stdin, "rerank", "q", "-n", "1", "--json")
+		if code != 0 {
+			t.Fatalf("exit %d", code)
+		}
+		var hits []hitViewJSON
+		if err := json.Unmarshal([]byte(out), &hits); err != nil {
+			t.Fatal(err)
+		}
+		if len(hits) != 1 || hits[0].ChunkID != "bbbb:0" {
+			t.Errorf("want top-1 after rerank (beta), got %+v", hits)
+		}
+	})
+
+	t.Run("empty stdin yields empty output, exit 0, no provider call", func(t *testing.T) {
+		prov := &stubRerankProvider{}
+		deps := withReranker(mustInitDeps(t, qvec), prov)
+		out, code := execStdin(deps, "", "rerank", "q", "--json")
+		if code != 0 {
+			t.Fatalf("exit %d", code)
+		}
+		if strings.TrimSpace(out) != "[]" {
+			t.Errorf("want empty array, got %q", out)
+		}
+		if prov.called {
+			t.Error("provider must not be called for empty input")
+		}
+	})
+
+	t.Run("malformed stdin is a usage error", func(t *testing.T) {
+		deps := withReranker(mustInitDeps(t, qvec), &stubRerankProvider{})
+		if _, code := execStdin(deps, "{not valid", "rerank", "q"); code != 2 {
+			t.Errorf("want exit 2, got %d", code)
+		}
+	})
+
+	t.Run("unconfigured rerank provider is a usage error", func(t *testing.T) {
+		deps := mustInitDeps(t, qvec) // no reranker wired
+		if _, code := execStdin(deps, stdin, "rerank", "q"); code != 2 {
+			t.Errorf("want exit 2, got %d", code)
+		}
+	})
+
+	t.Run("provider failure exits 1 with nothing on stdout", func(t *testing.T) {
+		deps := withReranker(mustInitDeps(t, qvec), &stubRerankProvider{err: errors.New("rerank 500")})
+		out, code := execStdin(deps, stdin, "rerank", "q", "--json")
+		if code != 1 {
+			t.Errorf("want exit 1, got %d", code)
+		}
+		if strings.TrimSpace(out) != "" {
+			t.Errorf("stdout must be empty on failure, got %q", out)
+		}
+	})
+}
+
+func TestCLIQueryRerank(t *testing.T) {
+	qvec := []float32{1, 0, 0}
+
+	// alpha cosine-matches the query (high sim); beta is orthogonal (low sim).
+	seed := func(t *testing.T, prov app.RerankProvider) cli.Deps {
+		t.Helper()
+		deps, _, docs, index := newDeps(stubEmbedder{space: testSpace(), vec: qvec}, stubGenerator{})
+		if _, code := exec(deps, "init", "docs"); code != 0 {
+			t.Fatal("init failed")
+		}
+		ctx := context.Background()
+		for i, spec := range []struct {
+			body string
+			vec  []float32
+		}{
+			{"alpha chunk body", []float32{1, 0, 0}},
+			{"beta chunk body", []float32{0, 1, 0}},
+		} {
+			uri := fmt.Sprintf("file:///d%d.md", i)
+			did := domain.DeriveDocumentID("docs", uri)
+			doc, _ := domain.NewDocument("docs", uri, domain.HashContent([]byte(uri)), time.Now())
+			ch, _ := domain.NewChunk(did, 0, spec.body)
+			if err := docs.Upsert(ctx, doc, []domain.Chunk{ch}); err != nil {
+				t.Fatal(err)
+			}
+			if err := index.Upsert(ctx, "docs", []app.VectorEntry{{ChunkID: ch.ID, Vector: spec.vec}}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if prov != nil {
+			deps = withReranker(deps, prov)
+		}
+		return deps
+	}
+
+	t.Run("two-stage: retrieves the pool, reranks, returns -k reordered", func(t *testing.T) {
+		deps := seed(t, &stubRerankProvider{}) // reverses vector order
+		out, code := exec(deps, "query", "docs", "anything", "-k", "1", "--rerank", "--json")
+		if code != 0 {
+			t.Fatalf("exit %d, out %q", code, out)
+		}
+		var hits []hitViewJSON
+		if err := json.Unmarshal([]byte(out), &hits); err != nil {
+			t.Fatal(err)
+		}
+		// Vector order would return d0 (alpha); rerank reverses, so the top-1 is d1.
+		if len(hits) != 1 || !strings.Contains(hits[0].Source, "d1.md") {
+			t.Errorf("rerank should reorder the vector result: %+v", hits)
+		}
+		if hits[0].RerankScore == nil {
+			t.Errorf("reranked hit should carry rerank_score: %+v", hits[0])
+		}
+	})
+
+	t.Run("--rerank-candidates < -k is a usage error", func(t *testing.T) {
+		deps := seed(t, &stubRerankProvider{})
+		if _, code := exec(deps, "query", "docs", "q", "-k", "5", "--rerank", "--rerank-candidates", "2"); code != 2 {
+			t.Errorf("want exit 2, got %d", code)
+		}
+	})
+
+	t.Run("unconfigured rerank provider is a usage error", func(t *testing.T) {
+		deps := seed(t, nil) // no reranker
+		if _, code := exec(deps, "query", "docs", "q", "--rerank"); code != 2 {
+			t.Errorf("want exit 2, got %d", code)
+		}
+	})
+
+	t.Run("--explain over --rerank shows rerank scores on stderr", func(t *testing.T) {
+		deps := seed(t, &stubRerankProvider{})
+		_, errOut, code := execErr(deps, "query", "docs", "anything", "-k", "1", "--rerank", "--explain")
+		if code != 0 {
+			t.Fatalf("exit %d", code)
+		}
+		if !strings.Contains(errOut, "rerank=") {
+			t.Errorf("explain over rerank should show rerank scores:\n%s", errOut)
+		}
+	})
+}
+
+func TestCLIAskRerank(t *testing.T) {
+	qvec := []float32{1, 0, 0}
+	seed := func(t *testing.T) cli.Deps {
+		t.Helper()
+		deps, _, docs, index := newDeps(stubEmbedder{space: testSpace(), vec: qvec}, stubGenerator{text: "the answer"})
+		if _, code := exec(deps, "init", "docs"); code != 0 {
+			t.Fatal("init failed")
+		}
+		ctx := context.Background()
+		doc, _ := domain.NewDocument("docs", "file:///a.md", domain.HashContent([]byte("x")), time.Now())
+		chunk, _ := domain.NewChunk(doc.ID, 0, "the grounded answer")
+		if err := docs.Upsert(ctx, doc, []domain.Chunk{chunk}); err != nil {
+			t.Fatal(err)
+		}
+		if err := index.Upsert(ctx, "docs", []app.VectorEntry{{ChunkID: chunk.ID, Vector: qvec}}); err != nil {
+			t.Fatal(err)
+		}
+		return withReranker(deps, &stubRerankProvider{})
+	}
+
+	t.Run("two-stage retrieval feeds synthesis", func(t *testing.T) {
+		deps := seed(t)
+		out, code := exec(deps, "ask", "docs", "why?", "-k", "1", "--rerank", "--json")
+		if code != 0 {
+			t.Fatalf("exit %d, out %q", code, out)
+		}
+		var ans answerViewJSON
+		if err := json.Unmarshal([]byte(out), &ans); err != nil {
+			t.Fatal(err)
+		}
+		if ans.Text != "the answer" || !ans.Grounded || len(ans.Citations) != 1 {
+			t.Errorf("rerank ask answer wrong: %+v", ans)
+		}
+	})
+
+	t.Run("composes with --explain (rerank scores in the answer's explain)", func(t *testing.T) {
+		deps := seed(t)
+		out, code := exec(deps, "ask", "docs", "why?", "-k", "1", "--rerank", "--explain", "--json")
+		if code != 0 {
+			t.Fatalf("exit %d, out %q", code, out)
+		}
+		var ans answerViewJSON
+		if err := json.Unmarshal([]byte(out), &ans); err != nil {
+			t.Fatal(err)
+		}
+		if ans.Explain == nil || len(ans.Explain.Returned) != 1 || ans.Explain.Returned[0].RerankScore == nil {
+			t.Errorf("explain should carry a rerank score: %+v", ans.Explain)
+		}
+	})
+
+	t.Run("unconfigured rerank provider is a usage error", func(t *testing.T) {
+		deps, _, _, _ := newDeps(stubEmbedder{space: testSpace(), vec: qvec}, stubGenerator{text: "x"})
+		exec(deps, "init", "docs")
+		if _, code := exec(deps, "ask", "docs", "q", "--rerank"); code != 2 {
+			t.Errorf("want exit 2, got %d", code)
+		}
+	})
+}
+
+// mustInitDeps builds deps with an initialized "docs" collection, for rerank
+// command tests that only need stdin hits (no seeded vectors).
+func mustInitDeps(t *testing.T, qvec []float32) cli.Deps {
+	t.Helper()
+	deps, _, _, _ := newDeps(stubEmbedder{space: testSpace(), vec: qvec}, stubGenerator{})
+	if _, code := exec(deps, "init", "docs"); code != 0 {
+		t.Fatal("init failed")
+	}
+	return deps
+}
+
 // Mirror of the CLI's JSON output shapes, for decoding in tests.
 type collectionViewJSON struct {
 	Name       string `json:"name"`
@@ -1522,11 +1783,12 @@ type chunkViewJSON struct {
 }
 
 type hitViewJSON struct {
-	ChunkID string  `json:"chunk_id"`
-	Source  string  `json:"source"`
-	Seq     int     `json:"seq"`
-	Score   float64 `json:"score"`
-	Text    string  `json:"text"`
+	ChunkID     string   `json:"chunk_id"`
+	Source      string   `json:"source"`
+	Seq         int      `json:"seq"`
+	Score       float64  `json:"score"`
+	RerankScore *float64 `json:"rerank_score"`
+	Text        string   `json:"text"`
 }
 
 type answerViewJSON struct {
@@ -1543,10 +1805,11 @@ type answerViewJSON struct {
 
 type explainViewJSON struct {
 	Returned []struct {
-		Score  float64 `json:"score"`
-		Source string  `json:"source"`
-		Seq    int     `json:"seq"`
-		Cited  *bool   `json:"cited"`
+		Score       float64  `json:"score"`
+		RerankScore *float64 `json:"rerank_score"`
+		Source      string   `json:"source"`
+		Seq         int      `json:"seq"`
+		Cited       *bool    `json:"cited"`
 	} `json:"returned"`
 	NextScore *float64 `json:"next_score"`
 	Stats     struct {
