@@ -76,18 +76,27 @@ func ExitCode(err error) int {
 	}
 }
 
-// render writes v as indented JSON when --json is set, otherwise the human text.
-func render(cmd *cobra.Command, jsonValue any, human string) error {
+// render writes v as indented JSON when --json is set; otherwise it treats the
+// human string as Markdown — glamour-rendered for an interactive terminal, or
+// emitted raw (clean for pipes, tests, and --no-color).
+func render(cmd *cobra.Command, jsonValue any, markdown string) error {
 	w := cmd.OutOrStdout()
 	if asJSON, _ := cmd.Flags().GetBool("json"); asJSON {
 		enc := json.NewEncoder(w)
 		enc.SetIndent("", "  ")
 		return enc.Encode(jsonValue)
 	}
-	if human == "" {
+	if markdown == "" {
 		return nil
 	}
-	_, err := fmt.Fprintln(w, human)
+	if richEnabled(cmd) {
+		if out, err := renderMarkdown(w, markdown); err == nil {
+			_, err := io.WriteString(w, out)
+			return err
+		}
+		// Fall through to raw Markdown if glamour fails for any reason.
+	}
+	_, err := fmt.Fprintln(w, markdown)
 	return err
 }
 

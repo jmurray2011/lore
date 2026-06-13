@@ -25,19 +25,14 @@ func newQueryCmd(deps Deps) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			st := styleForCmd(cmd)
 			views := make([]hitView, len(hits))
 			var b strings.Builder
 			for i, h := range hits {
 				views[i] = hitView{ChunkID: string(h.Chunk.ID), Source: h.Source, Seq: h.Chunk.Seq, Score: h.Score, Text: h.Chunk.Text}
 				if i > 0 {
-					b.WriteString("\n")
+					b.WriteString("\n---\n\n")
 				}
-				fmt.Fprintf(&b, "%s %s  %s\n    %s\n",
-					st.cyan(fmt.Sprintf("[%d]", i+1)),
-					st.green(fmt.Sprintf("%.4f", h.Score)),
-					st.bold(hitLabel(h)),
-					h.Chunk.Text)
+				fmt.Fprintf(&b, "**[%d]**  %s  ·  `%.4f`\n\n%s\n", i+1, hitLabel(h), h.Score, h.Chunk.Text)
 			}
 			return render(cmd, views, strings.TrimRight(b.String(), "\n"))
 		},
@@ -70,7 +65,7 @@ func newAskCmd(deps Deps) *cobra.Command {
 			for i, c := range ans.Citations {
 				citations[i] = citationView{ChunkID: string(c.ChunkID), Source: c.Source, Seq: c.Seq}
 			}
-			return render(cmd, answerView{Text: ans.Text, Citations: citations}, styleForCmd(cmd).answer(ans))
+			return render(cmd, answerView{Text: ans.Text, Citations: citations}, answerMarkdown(ans))
 		},
 	}
 	cmd.Flags().IntVarP(&k, "top-k", "k", 8, "number of chunks to ground on (0 to ground on attachments only)")
