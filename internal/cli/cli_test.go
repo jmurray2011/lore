@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -77,7 +78,7 @@ func newDeps(emb app.Embedder, gen app.Generator) (cli.Deps, *memstore.Collectio
 // exec runs one command with a fresh root (clean flag state) over shared deps.
 func exec(deps cli.Deps, args ...string) (string, int) {
 	var out bytes.Buffer
-	root := cli.NewRootCommand(deps, "test", &out, io.Discard)
+	root := cli.NewRootCommand(depsBuilder(deps), "test", &out, io.Discard)
 	root.SetArgs(args)
 	code := cli.ExitCode(root.Execute())
 	return out.String(), code
@@ -85,6 +86,48 @@ func exec(deps cli.Deps, args ...string) (string, int) {
 
 func testSpace() domain.EmbeddingSpace {
 	return domain.EmbeddingSpace{Model: "test-embed", Dimensions: 3}
+}
+
+func TestRootBuildsDepsFromGlobalFlags(t *testing.T) {
+	deps, _, _, _ := newDeps(stubEmbedder{space: testSpace()}, stubGenerator{})
+	var got cli.GlobalOptions
+	build := func(_ context.Context, opts cli.GlobalOptions) (cli.Deps, error) {
+		got = opts
+		return deps, nil
+	}
+	var out bytes.Buffer
+	root := cli.NewRootCommand(build, "test", &out, io.Discard)
+	root.SetArgs([]string{"--config", "/tmp/x.toml", "--log-level", "debug", "--log-format", "json", "-v", "ls"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if got.ConfigPath != "/tmp/x.toml" {
+		t.Errorf("ConfigPath = %q, want /tmp/x.toml", got.ConfigPath)
+	}
+	if got.LogLevel != "debug" || got.LogFormat != "json" {
+		t.Errorf("log opts = %+v", got)
+	}
+	if !got.Verbose {
+		t.Error("Verbose should be true with -v")
+	}
+}
+
+func TestRootBuildErrorPropagates(t *testing.T) {
+	build := func(context.Context, cli.GlobalOptions) (cli.Deps, error) {
+		return cli.Deps{}, fmt.Errorf("%w: bad config", domain.ErrInvalidArgument)
+	}
+	var out bytes.Buffer
+	root := cli.NewRootCommand(build, "test", &out, io.Discard)
+	root.SetArgs([]string{"ls"})
+	if code := cli.ExitCode(root.Execute()); code != 2 {
+		t.Errorf("build error should surface as exit 2, got %d", code)
+	}
+}
+
+// depsBuilder wraps already-built deps in a Builder for tests that don't care
+// about config resolution.
+func depsBuilder(deps cli.Deps) cli.Builder {
+	return func(context.Context, cli.GlobalOptions) (cli.Deps, error) { return deps, nil }
 }
 
 func TestCLICollectionLifecycle(t *testing.T) {

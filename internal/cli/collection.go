@@ -11,7 +11,7 @@ import (
 	"github.com/jmurray2011/lore/internal/domain"
 )
 
-func newInitCmd(deps Deps) *cobra.Command {
+func newInitCmd(deps *Deps) *cobra.Command {
 	return &cobra.Command{
 		Use:   "init <collection>",
 		Short: "Create a collection, pinned to the configured embedding space",
@@ -28,7 +28,7 @@ func newInitCmd(deps Deps) *cobra.Command {
 	}
 }
 
-func newLsCmd(deps Deps) *cobra.Command {
+func newLsCmd(deps *Deps) *cobra.Command {
 	return &cobra.Command{
 		Use:   "ls",
 		Short: "List collections",
@@ -52,7 +52,7 @@ func newLsCmd(deps Deps) *cobra.Command {
 	}
 }
 
-func newRmCmd(deps Deps) *cobra.Command {
+func newRmCmd(deps *Deps) *cobra.Command {
 	var docURI string
 	cmd := &cobra.Command{
 		Use:   "rm <collection>",
@@ -81,7 +81,7 @@ func newRmCmd(deps Deps) *cobra.Command {
 	return cmd
 }
 
-func newDocsCmd(deps Deps) *cobra.Command {
+func newDocsCmd(deps *Deps) *cobra.Command {
 	return &cobra.Command{
 		Use:   "docs <collection>",
 		Short: "List the documents ingested into a collection",
@@ -113,7 +113,7 @@ func newDocsCmd(deps Deps) *cobra.Command {
 	}
 }
 
-func newStatusCmd(deps Deps) *cobra.Command {
+func newStatusCmd(deps *Deps) *cobra.Command {
 	return &cobra.Command{
 		Use:   "status <collection>",
 		Short: "Show a collection's details",

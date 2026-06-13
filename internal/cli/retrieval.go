@@ -12,7 +12,7 @@ import (
 	"github.com/jmurray2011/lore/internal/domain"
 )
 
-func newQueryCmd(deps Deps) *cobra.Command {
+func newQueryCmd(deps *Deps) *cobra.Command {
 	var k int
 	cmd := &cobra.Command{
 		Use:   "query <collection> <query>",
@@ -41,7 +41,7 @@ func newQueryCmd(deps Deps) *cobra.Command {
 	return cmd
 }
 
-func newAskCmd(deps Deps) *cobra.Command {
+func newAskCmd(deps *Deps) *cobra.Command {
 	var (
 		k      int
 		attach []string

@@ -98,6 +98,15 @@ config file is TOML at `<user-config-dir>/lore/config.toml`.
 | `LORE_LOG_LEVEL` | `log.level` | `info` | `debug`/`info`/`warn`/`error` |
 | `LORE_LOG_FORMAT` | `log.format` | `text` | `text` or `json` |
 
+Global flags override env, file, and defaults for the current command:
+
+| Flag | Overrides | Meaning |
+|---|---|---|
+| `--config <path>` | — | read this TOML file instead of the default location |
+| `--log-level <level>` | `log.level` | `debug`/`info`/`warn`/`error` |
+| `--log-format <fmt>` | `log.format` | `text` or `json` |
+| `-v`, `--verbose` | `log.level` | shorthand for `--log-level debug` |
+
 The transient `429`/`503` responses of rate-limited providers are retried
 automatically (honoring `Retry-After`).
 

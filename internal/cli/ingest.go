@@ -22,7 +22,7 @@ type syncView struct {
 	Pruned  int `json:"pruned"`
 }
 
-func newAddCmd(deps Deps) *cobra.Command {
+func newAddCmd(deps *Deps) *cobra.Command {
 	return &cobra.Command{
 		Use:   "add <collection> <path>...",
 		Short: "Ingest files into a collection (idempotent)",
@@ -50,7 +50,7 @@ func newAddCmd(deps Deps) *cobra.Command {
 	}
 }
 
-func newSyncCmd(deps Deps) *cobra.Command {
+func newSyncCmd(deps *Deps) *cobra.Command {
 	var prune bool
 	cmd := &cobra.Command{
 		Use:   "sync <collection> [path]...",

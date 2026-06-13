@@ -228,6 +228,86 @@ func TestLoadInvalidIsErrInvalidArgument(t *testing.T) {
 	}
 }
 
+func TestResolveFlagsOutrankEnvAndFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	content := `
+[log]
+level = "warn"
+format = "json"
+`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// File says warn/json, env says debug/json, flags say error/text.
+	// Flags rank highest, so the result must be error/text.
+	flags := config.FlagOverrides{LogLevel: "error", LogFormat: "text"}
+	cfg, err := config.Resolve(path, env(map[string]string{
+		"LORE_LOG_LEVEL":  "debug",
+		"LORE_LOG_FORMAT": "json",
+	}), flags)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if cfg.Log.Level != slog.LevelError {
+		t.Errorf("flag level must beat env and file: got %v", cfg.Log.Level)
+	}
+	if cfg.Log.Format != "text" {
+		t.Errorf("flag format must beat env and file: got %q", cfg.Log.Format)
+	}
+}
+
+func TestResolveVerboseForcesDebug(t *testing.T) {
+	cfg, err := config.Resolve("", env(nil), config.FlagOverrides{Verbose: true})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if cfg.Log.Level != slog.LevelDebug {
+		t.Errorf("--verbose should force debug, got %v", cfg.Log.Level)
+	}
+}
+
+func TestResolveExplicitLevelBeatsVerbose(t *testing.T) {
+	cfg, err := config.Resolve("", env(nil), config.FlagOverrides{LogLevel: "warn", Verbose: true})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if cfg.Log.Level != slog.LevelWarn {
+		t.Errorf("explicit --log-level should beat --verbose, got %v", cfg.Log.Level)
+	}
+}
+
+func TestResolveInvalidFlagIsErrInvalidArgument(t *testing.T) {
+	cases := []struct {
+		name  string
+		flags config.FlagOverrides
+	}{
+		{"bad level", config.FlagOverrides{LogLevel: "loud"}},
+		{"bad format", config.FlagOverrides{LogFormat: "yaml"}},
+	}
+	for _, c := range cases {
+		if _, err := config.Resolve("", env(nil), c.flags); !errors.Is(err, domain.ErrInvalidArgument) {
+			t.Errorf("%s: want ErrInvalidArgument, got %v", c.name, err)
+		}
+	}
+}
+
+func TestLoadIsResolveWithoutFlags(t *testing.T) {
+	// Load must remain equivalent to Resolve with empty overrides so existing
+	// callers and tests are unaffected.
+	got, err := config.Load("", env(map[string]string{"LORE_LOG_LEVEL": "warn"}))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want, err := config.Resolve("", env(map[string]string{"LORE_LOG_LEVEL": "warn"}), config.FlagOverrides{})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if got != want {
+		t.Errorf("Load %+v != Resolve %+v", got, want)
+	}
+}
+
 func TestNewLogger(t *testing.T) {
 	t.Run("json handler respects level", func(t *testing.T) {
 		var buf bytes.Buffer

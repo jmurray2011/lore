@@ -87,10 +87,27 @@ func Defaults() Config {
 	}
 }
 
+// FlagOverrides carries the command-line flag values that outrank env and file
+// in the precedence chain. A zero field means "not set on the command line" and
+// is left untouched; Verbose is the exception — when true it forces debug level,
+// but an explicit LogLevel still beats it.
+type FlagOverrides struct {
+	LogLevel  string // "" = unset; e.g. "debug", "info", "warn", "error"
+	LogFormat string // "" = unset; "text" or "json"
+	Verbose   bool   // true forces debug level unless LogLevel is set
+}
+
 // Load builds a Config from defaults, then the TOML file at path (skipped when
 // path is empty or the file is absent), then LORE_* variables read via getenv.
-// Flag overrides, which rank highest, are applied by the caller.
+// It is Resolve with no flag overrides.
 func Load(path string, getenv func(string) string) (Config, error) {
+	return Resolve(path, getenv, FlagOverrides{})
+}
+
+// Resolve builds a Config with the full precedence chain flags > env > file >
+// defaults: defaults, then the TOML file at path, then LORE_* variables, then
+// the command-line flag overrides (highest), validating the result.
+func Resolve(path string, getenv func(string) string, flags FlagOverrides) (Config, error) {
 	cfg := Defaults()
 
 	if path != "" {
@@ -110,10 +127,28 @@ func Load(path string, getenv func(string) string) (Config, error) {
 	if err := applyEnv(&cfg, getenv); err != nil {
 		return Config{}, err
 	}
+	if err := applyFlags(&cfg, flags); err != nil {
+		return Config{}, err
+	}
 	if err := validate(cfg); err != nil {
 		return Config{}, err
 	}
 	return cfg, nil
+}
+
+func applyFlags(cfg *Config, flags FlagOverrides) error {
+	setString(&cfg.Log.Format, flags.LogFormat)
+	switch {
+	case flags.LogLevel != "":
+		lvl, err := parseLevel(flags.LogLevel)
+		if err != nil {
+			return err
+		}
+		cfg.Log.Level = lvl
+	case flags.Verbose:
+		cfg.Log.Level = slog.LevelDebug
+	}
+	return nil
 }
 
 type fileConfig struct {

@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -45,63 +46,89 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return cli.ExitCode(err)
 	}
 
-	path, _ := config.DefaultPath()
-	cfg, err := config.Load(path, os.Getenv)
-	if err != nil {
-		return fail(err)
-	}
-	logger := config.NewLogger(cfg.Log, stderr)
+	// cleanup and logger are populated by build (invoked in PersistentPreRunE)
+	// once config is resolved. cleanup is deferred here so the store closes even
+	// when a command fails, which cobra's PostRun hooks would skip.
+	var (
+		cleanup func() error
+		logger  *slog.Logger
+	)
+	defer func() {
+		if cleanup != nil {
+			_ = cleanup()
+		}
+	}()
 
-	store, err := openStorage(cfg.Storage)
-	if err != nil {
-		return fail(err)
-	}
-	defer func() { _ = store.close() }()
+	defaultPath, _ := config.DefaultPath()
 
-	auth := openai.AuthBearer
-	if cfg.Provider.Auth == "api-key" {
-		auth = openai.AuthAPIKey
+	build := func(_ context.Context, opts cli.GlobalOptions) (cli.Deps, error) {
+		path := defaultPath
+		if opts.ConfigPath != "" {
+			path = opts.ConfigPath
+		}
+		cfg, err := config.Resolve(path, os.Getenv, config.FlagOverrides{
+			LogLevel:  opts.LogLevel,
+			LogFormat: opts.LogFormat,
+			Verbose:   opts.Verbose,
+		})
+		if err != nil {
+			return cli.Deps{}, err
+		}
+		logger = config.NewLogger(cfg.Log, stderr)
+
+		store, err := openStorage(cfg.Storage)
+		if err != nil {
+			return cli.Deps{}, err
+		}
+		cleanup = store.close
+
+		auth := openai.AuthBearer
+		if cfg.Provider.Auth == "api-key" {
+			auth = openai.AuthAPIKey
+		}
+
+		embedder, err := openai.NewEmbedder(cfg.Provider.BaseURL, cfg.Provider.APIKey, cfg.Provider.EmbedModel, cfg.Provider.Dimensions, auth, nil)
+		if err != nil {
+			return cli.Deps{}, err
+		}
+		caps := openai.Capabilities{
+			StructuredOutput: cfg.Provider.StructuredOutput,
+			ImageInput:       cfg.Provider.ImageInput,
+			DocumentInput:    cfg.Provider.DocumentInput,
+		}
+		generator, err := openai.NewGenerator(cfg.Provider.BaseURL, cfg.Provider.APIKey, cfg.Provider.ChatModel, caps, auth, nil)
+		if err != nil {
+			return cli.Deps{}, err
+		}
+
+		chunker, err := domain.NewChunker(domain.DefaultChunkSize, domain.DefaultChunkOverlap)
+		if err != nil {
+			return cli.Deps{}, err
+		}
+
+		extractor := extract.NewRouter(extract.New(), docx.New(), pdf.New(), xlsx.New())
+		source := fs.NewSource()
+
+		catalog := app.NewCatalog(store.collections, store.docs, embedder)
+		ingestor := app.NewIngestor(store.collections, store.docs, store.index, embedder, extractor, source, chunker, app.WithConcurrency(cfg.Ingest.Concurrency))
+		querier := app.NewQuerier(store.collections, store.index, store.docs, embedder)
+		remover := app.NewRemover(store.collections, store.docs, store.index)
+		return cli.Deps{
+			Catalog: catalog,
+			Ingest:  ingestor,
+			Sync:    app.NewSyncer(catalog, ingestor, remover, source),
+			Query:   querier,
+			Ask:     app.NewAsker(querier, generator),
+			Remove:  remover,
+		}, nil
 	}
 
-	embedder, err := openai.NewEmbedder(cfg.Provider.BaseURL, cfg.Provider.APIKey, cfg.Provider.EmbedModel, cfg.Provider.Dimensions, auth, nil)
-	if err != nil {
-		return fail(err)
-	}
-	caps := openai.Capabilities{
-		StructuredOutput: cfg.Provider.StructuredOutput,
-		ImageInput:       cfg.Provider.ImageInput,
-		DocumentInput:    cfg.Provider.DocumentInput,
-	}
-	generator, err := openai.NewGenerator(cfg.Provider.BaseURL, cfg.Provider.APIKey, cfg.Provider.ChatModel, caps, auth, nil)
-	if err != nil {
-		return fail(err)
-	}
-
-	chunker, err := domain.NewChunker(domain.DefaultChunkSize, domain.DefaultChunkOverlap)
-	if err != nil {
-		return fail(err)
-	}
-
-	extractor := extract.NewRouter(extract.New(), docx.New(), pdf.New(), xlsx.New())
-	source := fs.NewSource()
-
-	catalog := app.NewCatalog(store.collections, store.docs, embedder)
-	ingestor := app.NewIngestor(store.collections, store.docs, store.index, embedder, extractor, source, chunker, app.WithConcurrency(cfg.Ingest.Concurrency))
-	querier := app.NewQuerier(store.collections, store.index, store.docs, embedder)
-	remover := app.NewRemover(store.collections, store.docs, store.index)
-	deps := cli.Deps{
-		Catalog: catalog,
-		Ingest:  ingestor,
-		Sync:    app.NewSyncer(catalog, ingestor, remover, source),
-		Query:   querier,
-		Ask:     app.NewAsker(querier, generator),
-		Remove:  remover,
-	}
-
-	root := cli.NewRootCommand(deps, fmt.Sprintf("%s (commit %s, built %s)", version, commit, date), stdout, stderr)
+	root := cli.NewRootCommand(build, fmt.Sprintf("%s (commit %s, built %s)", version, commit, date), stdout, stderr)
 	root.SetArgs(args)
 	if err := root.ExecuteContext(ctx); err != nil {
-		logger.Debug("command failed", "err", err)
+		if logger != nil {
+			logger.Debug("command failed", "err", err)
+		}
 		return fail(err)
 	}
 	return 0
