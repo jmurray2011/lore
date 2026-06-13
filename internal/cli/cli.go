@@ -41,6 +41,7 @@ func NewRootCommand(deps Deps, version string, out, errOut io.Writer) *cobra.Com
 	root.SetOut(out)
 	root.SetErr(errOut)
 	root.PersistentFlags().Bool("json", false, "emit machine-readable JSON to stdout")
+	root.PersistentFlags().Bool("no-color", false, "disable ANSI color in human output")
 	root.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
 		return fmt.Errorf("%w: %v", domain.ErrInvalidArgument, err)
 	})
