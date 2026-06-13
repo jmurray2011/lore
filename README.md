@@ -96,12 +96,24 @@ lore cat notes --chunk 3f2a…9c --json        # same {chunk_id, seq, text} shap
 # numbered with the same [n] the answer used
 lore ask notes "what is our key rotation policy?" --expand
 lore ask notes "…" --expand --json           # answer object gains an "expansions": [...] array
+
+# explain why the answer looks the way it does: list the chunks that grounded
+# it, their similarity scores, and which the answer cited
+lore ask notes "what is our key rotation policy?" --explain
+lore ask notes "…" --explain --json           # answer object gains a "retrieval": [...] array
 ```
+
+When an answer disappoints, `--explain` tells you which failure you're looking
+at: uniformly low scores mean retrieval found nothing relevant (raise `-k`,
+re-scope `--source`, or ingest more), while a high-scoring chunk left uncited
+means the model ignored good context (a synthesis problem). It reports scores,
+not chunk text — pair it with `--expand` to see both.
 
 `cat --chunk` and `cat --doc` are mutually exclusive. A malformed chunk ID is a
 usage error (exit 2); a well-formed but absent one warns on stderr, still prints
-the chunks that were found, and exits 3. `--expand` is orthogonal to `--strict`
-(strict still hard-errors on an ungrounded question first) and `--source`.
+the chunks that were found, and exits 3. `--expand` and `--explain` are
+orthogonal to each other, to `--source`, and to `--strict` (strict still
+hard-errors on an ungrounded question before either runs).
 
 ## Supported document formats
 

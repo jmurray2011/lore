@@ -206,6 +206,24 @@ type answerView struct {
 	// Expansions carries the full text of cited chunks when --expand is set.
 	// omitempty keeps existing --json output byte-for-byte unchanged otherwise.
 	Expansions []chunkView `json:"expansions,omitempty"`
+	// Retrieval carries the retrieval diagnostics when --explain is set: every
+	// chunk that grounded the answer, with its score and whether it was cited. A
+	// pointer so the key is present (as []) when --explain is on but nothing was
+	// retrieved, yet absent — output unchanged — when --explain is off.
+	Retrieval *[]retrievalHitView `json:"retrieval,omitempty"`
+}
+
+// retrievalHitView is one grounding chunk in an --explain report: its rank,
+// score, and whether the answer cited it — enough to tell retrieval starvation
+// (every score low) from a synthesis miss (a high-scoring chunk left uncited).
+// It omits the chunk text deliberately; --expand is the flag for that.
+type retrievalHitView struct {
+	Rank    int     `json:"rank"`
+	ChunkID string  `json:"chunk_id"`
+	Source  string  `json:"source"`
+	Seq     int     `json:"seq"`
+	Score   float64 `json:"score"`
+	Cited   bool    `json:"cited"`
 }
 
 type docView struct {

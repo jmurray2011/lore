@@ -128,6 +128,45 @@ func TestAsker(t *testing.T) {
 		}
 	})
 
+	t.Run("AskExplain returns the retrieved hits alongside the answer", func(t *testing.T) {
+		idx := &fakeIndex{matches: map[string][]domain.VectorMatch{"docs": {{ChunkID: c0.ID, Score: 0.8}}}}
+		docs := &fakeDocs{chunks: map[domain.ChunkID]domain.Chunk{c0.ID: c0}}
+		emb := &fakeEmbedder{space: space, byText: map[string][]float32{"why": {1, 0, 0}}}
+		gen := &fakeGenerator{answer: app.Answer{Text: "because"}}
+		a := newAsker(gen, emb, idx, docs)
+
+		ans, hits, err := a.AskExplain(ctx, "docs", "why", 1, nil, false, "")
+		if err != nil {
+			t.Fatalf("AskExplain: %v", err)
+		}
+		if ans.Text != "because" {
+			t.Errorf("answer text = %q", ans.Text)
+		}
+		if len(hits) != 1 || hits[0].Chunk.ID != c0.ID || hits[0].Score != 0.8 {
+			t.Errorf("AskExplain hits = %+v, want one c0 at score 0.8", hits)
+		}
+	})
+
+	t.Run("AskExplain shares strict semantics: no grounding yields ErrNoGrounding and no hits", func(t *testing.T) {
+		gen := &fakeGenerator{}
+		emb := &fakeEmbedder{space: space}
+		a := newAsker(gen, emb, &fakeIndex{}, &fakeDocs{})
+
+		ans, hits, err := a.AskExplain(ctx, "docs", "why", 1, nil, true, "")
+		if !errors.Is(err, app.ErrNoGrounding) {
+			t.Errorf("want ErrNoGrounding, got %v", err)
+		}
+		if hits != nil {
+			t.Errorf("strict ungrounded must return no hits, got %+v", hits)
+		}
+		if ans.Text != "" {
+			t.Errorf("strict ungrounded must return a zero answer, got %+v", ans)
+		}
+		if gen.gotQuestion != "" {
+			t.Error("strict mode must not call the generator when grounding is empty")
+		}
+	})
+
 	t.Run("Synthesize generates over given hits without retrieving", func(t *testing.T) {
 		gen := &fakeGenerator{answer: app.Answer{Text: "synthesized"}}
 		// The querier is empty — Synthesize must not consult it.

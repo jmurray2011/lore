@@ -157,6 +157,45 @@ func citedChunkIDs(ans app.Answer) []string {
 	return ids
 }
 
+// citedSet returns the set of chunk IDs the answer cited, for cross-referencing
+// against the retrieved hits in --explain.
+func citedSet(ans app.Answer) map[domain.ChunkID]bool {
+	cited := make(map[domain.ChunkID]bool, len(ans.Citations))
+	for _, c := range ans.Citations {
+		cited[c.ChunkID] = true
+	}
+	return cited
+}
+
+// retrievalMarkdown renders the --explain diagnostics: the chunks that grounded
+// the answer, best first, each with its similarity score and whether the answer
+// cited it. A row whose score is high but uncited points at synthesis; a table
+// of uniformly low scores points at retrieval starvation. With no hits (e.g.
+// -k 0 or an ungrounded question) it says so plainly.
+func retrievalMarkdown(hits []domain.ChunkHit, cited map[domain.ChunkID]bool) string {
+	var b strings.Builder
+	b.WriteString("## Retrieval\n\n")
+	if len(hits) == 0 {
+		b.WriteString("No chunks retrieved.")
+		return b.String()
+	}
+	rows := make([][]string, len(hits))
+	for i, h := range hits {
+		mark := ""
+		if cited[h.Chunk.ID] {
+			mark = "✓"
+		}
+		rows[i] = []string{
+			fmt.Sprintf("%d", i+1),
+			fmt.Sprintf("%.4f", h.Score),
+			mark,
+			hitLabel(h),
+		}
+	}
+	b.WriteString(mdTable([]string{"#", "score", "cited", "source"}, rows))
+	return strings.TrimRight(b.String(), "\n")
+}
+
 // citationLabel is the short, human form of a citation: "file.docx · chunk 3".
 func citationLabel(c domain.Citation) string {
 	return fmt.Sprintf("%s · chunk %d", shortLabel(c.Source), c.Seq)
