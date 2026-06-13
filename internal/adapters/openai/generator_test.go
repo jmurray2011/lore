@@ -69,15 +69,20 @@ func TestGeneratorSynthesize(t *testing.T) {
 		if !strings.Contains(user, "what color is the sky?") || !strings.Contains(user, "the sky is blue") {
 			t.Errorf("user prompt missing question or context: %q", user)
 		}
-		if !strings.Contains(user, string(chunk.ID)) {
-			t.Errorf("user prompt missing citation id %s: %q", chunk.ID, user)
+		// The chunk is labeled by a short ordinal + its source (provenance the
+		// model can reason about), not by the opaque 64-char chunk ID.
+		if !strings.Contains(user, "[1]") || !strings.Contains(user, "a.md") {
+			t.Errorf("user prompt missing numbered label or source: %q", user)
+		}
+		if strings.Contains(user, string(chunk.ID)) {
+			t.Errorf("user prompt must not embed the opaque chunk ID: %q", user)
 		}
 		if gotReq.ResponseFormat != nil {
 			t.Errorf("plain-text mode must not send response_format, got %s", *gotReq.ResponseFormat)
 		}
 	})
 
-	t.Run("plain-text mode parses the model's own inline [chunkID] citations", func(t *testing.T) {
+	t.Run("plain-text mode maps the model's [n] ordinal citations to chunks", func(t *testing.T) {
 		other, err := domain.NewChunk(domain.DeriveDocumentID("docs", "file:///b.md"), 0, "the grass is green")
 		if err != nil {
 			t.Fatal(err)
@@ -86,8 +91,8 @@ func TestGeneratorSynthesize(t *testing.T) {
 			{Chunk: chunk, Score: 0.9, Source: "file:///a.md"},
 			{Chunk: other, Score: 0.8, Source: "file:///b.md"},
 		}
-		// The model cites only the first chunk in its prose.
-		body := `{"choices":[{"message":{"role":"assistant","content":"The sky is blue [` + string(chunk.ID) + `]."}}]}`
+		// The model cites only the first chunk by its ordinal label.
+		body := `{"choices":[{"message":{"role":"assistant","content":"The sky is blue [1]."}}]}`
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			_, _ = io.WriteString(w, body)
 		}))
@@ -104,6 +109,34 @@ func TestGeneratorSynthesize(t *testing.T) {
 		// Only the cited chunk survives — not the whole grounding set.
 		if len(ans.Citations) != 1 || ans.Citations[0].ChunkID != chunk.ID || ans.Citations[0].Source != "file:///a.md" {
 			t.Errorf("citations = %+v, want only %s (file:///a.md)", ans.Citations, chunk.ID)
+		}
+		// The ordinal is rewritten to the canonical [chunkID] form the CLI
+		// renumbering and --json contract already expect.
+		if !strings.Contains(ans.Text, "["+string(chunk.ID)+"]") {
+			t.Errorf("answer text should rewrite [1] to [%s], got %q", chunk.ID, ans.Text)
+		}
+		if strings.Contains(ans.Text, "[1]") {
+			t.Errorf("ordinal [1] should have been rewritten away: %q", ans.Text)
+		}
+	})
+
+	t.Run("plain-text mode leaves non-ordinal brackets untouched", func(t *testing.T) {
+		body := `{"choices":[{"message":{"role":"assistant","content":"See [CVE-2024-1] and chunk [1]."}}]}`
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = io.WriteString(w, body)
+		}))
+		defer srv.Close()
+		g, _ := openai.NewGenerator(srv.URL, "k", "m", openai.Capabilities{}, openai.AuthBearer, srv.Client())
+
+		ans, err := g.Synthesize(ctx, "q", hits, nil)
+		if err != nil {
+			t.Fatalf("Synthesize: %v", err)
+		}
+		if !strings.Contains(ans.Text, "[CVE-2024-1]") {
+			t.Errorf("a non-ordinal bracket must be left alone: %q", ans.Text)
+		}
+		if len(ans.Citations) != 1 || ans.Citations[0].ChunkID != chunk.ID {
+			t.Errorf("citations = %+v, want only the ordinal-cited chunk", ans.Citations)
 		}
 	})
 
@@ -136,10 +169,10 @@ func TestGeneratorSynthesize(t *testing.T) {
 		}
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			_ = json.NewDecoder(r.Body).Decode(&gotReq)
-			// The model returns one valid chunk ID and one bogus one.
+			// The model returns one valid ordinal and one out-of-range one.
 			inner, _ := json.Marshal(map[string]any{
 				"answer":    "Blue.",
-				"citations": []string{string(chunk.ID), "no-such-chunk"},
+				"citations": []int{1, 99},
 			})
 			resp, _ := json.Marshal(map[string]any{
 				"choices": []map[string]any{{"message": map[string]any{"role": "assistant", "content": string(inner)}}},

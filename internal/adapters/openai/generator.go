@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"path"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/jmurray2011/lore/internal/app"
@@ -17,16 +19,17 @@ import (
 var _ app.Generator = (*Generator)(nil)
 
 const systemPrompt = "You are a precise assistant. Answer the question using only the provided context chunks. " +
-	"If the context is insufficient, say so plainly. Cite the chunk IDs you relied on inline, in square brackets, e.g. [<id>]."
+	"Each chunk is labeled with a bracketed number and its source document. " +
+	"If the context is insufficient, say so plainly. Cite the chunk numbers you relied on inline, in square brackets, e.g. [2] or [2, 5]."
 
-// citationRE matches bracketed citations like [<chunkID>] in answer prose. The
-// captured group may hold several comma-separated IDs.
+// citationRE matches bracketed citations like [2] or [2, 5] in answer prose. The
+// captured group may hold several comma-separated numbers.
 var citationRE = regexp.MustCompile(`\[([^\[\]]+)\]`)
 
 // structuredInstruction is appended for providers that support JSON-schema
-// output: it asks for the answer and the exact chunk IDs used, as typed fields.
+// output: it asks for the answer and the chunk numbers used, as typed fields.
 const structuredInstruction = " Respond as JSON matching the schema: put the prose answer in \"answer\" and the " +
-	"exact chunk IDs you relied on in \"citations\"."
+	"bracketed chunk numbers you relied on, as integers, in \"citations\"."
 
 // answerSchema is the strict JSON schema for structured synthesis. Strict mode
 // requires every property listed in "required" and additionalProperties false.
@@ -34,7 +37,7 @@ var answerSchema = map[string]any{
 	"type": "object",
 	"properties": map[string]any{
 		"answer":    map[string]any{"type": "string"},
-		"citations": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+		"citations": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}},
 	},
 	"required":             []string{"answer", "citations"},
 	"additionalProperties": false,
@@ -158,36 +161,46 @@ func (g *Generator) Synthesize(ctx context.Context, question string, hits []doma
 	if g.caps.StructuredOutput {
 		return parseStructured(content, hits)
 	}
-	text := strings.TrimSpace(content)
-	// Prefer the chunk IDs the model actually referenced in its prose; fall back
-	// to the whole grounding set when it cited nothing parseable.
-	citations := inlineCitations(text, hits)
+	// Rewrite the model's [n] ordinals to the canonical [chunkID] form and collect
+	// the cited chunks; fall back to the whole grounding set when it cited nothing.
+	text, citations := resolveCitations(strings.TrimSpace(content), hits)
 	if len(citations) == 0 {
 		citations = groundingSet(hits)
 	}
 	return app.Answer{Text: text, Citations: citations}, nil
 }
 
-// inlineCitations extracts the chunk IDs the model referenced in square brackets,
-// keeping only those in the grounding set (dropping hallucinations) in order of
-// first appearance. A bracket may hold several comma-separated IDs.
-func inlineCitations(text string, hits []domain.ChunkHit) []domain.Citation {
-	byID := make(map[domain.ChunkID]domain.ChunkHit, len(hits))
-	for _, h := range hits {
-		byID[h.Chunk.ID] = h
-	}
+// resolveCitations rewrites the model's bracketed ordinal references ([n], or
+// [n, m]) into the canonical [chunkID] form the rest of lore expects, and
+// returns the cited chunks as Citations in first-appearance order. Ordinals are
+// 1-based indices into hits. A bracket whose contents are not all valid ordinals
+// (e.g. "[CVE-2024-1]") is left untouched and contributes no citation.
+func resolveCitations(text string, hits []domain.ChunkHit) (string, []domain.Citation) {
 	var citations []domain.Citation
-	seen := make(map[domain.ChunkID]bool)
-	for _, m := range citationRE.FindAllStringSubmatch(text, -1) {
-		for _, part := range strings.Split(m[1], ",") {
-			id := domain.ChunkID(strings.TrimSpace(part))
-			if h, ok := byID[id]; ok && !seen[id] {
+	seen := make(map[int]bool)
+
+	rewritten := citationRE.ReplaceAllStringFunc(text, func(m string) string {
+		parts := strings.Split(m[1:len(m)-1], ",")
+		nums := make([]int, 0, len(parts))
+		for _, p := range parts {
+			n, err := strconv.Atoi(strings.TrimSpace(p))
+			if err != nil || n < 1 || n > len(hits) {
+				return m // not an all-ordinal citation: leave it verbatim
+			}
+			nums = append(nums, n)
+		}
+		ids := make([]string, len(nums))
+		for i, n := range nums {
+			h := hits[n-1]
+			ids[i] = string(h.Chunk.ID)
+			if !seen[n] {
 				citations = append(citations, citation(h))
-				seen[id] = true
+				seen[n] = true
 			}
 		}
-	}
-	return citations
+		return "[" + strings.Join(ids, ", ") + "]"
+	})
+	return rewritten, citations
 }
 
 // userContent builds the user message: a plain string when there are no
@@ -225,33 +238,35 @@ func (g *Generator) encodeAttachment(a domain.Attachment) (contentPart, error) {
 	return contentPart{Type: "file", File: &filePart{Filename: a.Name, FileData: dataURL}}, nil
 }
 
-// parseStructured reads the model's JSON answer and keeps only citations that
-// name a chunk actually in the grounding set (preserving the model's order),
-// guarding against hallucinated chunk IDs. Surviving citations carry the source
-// provenance of the hit they name.
+// parseStructured reads the model's JSON answer. Citations are 1-based chunk
+// ordinals; out-of-range numbers (hallucinations) are dropped. Any [n] ordinals
+// the model also wrote inline in the prose are rewritten to [chunkID] and unioned
+// into the citation set. Surviving citations carry their hit's source provenance.
 func parseStructured(content string, hits []domain.ChunkHit) (app.Answer, error) {
 	var out struct {
-		Answer    string   `json:"answer"`
-		Citations []string `json:"citations"`
+		Answer    string `json:"answer"`
+		Citations []int  `json:"citations"`
 	}
 	if err := json.Unmarshal([]byte(content), &out); err != nil {
 		return app.Answer{}, fmt.Errorf("openai: parse structured answer: %w", err)
 	}
 
-	byID := make(map[domain.ChunkID]domain.ChunkHit, len(hits))
-	for _, h := range hits {
-		byID[h.Chunk.ID] = h
+	text, citations := resolveCitations(strings.TrimSpace(out.Answer), hits)
+	seen := make(map[domain.ChunkID]bool, len(citations))
+	for _, c := range citations {
+		seen[c.ChunkID] = true
 	}
-	var citations []domain.Citation
-	seen := make(map[domain.ChunkID]bool, len(out.Citations))
-	for _, c := range out.Citations {
-		id := domain.ChunkID(c)
-		if h, ok := byID[id]; ok && !seen[id] {
+	for _, n := range out.Citations {
+		if n < 1 || n > len(hits) {
+			continue
+		}
+		h := hits[n-1]
+		if !seen[h.Chunk.ID] {
 			citations = append(citations, citation(h))
-			seen[id] = true
+			seen[h.Chunk.ID] = true
 		}
 	}
-	return app.Answer{Text: strings.TrimSpace(out.Answer), Citations: citations}, nil
+	return app.Answer{Text: text, Citations: citations}, nil
 }
 
 // groundingSet cites every hit — the stopgap citation set used when structured
@@ -275,11 +290,30 @@ func userPrompt(question string, hits []domain.ChunkHit) string {
 	if len(hits) == 0 {
 		b.WriteString("No context is available.\n\n")
 	} else {
-		b.WriteString("Context:\n")
-		for _, h := range hits {
-			fmt.Fprintf(&b, "[%s]\n%s\n\n", h.Chunk.ID, h.Chunk.Text)
+		b.WriteString("Context (cite the bracketed numbers you use):\n\n")
+		for i, h := range hits {
+			// A short ordinal the model can cite reliably, plus the source so it
+			// can reason about provenance (which document a claim comes from).
+			if label := sourceLabel(h.Source); label != "" {
+				fmt.Fprintf(&b, "[%d] (%s)\n%s\n\n", i+1, label, h.Chunk.Text)
+			} else {
+				fmt.Fprintf(&b, "[%d]\n%s\n\n", i+1, h.Chunk.Text)
+			}
 		}
 	}
 	fmt.Fprintf(&b, "Question: %s", question)
 	return b.String()
+}
+
+// sourceLabel reduces a source URI to a short, readable document name for the
+// prompt (the basename, scheme and path stripped). Empty when there is no source.
+func sourceLabel(uri string) string {
+	if i := strings.Index(uri, "://"); i >= 0 {
+		uri = uri[i+3:]
+	}
+	uri = strings.TrimRight(uri, "/")
+	if uri == "" {
+		return ""
+	}
+	return path.Base(uri)
 }
