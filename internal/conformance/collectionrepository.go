@@ -15,7 +15,7 @@ import (
 //
 // This suite covers only what the port can observe: Collection CRUD. The
 // cross-aggregate cascade of Delete (removing the collection's documents and
-// vectors, invariant 3) is orchestrated by the use case, which holds the
+// vectors) is orchestrated by the use case, which holds the
 // DocumentRepository and VectorIndex; it is verified at that layer.
 func RunCollectionRepositorySuite(t *testing.T, factory func(t *testing.T) app.CollectionRepository) {
 	t.Helper()

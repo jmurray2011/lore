@@ -7,7 +7,7 @@ import (
 	"github.com/jmurray2011/lore/internal/domain"
 )
 
-// Remover owns the cross-port deletion cascade (invariant 3): a document's
+// Remover owns the cross-port deletion cascade: a document's
 // chunks live in the DocumentRepository, their vectors in the VectorIndex, and
 // the collection record in the CollectionRepository. No single port can reach
 // the others, so this use case orchestrates them.

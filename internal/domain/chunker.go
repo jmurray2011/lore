@@ -5,7 +5,7 @@ import (
 	"strings"
 )
 
-// Default chunking parameters (DESIGN.md: ~512 tokens, ~15% overlap). For the
+// Default chunking parameters: ~512 tokens, ~15% overlap. For the
 // fixed strategy a "token" is a whitespace word; the structure-aware strategies
 // measure real tokens via an injected counter.
 const (
@@ -53,7 +53,7 @@ func (r ChunkResult) TextToEmbed() string {
 }
 
 // Chunker splits a parsed document into ordered chunks. Implementations are
-// deterministic and pure (DESIGN.md decision 7): same input → identical output,
+// deterministic and pure: same input → identical output,
 // no I/O, no map-iteration-order dependence. A token-aware strategy receives a
 // token-count func at construction rather than importing a tokenizer, so
 // stdlib-only domain stays clean.
@@ -64,9 +64,9 @@ type Chunker interface {
 // Registry selects a Chunker by content type, falling back to a default. It is
 // how per-format strategies (markdown, plain text, ...) plug in without the
 // ingestor knowing which is which; a future code-aware strategy is just another
-// registered entry (revisit decision 7 then — a tree-sitter strategy cannot be
-// pure-domain). It also carries the ChunkerSpec the active configuration
-// corresponds to, so the use cases can pin it on new collections and refuse
+// registered entry (though a tree-sitter strategy could not be pure-domain). It
+// also carries the ChunkerSpec the active configuration corresponds to, so the
+// use cases can pin it on new collections and refuse
 // re-ingest under a different one. Construct with NewRegistry; the zero value is
 // not usable.
 type Registry struct {

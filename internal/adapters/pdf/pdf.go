@@ -1,5 +1,5 @@
 // Package pdf is an Extractor for PDF files, backed by the pure-Go
-// github.com/ledongthuc/pdf (decision 18: no cgo, so the static-binary and
+// github.com/ledongthuc/pdf (no cgo, so the static-binary and
 // cross-compile goals hold). Extraction is best-effort text in reading order —
 // layout, columns, and tables are not preserved, and scanned/image-only PDFs
 // yield nothing. The library can panic on malformed input, so Extract recovers

@@ -7,9 +7,9 @@ import (
 
 // Attachment is raw content handed to a Generator alongside retrieved chunks —
 // an image or document the model reads directly. Unlike ingested content it is
-// ephemeral: never chunked, embedded, or stored (DESIGN.md, "Document formats
-// and multimodal"). How it is encoded for a provider, and whether the provider
-// accepts it, are the Generator adapter's concern.
+// ephemeral: never chunked, embedded, or stored. How it is encoded for a
+// provider, and whether the provider accepts it, are the Generator adapter's
+// concern.
 type Attachment struct {
 	MediaType string // e.g. "image/png", "application/pdf"
 	Name      string // original filename, for display/citation; optional
