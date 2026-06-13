@@ -44,7 +44,7 @@ func newAddCmd(deps Deps) *cobra.Command {
 			}
 
 			view := ingestView{Added: total.Added, Skipped: total.Skipped, Chunks: total.Chunks}
-			human := fmt.Sprintf("added %d, skipped %d (%d chunks)", total.Added, total.Skipped, total.Chunks)
+			human := fmt.Sprintf("Added **%d**, skipped **%d** — **%d** chunks.", total.Added, total.Skipped, total.Chunks)
 			return render(cmd, view, human)
 		},
 	}
@@ -67,7 +67,7 @@ func newSyncCmd(deps Deps) *cobra.Command {
 				return err
 			}
 			view := syncView{Added: sum.Added, Skipped: sum.Skipped, Chunks: sum.Chunks, Pruned: sum.Pruned}
-			human := fmt.Sprintf("added %d, skipped %d, pruned %d (%d chunks)", sum.Added, sum.Skipped, sum.Pruned, sum.Chunks)
+			human := fmt.Sprintf("Added **%d**, skipped **%d**, pruned **%d** — **%d** chunks.", sum.Added, sum.Skipped, sum.Pruned, sum.Chunks)
 			return render(cmd, view, human)
 		},
 	}

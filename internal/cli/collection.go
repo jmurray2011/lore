@@ -23,7 +23,7 @@ func newInitCmd(deps Deps) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return render(cmd, viewCollection(coll), fmt.Sprintf("created collection %q (%s)", coll.Name, coll.Space))
+			return render(cmd, viewCollection(coll), fmt.Sprintf("Created collection **%s** (%s).", coll.Name, coll.Space))
 		},
 	}
 }
@@ -45,7 +45,7 @@ func newLsCmd(deps Deps) *cobra.Command {
 			}
 			var human string
 			if len(rows) > 0 {
-				human = styleForCmd(cmd).table([]string{"NAME", "MODEL", "DIMS"}, rows)
+				human = mdTable([]string{"Name", "Model", "Dims"}, rows)
 			}
 			return render(cmd, views, human)
 		},
@@ -68,13 +68,13 @@ func newRmCmd(deps Deps) *cobra.Command {
 					return err
 				}
 				view := rmView{Removed: "document", Collection: collection, Document: docURI}
-				return render(cmd, view, fmt.Sprintf("removed document %q from %q", docURI, collection))
+				return render(cmd, view, fmt.Sprintf("Removed document `%s` from **%s**.", docURI, collection))
 			}
 
 			if err := deps.Remove.RemoveCollection(cmd.Context(), collection); err != nil {
 				return err
 			}
-			return render(cmd, rmView{Removed: "collection", Collection: collection}, fmt.Sprintf("removed collection %q", collection))
+			return render(cmd, rmView{Removed: "collection", Collection: collection}, fmt.Sprintf("Removed collection **%s**.", collection))
 		},
 	}
 	cmd.Flags().StringVar(&docURI, "doc", "", "remove only this document, by source URI")
@@ -96,7 +96,6 @@ func newDocsCmd(deps Deps) *cobra.Command {
 			// Sort by source URI so output is stable regardless of backend.
 			sort.Slice(list, func(i, j int) bool { return list[i].SourceURI < list[j].SourceURI })
 
-			st := styleForCmd(cmd)
 			views := make([]docView, len(list))
 			rows := make([][]string, len(list))
 			for i, d := range list {
@@ -106,8 +105,8 @@ func newDocsCmd(deps Deps) *cobra.Command {
 			}
 			var human string
 			if len(rows) > 0 {
-				human = st.table([]string{"SOURCE", "INGESTED"}, rows) +
-					"\n" + st.faint(fmt.Sprintf("%d documents", len(rows)))
+				human = mdTable([]string{"Source", "Ingested"}, rows) +
+					fmt.Sprintf("\n*%d documents*\n", len(rows))
 			}
 			return render(cmd, views, human)
 		},
@@ -126,11 +125,9 @@ func newStatusCmd(deps Deps) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			st := styleForCmd(cmd)
-			human := st.bold(coll.Name) +
-				fmt.Sprintf("\n  %-11s %s", "model", coll.Space.Model) +
-				fmt.Sprintf("\n  %-11s %d", "dimensions", coll.Space.Dimensions) +
-				fmt.Sprintf("\n  %-11s %s", "created", humanTime(coll.CreatedAt.UTC().Format(time.RFC3339)))
+			human := fmt.Sprintf("## %s\n\n- **model** — %s\n- **dimensions** — %d\n- **created** — %s\n",
+				coll.Name, coll.Space.Model, coll.Space.Dimensions,
+				humanTime(coll.CreatedAt.UTC().Format(time.RFC3339)))
 			return render(cmd, viewCollection(coll), human)
 		},
 	}
