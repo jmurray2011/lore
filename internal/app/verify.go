@@ -30,6 +30,18 @@ func NewChecker(verifier Verifier, catalog *Catalog) *Checker {
 // the chunks it cites. The aggregate support rate is domain.SupportRate(claims).
 func (c *Checker) Verify(ctx context.Context, collection string, ans Answer) ([]domain.Claim, error) {
 	claims := domain.SegmentClaims(ans.Text, ans.Citations)
+	// When the answer carries citations but used no inline [id] markers (so every
+	// claim came back uncited), the model grounded its whole answer in the retrieved
+	// set without per-sentence brackets. Mirror the generator's grounding-set
+	// fallback: verify each claim against the full evidence rather than reporting it
+	// unverifiable, which would otherwise show a spurious 0% support rate.
+	if len(claims) > 0 && len(ans.Citations) > 0 && !anyCited(claims) {
+		ground := citationIDs(ans.Citations)
+		for i := range claims {
+			claims[i].CitedChunks = ground
+			claims[i].Verdict = ""
+		}
+	}
 	textByID, err := c.chunkText(ctx, collection, ans.Citations)
 	if err != nil {
 		return nil, err
@@ -51,6 +63,30 @@ func (c *Checker) Verify(ctx context.Context, collection string, ans Answer) ([]
 		claims[i].Rationale = v.Rationale
 	}
 	return claims, nil
+}
+
+// anyCited reports whether any claim was anchored to an inline citation.
+func anyCited(claims []domain.Claim) bool {
+	for _, cl := range claims {
+		if len(cl.CitedChunks) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// citationIDs returns the distinct chunk IDs of the citations in first-appearance
+// order — the grounding set a fallback verifies every claim against.
+func citationIDs(citations []domain.Citation) []domain.ChunkID {
+	ids := make([]domain.ChunkID, 0, len(citations))
+	seen := make(map[domain.ChunkID]bool, len(citations))
+	for _, cit := range citations {
+		if !seen[cit.ChunkID] {
+			seen[cit.ChunkID] = true
+			ids = append(ids, cit.ChunkID)
+		}
+	}
+	return ids
 }
 
 // chunkText fetches the text of every cited chunk, grouping citation IDs by their

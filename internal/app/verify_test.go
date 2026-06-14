@@ -66,3 +66,55 @@ func TestCheckerVerify(t *testing.T) {
 		t.Errorf("support rate = %v, want 1/3", got)
 	}
 }
+
+func TestCheckerVerifyGroundingFallback(t *testing.T) {
+	ctx := context.Background()
+	space := testSpace()
+	coll := mustCollection(t, "docs", space)
+
+	doc, err := domain.NewDocument("docs", "file:///a.md", domain.HashContent([]byte("x")), time.Unix(0, 0).UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	c0 := mustChunk(t, doc.ID, 0, "The sky is blue.")
+	c1 := mustChunk(t, doc.ID, 1, "Grass is usually green.")
+	docs := &fakeDocs{
+		docs:   map[domain.DocumentID]domain.Document{doc.ID: *doc},
+		chunks: map[domain.ChunkID]domain.Chunk{c0.ID: c0, c1.ID: c1},
+	}
+	catalog := app.NewCatalog(newFakeCollections(coll), docs, &fakeEmbedder{space: space}, domain.Registry{})
+	verifier := &fakeVerifier{} // default: supported
+	checker := app.NewChecker(verifier, catalog)
+
+	// The model grounded its answer in the retrieved set but emitted no inline [id]
+	// markers; ask still attaches the grounding set as Citations. Verify must fall
+	// back to that set and check each claim against it, not report every claim
+	// uncited (a spurious 0% support rate).
+	ans := app.Answer{
+		Text: "The sky is blue. Grass is green.",
+		Citations: []domain.Citation{
+			{ChunkID: c0.ID, Source: "file:///a.md", Seq: 0},
+			{ChunkID: c1.ID, Source: "file:///a.md", Seq: 1},
+		},
+	}
+	claims, err := checker.Verify(ctx, "docs", ans)
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if len(claims) != 2 {
+		t.Fatalf("want 2 claims, got %d: %+v", len(claims), claims)
+	}
+	for i, cl := range claims {
+		if cl.Verdict != domain.VerdictSupported {
+			t.Errorf("claim %d should be supported via grounding fallback, got %q", i, cl.Verdict)
+		}
+	}
+	if verifier.calls != 2 {
+		t.Errorf("want 2 verify calls (both claims checked against the grounding set), got %d", verifier.calls)
+	}
+	// Each claim's evidence is the whole grounding set, in citation order.
+	want := "The sky is blue.\n\nGrass is usually green."
+	if got := verifier.gotEvidence["The sky is blue"]; got != want {
+		t.Errorf("fallback evidence = %q, want the full grounding set %q", got, want)
+	}
+}
