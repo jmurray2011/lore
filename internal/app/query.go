@@ -58,8 +58,10 @@ type FromQuery struct {
 //
 // An empty query is ErrInvalidArgument; an unknown collection is ErrNotFound.
 // No matching chunks yields no hits and no error.
-func (q *Querier) Query(ctx context.Context, collection, query string, k int, source string) ([]domain.ChunkHit, error) {
-	r, err := q.retrieve(ctx, collection, query, k, source, false)
+// A non-zero filter restricts hits to chunks whose document metadata satisfies it
+// (the --where predicate), applied inside the index before the top-k cut.
+func (q *Querier) Query(ctx context.Context, collection, query string, k int, source string, filter domain.Predicate) ([]domain.ChunkHit, error) {
+	r, err := q.retrieve(ctx, collection, query, k, source, filter, false)
 	return r.Hits, err
 }
 
@@ -67,8 +69,8 @@ func (q *Querier) Query(ctx context.Context, collection, query string, k int, so
 // just outside the returned top-k (the runner-up) for --explain diagnostics. It
 // fetches one extra candidate (k+1) to surface that runner-up — no extra model
 // call beyond the single query embed. Same errors as Query.
-func (q *Querier) Explain(ctx context.Context, collection, query string, k int, source string) (Retrieval, error) {
-	return q.retrieve(ctx, collection, query, k, source, true)
+func (q *Querier) Explain(ctx context.Context, collection, query string, k int, source string, filter domain.Predicate) (Retrieval, error) {
+	return q.retrieve(ctx, collection, query, k, source, filter, true)
 }
 
 // QueryAcross merges retrieval over several collections into one ranked top-k.
@@ -77,15 +79,15 @@ func (q *Querier) Explain(ctx context.Context, collection, query string, k int, 
 // collection is searched, and the hits are merged by score. Each returned hit
 // carries its origin Collection. Same per-collection source/over-fetch semantics
 // as Query. Mismatched spaces fail with ErrSpaceMismatch before any search.
-func (q *Querier) QueryAcross(ctx context.Context, collections []string, query string, k int, source string) ([]domain.ChunkHit, error) {
-	r, err := q.retrieveAcross(ctx, collections, query, k, source, false)
+func (q *Querier) QueryAcross(ctx context.Context, collections []string, query string, k int, source string, filter domain.Predicate) ([]domain.ChunkHit, error) {
+	r, err := q.retrieveAcross(ctx, collections, query, k, source, filter, false)
 	return r.Hits, err
 }
 
 // ExplainAcross is QueryAcross with the runner-up just outside the merged top-k,
 // for --explain over a multi-collection query.
-func (q *Querier) ExplainAcross(ctx context.Context, collections []string, query string, k int, source string) (Retrieval, error) {
-	return q.retrieveAcross(ctx, collections, query, k, source, true)
+func (q *Querier) ExplainAcross(ctx context.Context, collections []string, query string, k int, source string, filter domain.Predicate) (Retrieval, error) {
+	return q.retrieveAcross(ctx, collections, query, k, source, filter, true)
 }
 
 // QueryFrom searches the target collection using the source collection's own
@@ -96,7 +98,7 @@ func (q *Querier) ExplainAcross(ctx context.Context, collections []string, query
 // before any index access. A non-empty source glob restricts the *target* hits.
 // An unknown source or target collection is ErrNotFound; an empty source
 // collection yields no groups.
-func (q *Querier) QueryFrom(ctx context.Context, target, sourceCollection string, k int, source string) ([]FromQuery, error) {
+func (q *Querier) QueryFrom(ctx context.Context, target, sourceCollection string, k int, source string, filter domain.Predicate) ([]FromQuery, error) {
 	// Resolve and space-check before touching the index: a mismatch must perform
 	// neither the Entries read nor any Search.
 	tgt, err := q.collections.Get(ctx, target)
@@ -131,13 +133,13 @@ func (q *Querier) QueryFrom(ctx context.Context, target, sourceCollection string
 	if err != nil {
 		return nil, fmt.Errorf("hydrate source chunks: %w", err)
 	}
-	srcURIs, err := q.sources(ctx, srcChunks)
+	srcDocs, err := q.documentsByID(ctx, srcChunks)
 	if err != nil {
 		return nil, err
 	}
 	// Stable group order: by source URI, then by chunk seq within the document.
 	sort.Slice(srcChunks, func(i, j int) bool {
-		ui, uj := srcURIs[srcChunks[i].DocumentID], srcURIs[srcChunks[j].DocumentID]
+		ui, uj := docURI(srcDocs, srcChunks[i].DocumentID), docURI(srcDocs, srcChunks[j].DocumentID)
 		if ui != uj {
 			return ui < uj
 		}
@@ -147,7 +149,7 @@ func (q *Querier) QueryFrom(ctx context.Context, target, sourceCollection string
 	searchK := searchBudget(k, source, false)
 	groups := make([]FromQuery, 0, len(srcChunks))
 	for _, sc := range srcChunks {
-		matches, err := q.index.Search(ctx, tgt.Name, vecByID[sc.ID], searchK)
+		matches, err := q.index.Search(ctx, tgt.Name, vecByID[sc.ID], searchK, filter)
 		if err != nil {
 			return nil, fmt.Errorf("search %q: %w", tgt.Name, err)
 		}
@@ -159,7 +161,7 @@ func (q *Querier) QueryFrom(ctx context.Context, target, sourceCollection string
 			hits = hits[:k]
 		}
 		groups = append(groups, FromQuery{
-			From: domain.ChunkHit{Chunk: sc, Source: srcURIs[sc.DocumentID]},
+			From: domain.ChunkHit{Chunk: sc, Source: docURI(srcDocs, sc.DocumentID)},
 			Hits: hits,
 		})
 	}
@@ -170,7 +172,7 @@ func (q *Querier) QueryFrom(ctx context.Context, target, sourceCollection string
 // extra candidate (non-source path) and splits the ordered, filtered candidates
 // into the returned top-k and the runner-up. Query passes false, so its search
 // budget and result are byte-for-byte what they were before Explain existed.
-func (q *Querier) retrieve(ctx context.Context, collection, query string, k int, source string, withRunnerUp bool) (Retrieval, error) {
+func (q *Querier) retrieve(ctx context.Context, collection, query string, k int, source string, filter domain.Predicate, withRunnerUp bool) (Retrieval, error) {
 	if strings.TrimSpace(query) == "" {
 		return Retrieval{}, fmt.Errorf("query: %w: text must not be empty", domain.ErrInvalidArgument)
 	}
@@ -185,7 +187,7 @@ func (q *Querier) retrieve(ctx context.Context, collection, query string, k int,
 		return Retrieval{}, err
 	}
 
-	matches, err := q.index.Search(ctx, coll.Name, vec, searchBudget(k, source, withRunnerUp))
+	matches, err := q.index.Search(ctx, coll.Name, vec, searchBudget(k, source, withRunnerUp), filter)
 	if err != nil {
 		return Retrieval{}, fmt.Errorf("search %q: %w", coll.Name, err)
 	}
@@ -204,7 +206,7 @@ func (q *Querier) retrieve(ctx context.Context, collection, query string, k int,
 // the query once, searches every (deduplicated) collection, tags each match with
 // its origin, merges by score, then hydrates and splits into the top-k and the
 // runner-up. All collections must share an embedding space.
-func (q *Querier) retrieveAcross(ctx context.Context, names []string, query string, k int, source string, withRunnerUp bool) (Retrieval, error) {
+func (q *Querier) retrieveAcross(ctx context.Context, names []string, query string, k int, source string, filter domain.Predicate, withRunnerUp bool) (Retrieval, error) {
 	if strings.TrimSpace(query) == "" {
 		return Retrieval{}, fmt.Errorf("query: %w: text must not be empty", domain.ErrInvalidArgument)
 	}
@@ -228,7 +230,7 @@ func (q *Querier) retrieveAcross(ctx context.Context, names []string, query stri
 	var all []domain.VectorMatch
 	collByID := make(map[domain.ChunkID]string)
 	for _, c := range colls {
-		matches, err := q.index.Search(ctx, c.Name, vec, searchK)
+		matches, err := q.index.Search(ctx, c.Name, vec, searchK, filter)
 		if err != nil {
 			return Retrieval{}, fmt.Errorf("search %q: %w", c.Name, err)
 		}
@@ -342,21 +344,26 @@ func (q *Querier) hydrate(ctx context.Context, matches []domain.VectorMatch, col
 		return nil, fmt.Errorf("hydrate chunks: %w", err)
 	}
 
-	sourceByDoc, err := q.sources(ctx, chunks)
+	docsByID, err := q.documentsByID(ctx, chunks)
 	if err != nil {
 		return nil, err
 	}
 
 	hits := make([]domain.ChunkHit, 0, len(chunks))
 	for _, c := range chunks {
-		if source != "" && !matchSource(source, sourceByDoc[c.DocumentID]) {
+		uri, meta := "", domain.Metadata(nil)
+		if d := docsByID[c.DocumentID]; d != nil {
+			uri, meta = d.SourceURI, d.Metadata
+		}
+		if source != "" && !matchSource(source, uri) {
 			continue
 		}
 		hits = append(hits, domain.ChunkHit{
 			Chunk:      c,
 			Score:      scoreByID[c.ID],
-			Source:     sourceByDoc[c.DocumentID],
+			Source:     uri,
 			Collection: collByID[c.ID],
+			Metadata:   meta,
 		})
 	}
 	return hits, nil
@@ -379,10 +386,11 @@ func matchSource(pattern, sourceURI string) bool {
 	return err == nil && ok
 }
 
-// sources hydrates the source URI of each chunk's document, returning a map from
-// document ID to source URI. Documents that can't be hydrated are simply absent,
-// leaving those hits with an empty Source rather than failing the whole query.
-func (q *Querier) sources(ctx context.Context, chunks []domain.Chunk) (map[domain.DocumentID]string, error) {
+// documentsByID hydrates the documents of a set of chunks, returning a map from
+// document ID to document (for source URI and metadata). Documents that can't be
+// hydrated are simply absent, leaving those hits with an empty Source and no
+// metadata rather than failing the whole query.
+func (q *Querier) documentsByID(ctx context.Context, chunks []domain.Chunk) (map[domain.DocumentID]*domain.Document, error) {
 	ids := make([]domain.DocumentID, 0, len(chunks))
 	seen := make(map[domain.DocumentID]bool, len(chunks))
 	for _, c := range chunks {
@@ -396,9 +404,17 @@ func (q *Querier) sources(ctx context.Context, chunks []domain.Chunk) (map[domai
 	if err != nil {
 		return nil, fmt.Errorf("hydrate sources: %w", err)
 	}
-	byDoc := make(map[domain.DocumentID]string, len(docs))
+	byDoc := make(map[domain.DocumentID]*domain.Document, len(docs))
 	for _, d := range docs {
-		byDoc[d.ID] = d.SourceURI
+		byDoc[d.ID] = d
 	}
 	return byDoc, nil
+}
+
+// docURI returns the source URI of the document with id, or "" if absent.
+func docURI(m map[domain.DocumentID]*domain.Document, id domain.DocumentID) string {
+	if d := m[id]; d != nil {
+		return d.SourceURI
+	}
+	return ""
 }

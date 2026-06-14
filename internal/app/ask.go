@@ -30,8 +30,8 @@ func NewAsker(querier *Querier, generator Generator) *Asker {
 // marked Grounded=false so the caller can warn that it rests on model knowledge
 // alone. A non-empty source restricts retrieval to documents matching that glob
 // (see Querier.Query).
-func (a *Asker) Ask(ctx context.Context, collection, question string, k int, attachments []domain.Attachment, strict bool, source string) (Answer, error) {
-	hits, err := a.querier.Query(ctx, collection, question, k, source)
+func (a *Asker) Ask(ctx context.Context, collection, question string, k int, attachments []domain.Attachment, strict bool, source string, filter domain.Predicate) (Answer, error) {
+	hits, err := a.querier.Query(ctx, collection, question, k, source, filter)
 	if err != nil {
 		return Answer{}, err
 	}
@@ -45,8 +45,8 @@ func (a *Asker) Ask(ctx context.Context, collection, question string, k int, att
 // high-scoring chunk the model left uncited). Strict/source/attachment semantics
 // match Ask. The hits are the post-filter top-k, best first; the Retrieval is
 // zero when retrieval found nothing or strict mode returns ErrNoGrounding.
-func (a *Asker) AskExplain(ctx context.Context, collection, question string, k int, attachments []domain.Attachment, strict bool, source string) (Answer, Retrieval, error) {
-	ret, err := a.querier.Explain(ctx, collection, question, k, source)
+func (a *Asker) AskExplain(ctx context.Context, collection, question string, k int, attachments []domain.Attachment, strict bool, source string, filter domain.Predicate) (Answer, Retrieval, error) {
+	ret, err := a.querier.Explain(ctx, collection, question, k, source, filter)
 	if err != nil {
 		return Answer{}, Retrieval{}, err
 	}

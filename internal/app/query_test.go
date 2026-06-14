@@ -59,7 +59,7 @@ func TestQuerier(t *testing.T) {
 		emb := &fakeEmbedder{space: space, byText: map[string][]float32{"hello": {1, 0, 0}}}
 		q := newQuerier(idx, docs, emb)
 
-		hits, err := q.Query(ctx, "docs", "hello", 2, "")
+		hits, err := q.Query(ctx, "docs", "hello", 2, "", domain.Predicate{})
 		if err != nil {
 			t.Fatalf("Query: %v", err)
 		}
@@ -95,7 +95,7 @@ func TestQuerier(t *testing.T) {
 		emb := &fakeEmbedder{space: space, byText: map[string][]float32{"q": {1, 0, 0}}}
 		q := newQuerier(idx, docs, emb)
 
-		hits, err := q.Query(ctx, "docs", "q", 2, "")
+		hits, err := q.Query(ctx, "docs", "q", 2, "", domain.Predicate{})
 		if err != nil {
 			t.Fatalf("Query: %v", err)
 		}
@@ -121,7 +121,7 @@ func TestQuerier(t *testing.T) {
 		emb := &fakeEmbedder{space: space, byText: map[string][]float32{"q": {1, 0, 0}}}
 		q := newQuerier(idx, docs, emb)
 
-		hits, err := q.Query(ctx, "docs", "q", 3, "")
+		hits, err := q.Query(ctx, "docs", "q", 3, "", domain.Predicate{})
 		if err != nil {
 			t.Fatalf("Query: %v", err)
 		}
@@ -154,7 +154,7 @@ func TestQuerier(t *testing.T) {
 		emb := &fakeEmbedder{space: space, byText: map[string][]float32{"q": {1, 0, 0}}}
 		q := newQuerier(idx, docs, emb)
 
-		hits, err := q.Query(ctx, "docs", "q", 1, "*.pdf")
+		hits, err := q.Query(ctx, "docs", "q", 1, "*.pdf", domain.Predicate{})
 		if err != nil {
 			t.Fatalf("Query: %v", err)
 		}
@@ -171,7 +171,7 @@ func TestQuerier(t *testing.T) {
 		emb := &fakeEmbedder{space: space, byText: map[string][]float32{"q": {1, 0, 0}}}
 		q := newQuerier(idx, &fakeDocs{}, emb)
 
-		hits, err := q.Query(ctx, "docs", "q", 5, "")
+		hits, err := q.Query(ctx, "docs", "q", 5, "", domain.Predicate{})
 		if err != nil || len(hits) != 0 {
 			t.Errorf("want no hits, nil; got %v, %v", hits, err)
 		}
@@ -179,14 +179,14 @@ func TestQuerier(t *testing.T) {
 
 	t.Run("empty query is ErrInvalidArgument", func(t *testing.T) {
 		q := newQuerier(&fakeIndex{}, &fakeDocs{}, &fakeEmbedder{space: space})
-		if _, err := q.Query(ctx, "docs", "   ", 5, ""); !errors.Is(err, domain.ErrInvalidArgument) {
+		if _, err := q.Query(ctx, "docs", "   ", 5, "", domain.Predicate{}); !errors.Is(err, domain.ErrInvalidArgument) {
 			t.Errorf("want ErrInvalidArgument, got %v", err)
 		}
 	})
 
 	t.Run("unknown collection is ErrNotFound", func(t *testing.T) {
 		q := app.NewQuerier(newFakeCollections(), &fakeIndex{}, &fakeDocs{}, &fakeEmbedder{space: space})
-		if _, err := q.Query(ctx, "missing", "q", 5, ""); !errors.Is(err, app.ErrNotFound) {
+		if _, err := q.Query(ctx, "missing", "q", 5, "", domain.Predicate{}); !errors.Is(err, app.ErrNotFound) {
 			t.Errorf("want ErrNotFound, got %v", err)
 		}
 	})
@@ -197,7 +197,7 @@ func TestQuerier(t *testing.T) {
 			byText: map[string][]float32{"q": {1, 0, 0, 0, 0}},
 		}
 		q := newQuerier(&fakeIndex{}, &fakeDocs{}, emb)
-		if _, err := q.Query(ctx, "docs", "q", 5, ""); !errors.Is(err, domain.ErrSpaceMismatch) {
+		if _, err := q.Query(ctx, "docs", "q", 5, "", domain.Predicate{}); !errors.Is(err, domain.ErrSpaceMismatch) {
 			t.Errorf("want ErrSpaceMismatch, got %v", err)
 		}
 	})
@@ -212,7 +212,7 @@ func TestQuerier(t *testing.T) {
 		emb := &fakeEmbedder{space: space, byText: map[string][]float32{"q": {1, 0, 0}}}
 		q := newQuerier(idx, docs, emb)
 
-		ret, err := q.Explain(ctx, "docs", "q", 2, "")
+		ret, err := q.Explain(ctx, "docs", "q", 2, "", domain.Predicate{})
 		if err != nil {
 			t.Fatalf("Explain: %v", err)
 		}
@@ -235,7 +235,7 @@ func TestQuerier(t *testing.T) {
 		emb := &fakeEmbedder{space: space, byText: map[string][]float32{"q": {1, 0, 0}}}
 		q := newQuerier(idx, docs, emb)
 
-		ret, err := q.Explain(ctx, "docs", "q", 2, "")
+		ret, err := q.Explain(ctx, "docs", "q", 2, "", domain.Predicate{})
 		if err != nil {
 			t.Fatalf("Explain: %v", err)
 		}
@@ -293,7 +293,7 @@ func TestQuerierQueryFrom(t *testing.T) {
 		idx, docs, emb := setup()
 		q := newFrom(idx, docs, emb, space)
 
-		groups, err := q.QueryFrom(ctx, "v2", "v1", 2, "")
+		groups, err := q.QueryFrom(ctx, "v2", "v1", 2, "", domain.Predicate{})
 		if err != nil {
 			t.Fatalf("QueryFrom: %v", err)
 		}
@@ -327,7 +327,7 @@ func TestQuerierQueryFrom(t *testing.T) {
 		idx, docs, emb := setup()
 		q := newFrom(idx, docs, emb, domain.EmbeddingSpace{Model: "other", Dimensions: 7})
 
-		_, err := q.QueryFrom(ctx, "v2", "v1", 2, "")
+		_, err := q.QueryFrom(ctx, "v2", "v1", 2, "", domain.Predicate{})
 		if !errors.Is(err, domain.ErrSpaceMismatch) {
 			t.Fatalf("want ErrSpaceMismatch, got %v", err)
 		}
@@ -342,10 +342,10 @@ func TestQuerierQueryFrom(t *testing.T) {
 	t.Run("unknown source or target collection is ErrNotFound", func(t *testing.T) {
 		idx, docs, emb := setup()
 		q := newFrom(idx, docs, emb, space)
-		if _, err := q.QueryFrom(ctx, "v2", "ghost", 2, ""); !errors.Is(err, app.ErrNotFound) {
+		if _, err := q.QueryFrom(ctx, "v2", "ghost", 2, "", domain.Predicate{}); !errors.Is(err, app.ErrNotFound) {
 			t.Errorf("unknown source: want ErrNotFound, got %v", err)
 		}
-		if _, err := q.QueryFrom(ctx, "ghost", "v1", 2, ""); !errors.Is(err, app.ErrNotFound) {
+		if _, err := q.QueryFrom(ctx, "ghost", "v1", 2, "", domain.Predicate{}); !errors.Is(err, app.ErrNotFound) {
 			t.Errorf("unknown target: want ErrNotFound, got %v", err)
 		}
 	})
@@ -354,7 +354,7 @@ func TestQuerierQueryFrom(t *testing.T) {
 		idx, docs, emb := setup()
 		idx.upserted["v1"] = map[domain.ChunkID][]float32{} // no stored vectors
 		q := newFrom(idx, docs, emb, space)
-		groups, err := q.QueryFrom(ctx, "v2", "v1", 2, "")
+		groups, err := q.QueryFrom(ctx, "v2", "v1", 2, "", domain.Predicate{})
 		if err != nil || len(groups) != 0 {
 			t.Errorf("want no groups, nil; got %d groups, %v", len(groups), err)
 		}
@@ -397,7 +397,7 @@ func TestQuerierAcross(t *testing.T) {
 		idx, docs, emb := setup()
 		q := newAcross(idx, docs, emb, space)
 
-		hits, err := q.QueryAcross(ctx, []string{"a", "b"}, "q", 2, "")
+		hits, err := q.QueryAcross(ctx, []string{"a", "b"}, "q", 2, "", domain.Predicate{})
 		if err != nil {
 			t.Fatalf("QueryAcross: %v", err)
 		}
@@ -419,7 +419,7 @@ func TestQuerierAcross(t *testing.T) {
 		idx, docs, emb := setup()
 		q := newAcross(idx, docs, emb, space)
 
-		ret, err := q.ExplainAcross(ctx, []string{"a", "b"}, "q", 2, "")
+		ret, err := q.ExplainAcross(ctx, []string{"a", "b"}, "q", 2, "", domain.Predicate{})
 		if err != nil {
 			t.Fatalf("ExplainAcross: %v", err)
 		}
@@ -435,7 +435,7 @@ func TestQuerierAcross(t *testing.T) {
 		idx, docs, emb := setup()
 		q := newAcross(idx, docs, emb, domain.EmbeddingSpace{Model: "other", Dimensions: 7})
 
-		_, err := q.QueryAcross(ctx, []string{"a", "b"}, "q", 2, "")
+		_, err := q.QueryAcross(ctx, []string{"a", "b"}, "q", 2, "", domain.Predicate{})
 		if !errors.Is(err, domain.ErrSpaceMismatch) {
 			t.Fatalf("want ErrSpaceMismatch, got %v", err)
 		}
@@ -450,7 +450,7 @@ func TestQuerierAcross(t *testing.T) {
 	t.Run("unknown collection is ErrNotFound", func(t *testing.T) {
 		idx, docs, emb := setup()
 		q := newAcross(idx, docs, emb, space)
-		if _, err := q.QueryAcross(ctx, []string{"a", "ghost"}, "q", 2, ""); !errors.Is(err, app.ErrNotFound) {
+		if _, err := q.QueryAcross(ctx, []string{"a", "ghost"}, "q", 2, "", domain.Predicate{}); !errors.Is(err, app.ErrNotFound) {
 			t.Errorf("want ErrNotFound, got %v", err)
 		}
 	})
@@ -458,7 +458,7 @@ func TestQuerierAcross(t *testing.T) {
 	t.Run("duplicate collection names are deduplicated", func(t *testing.T) {
 		idx, docs, emb := setup()
 		q := newAcross(idx, docs, emb, space)
-		hits, err := q.QueryAcross(ctx, []string{"a", "a"}, "q", 2, "")
+		hits, err := q.QueryAcross(ctx, []string{"a", "a"}, "q", 2, "", domain.Predicate{})
 		if err != nil {
 			t.Fatalf("QueryAcross: %v", err)
 		}

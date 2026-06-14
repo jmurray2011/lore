@@ -86,6 +86,9 @@ type ChunkHit struct {
 	// merged hits stay attributable to their origin.
 	Collection  string
 	RerankScore *float64
+	// Metadata is the chunk's document-level attributes, attached at hydration for
+	// display (--json, human output). Empty unless the document carried metadata.
+	Metadata Metadata
 }
 
 // Citation references a chunk an answer was grounded in, carrying the provenance

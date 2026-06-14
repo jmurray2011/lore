@@ -25,10 +25,15 @@ func (x *VectorIndex) Upsert(ctx context.Context, collection string, entries []a
 		return fmt.Errorf("sqlite: begin: %w", err)
 	}
 	for _, e := range entries {
+		meta, err := encodeMeta(e.Metadata)
+		if err != nil {
+			_ = tx.Rollback()
+			return err
+		}
 		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO vectors(chunk_id, collection, vector) VALUES(?,?,?)
-			 ON CONFLICT(chunk_id) DO UPDATE SET collection=excluded.collection, vector=excluded.vector`,
-			e.ChunkID, collection, encodeVector(e.Vector)); err != nil {
+			`INSERT INTO vectors(chunk_id, collection, vector, metadata) VALUES(?,?,?,?)
+			 ON CONFLICT(chunk_id) DO UPDATE SET collection=excluded.collection, vector=excluded.vector, metadata=excluded.metadata`,
+			e.ChunkID, collection, encodeVector(e.Vector), meta); err != nil {
 			_ = tx.Rollback()
 			return fmt.Errorf("sqlite: upsert vector: %w", err)
 		}
@@ -36,12 +41,17 @@ func (x *VectorIndex) Upsert(ctx context.Context, collection string, entries []a
 	return tx.Commit()
 }
 
-// Search returns up to k matches by cosine similarity, best first.
-func (x *VectorIndex) Search(ctx context.Context, collection string, query []float32, k int) ([]domain.VectorMatch, error) {
+// Search returns up to k matches by cosine similarity, best first, considering
+// only rows whose metadata satisfies filter. The predicate is evaluated in Go (in
+// the brute-force scan the index already runs), not translated to SQL, so the
+// domain evaluator is the single source of truth for filter semantics and
+// memstore and sqlite cannot diverge. The zero predicate skips the metadata
+// decode entirely.
+func (x *VectorIndex) Search(ctx context.Context, collection string, query []float32, k int, filter domain.Predicate) ([]domain.VectorMatch, error) {
 	if k <= 0 {
 		return nil, nil
 	}
-	rows, err := x.db.QueryContext(ctx, `SELECT chunk_id, vector FROM vectors WHERE collection=?`, collection)
+	rows, err := x.db.QueryContext(ctx, `SELECT chunk_id, vector, metadata FROM vectors WHERE collection=?`, collection)
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: search: %w", err)
 	}
@@ -50,11 +60,21 @@ func (x *VectorIndex) Search(ctx context.Context, collection string, query []flo
 	var matches []domain.VectorMatch
 	for rows.Next() {
 		var (
-			id  domain.ChunkID
-			raw []byte
+			id      domain.ChunkID
+			raw     []byte
+			metaRaw string
 		)
-		if err := rows.Scan(&id, &raw); err != nil {
+		if err := rows.Scan(&id, &raw, &metaRaw); err != nil {
 			return nil, fmt.Errorf("sqlite: scan vector: %w", err)
+		}
+		if !filter.IsZero() {
+			meta, err := decodeMeta(metaRaw)
+			if err != nil {
+				return nil, err
+			}
+			if !filter.Match(meta) {
+				continue
+			}
 		}
 		matches = append(matches, domain.VectorMatch{ChunkID: id, Score: cosine(query, decodeVector(raw))})
 	}
@@ -74,10 +94,10 @@ func (x *VectorIndex) Search(ctx context.Context, collection string, query []flo
 	return matches, nil
 }
 
-// Entries returns every stored (chunk_id, vector) for the collection. An unknown
-// collection yields no entries and no error.
+// Entries returns every stored (chunk_id, vector, metadata) for the collection.
+// An unknown collection yields no entries and no error.
 func (x *VectorIndex) Entries(ctx context.Context, collection string) ([]app.VectorEntry, error) {
-	rows, err := x.db.QueryContext(ctx, `SELECT chunk_id, vector FROM vectors WHERE collection=?`, collection)
+	rows, err := x.db.QueryContext(ctx, `SELECT chunk_id, vector, metadata FROM vectors WHERE collection=?`, collection)
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: entries: %w", err)
 	}
@@ -86,13 +106,18 @@ func (x *VectorIndex) Entries(ctx context.Context, collection string) ([]app.Vec
 	var out []app.VectorEntry
 	for rows.Next() {
 		var (
-			id  domain.ChunkID
-			raw []byte
+			id      domain.ChunkID
+			raw     []byte
+			metaRaw string
 		)
-		if err := rows.Scan(&id, &raw); err != nil {
+		if err := rows.Scan(&id, &raw, &metaRaw); err != nil {
 			return nil, fmt.Errorf("sqlite: scan vector: %w", err)
 		}
-		out = append(out, app.VectorEntry{ChunkID: id, Vector: decodeVector(raw)})
+		meta, err := decodeMeta(metaRaw)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, app.VectorEntry{ChunkID: id, Vector: decodeVector(raw), Metadata: meta})
 	}
 	return out, rows.Err()
 }

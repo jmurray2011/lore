@@ -10,9 +10,11 @@ package sqlite
 import (
 	"database/sql"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"math"
 
+	"github.com/jmurray2011/lore/internal/domain"
 	_ "modernc.org/sqlite"
 )
 
@@ -40,7 +42,8 @@ var schemaStmts = []string{
 		source_uri TEXT NOT NULL,
 		hash TEXT NOT NULL,
 		ingested_at TEXT NOT NULL,
-		fingerprint TEXT NOT NULL DEFAULT ''
+		fingerprint TEXT NOT NULL DEFAULT '',
+		metadata TEXT NOT NULL DEFAULT '{}'
 	)`,
 	`CREATE INDEX IF NOT EXISTS documents_by_collection ON documents(collection)`,
 	`CREATE TABLE IF NOT EXISTS chunks (
@@ -54,7 +57,8 @@ var schemaStmts = []string{
 	`CREATE TABLE IF NOT EXISTS vectors (
 		chunk_id TEXT PRIMARY KEY,
 		collection TEXT NOT NULL,
-		vector BLOB NOT NULL
+		vector BLOB NOT NULL,
+		metadata TEXT NOT NULL DEFAULT '{}'
 	)`,
 	`CREATE INDEX IF NOT EXISTS vectors_by_collection ON vectors(collection)`,
 	`CREATE TABLE IF NOT EXISTS answer_cache (
@@ -92,6 +96,17 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	if err := ensureColumn(db, "chunks", "heading_path", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	// Metadata columns (the --where filter substrate). Pre-metadata rows read back
+	// as the '{}' default — an empty Metadata that no condition matches — so an
+	// old collection keeps querying, just without metadata to filter on.
+	if err := ensureColumn(db, "documents", "metadata", "TEXT NOT NULL DEFAULT '{}'"); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err := ensureColumn(db, "vectors", "metadata", "TEXT NOT NULL DEFAULT '{}'"); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -175,6 +190,36 @@ func decodeVector(b []byte) []float32 {
 		v[i] = math.Float32frombits(binary.LittleEndian.Uint32(b[4*i:]))
 	}
 	return v
+}
+
+// encodeMeta serializes metadata to the JSON stored in the metadata column. Nil
+// or empty metadata encodes to "{}" (the column default), so a round-trip of an
+// empty map and an absent map are indistinguishable — both decode to nil.
+func encodeMeta(m domain.Metadata) (string, error) {
+	if len(m) == 0 {
+		return "{}", nil
+	}
+	b, err := json.Marshal(map[string]string(m))
+	if err != nil {
+		return "", fmt.Errorf("sqlite: encode metadata: %w", err)
+	}
+	return string(b), nil
+}
+
+// decodeMeta parses a metadata JSON column value. An empty or "{}" value decodes
+// to nil so callers see no metadata rather than an empty map.
+func decodeMeta(s string) (domain.Metadata, error) {
+	if s == "" || s == "{}" {
+		return nil, nil
+	}
+	var m domain.Metadata
+	if err := json.Unmarshal([]byte(s), &m); err != nil {
+		return nil, fmt.Errorf("sqlite: decode metadata: %w", err)
+	}
+	if len(m) == 0 {
+		return nil, nil
+	}
+	return m, nil
 }
 
 // cosine returns the cosine similarity of a and b, 0 for degenerate input

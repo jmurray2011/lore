@@ -51,6 +51,83 @@ func textItem(uri, content string) app.SourceItem {
 	}
 }
 
+func TestIngestorAttachesMetadata(t *testing.T) {
+	ctx := context.Background()
+	space := testSpace()
+
+	t.Run("user metadata reaches the document and every vector entry", func(t *testing.T) {
+		coll := mustCollection(t, "docs", space)
+		docs := &fakeDocs{}
+		idx := &fakeIndex{}
+		src := &fakeSource{items: []app.SourceItem{textItem("file:///a.txt", words(10))}}
+		ing := app.NewIngestor(newFakeCollections(coll), docs, idx, &fakeEmbedder{space: space}, &fakeExtractor{}, src, chunker41(t))
+
+		meta := domain.Metadata{"author": "alice", "team": "platform"}
+		if _, err := ing.Ingest(ctx, "docs", "/root", app.WithMeta(meta)); err != nil {
+			t.Fatalf("Ingest: %v", err)
+		}
+
+		got, err := docs.GetBySource(ctx, "docs", "file:///a.txt")
+		if err != nil {
+			t.Fatalf("GetBySource: %v", err)
+		}
+		if got.Metadata["author"] != "alice" || got.Metadata["team"] != "platform" {
+			t.Errorf("document metadata = %v, want author=alice team=platform", got.Metadata)
+		}
+		if len(idx.gotEntries) == 0 {
+			t.Fatal("no vector entries upserted")
+		}
+		for _, e := range idx.gotEntries {
+			if e.Metadata["author"] != "alice" {
+				t.Errorf("vector entry %s missing metadata for --where filtering: %v", e.ChunkID, e.Metadata)
+			}
+		}
+	})
+
+	t.Run("markdown front matter is parsed, overridden by user meta, and kept out of chunks", func(t *testing.T) {
+		coll := mustCollection(t, "docs", space)
+		docs := &fakeDocs{}
+		idx := &fakeIndex{}
+		content := "---\nauthor: frontmatter\ndate: 2025-06-01\n---\n" + words(8)
+		md := app.SourceItem{
+			URI:         "file:///note.md",
+			ContentType: "text/markdown",
+			Fingerprint: "fm",
+			Open:        func() ([]byte, error) { return []byte(content), nil },
+		}
+		src := &fakeSource{items: []app.SourceItem{md}}
+		ing := app.NewIngestor(newFakeCollections(coll), docs, idx, &fakeEmbedder{space: space}, &fakeExtractor{}, src, chunker41(t))
+
+		if _, err := ing.Ingest(ctx, "docs", "/root", app.WithMeta(domain.Metadata{"author": "alice"})); err != nil {
+			t.Fatalf("Ingest: %v", err)
+		}
+
+		got, err := docs.GetBySource(ctx, "docs", "file:///note.md")
+		if err != nil {
+			t.Fatalf("GetBySource: %v", err)
+		}
+		if got.Metadata["author"] != "alice" {
+			t.Errorf("user --meta must override front matter, got author=%q", got.Metadata["author"])
+		}
+		if got.Metadata["date"] != "2025-06-01" {
+			t.Errorf("front-matter date should survive merge: %v", got.Metadata)
+		}
+
+		stored, err := docs.GetChunksByDocument(ctx, "docs", domain.DeriveDocumentID("docs", "file:///note.md"))
+		if err != nil {
+			t.Fatalf("GetChunksByDocument: %v", err)
+		}
+		if len(stored) == 0 {
+			t.Fatal("no chunks stored")
+		}
+		for _, c := range stored {
+			if strings.Contains(c.Text, "author:") || strings.Contains(c.Text, "---") {
+				t.Errorf("front matter leaked into a chunk: %q", c.Text)
+			}
+		}
+	})
+}
+
 func TestIngestorChunkerGuard(t *testing.T) {
 	ctx := context.Background()
 	space := testSpace()

@@ -15,10 +15,17 @@ import (
 	"github.com/jmurray2011/lore/internal/domain"
 )
 
+// storedVector is one indexed entry: its vector and the document-level metadata
+// the --where filter is evaluated against.
+type storedVector struct {
+	vec  []float32
+	meta domain.Metadata
+}
+
 // VectorIndex is a thread-safe, brute-force cosine similarity index.
 type VectorIndex struct {
 	mu          sync.RWMutex
-	collections map[string]map[domain.ChunkID][]float32
+	collections map[string]map[domain.ChunkID]storedVector
 }
 
 // compile-time port check
@@ -26,29 +33,31 @@ var _ app.VectorIndex = (*VectorIndex)(nil)
 
 // NewVectorIndex returns an empty index.
 func NewVectorIndex() *VectorIndex {
-	return &VectorIndex{collections: make(map[string]map[domain.ChunkID][]float32)}
+	return &VectorIndex{collections: make(map[string]map[domain.ChunkID]storedVector)}
 }
 
-// Upsert stores copies of the vectors, replacing entries with the same ChunkID.
+// Upsert stores copies of the vectors and their metadata, replacing entries with
+// the same ChunkID.
 func (x *VectorIndex) Upsert(_ context.Context, collection string, entries []app.VectorEntry) error {
 	x.mu.Lock()
 	defer x.mu.Unlock()
 
 	col, ok := x.collections[collection]
 	if !ok {
-		col = make(map[domain.ChunkID][]float32, len(entries))
+		col = make(map[domain.ChunkID]storedVector, len(entries))
 		x.collections[collection] = col
 	}
 	for _, e := range entries {
 		v := make([]float32, len(e.Vector))
 		copy(v, e.Vector)
-		col[e.ChunkID] = v
+		col[e.ChunkID] = storedVector{vec: v, meta: e.Metadata.Clone()}
 	}
 	return nil
 }
 
-// Search returns up to k matches by cosine similarity, best first.
-func (x *VectorIndex) Search(_ context.Context, collection string, query []float32, k int) ([]domain.VectorMatch, error) {
+// Search returns up to k matches by cosine similarity, best first, considering
+// only entries whose metadata satisfies filter (the zero predicate matches all).
+func (x *VectorIndex) Search(_ context.Context, collection string, query []float32, k int, filter domain.Predicate) ([]domain.VectorMatch, error) {
 	if k <= 0 {
 		return nil, nil
 	}
@@ -58,8 +67,11 @@ func (x *VectorIndex) Search(_ context.Context, collection string, query []float
 
 	col := x.collections[collection]
 	matches := make([]domain.VectorMatch, 0, len(col))
-	for id, vec := range col {
-		matches = append(matches, domain.VectorMatch{ChunkID: id, Score: cosine(query, vec)})
+	for id, sv := range col {
+		if !filter.Match(sv.meta) {
+			continue
+		}
+		matches = append(matches, domain.VectorMatch{ChunkID: id, Score: cosine(query, sv.vec)})
 	}
 
 	sort.Slice(matches, func(i, j int) bool {
@@ -74,18 +86,19 @@ func (x *VectorIndex) Search(_ context.Context, collection string, query []float
 	return matches, nil
 }
 
-// Entries returns a copy of every stored vector for the collection (order
-// unspecified). An unknown collection yields no entries and no error.
+// Entries returns a copy of every stored vector (and its metadata) for the
+// collection (order unspecified). An unknown collection yields no entries and no
+// error.
 func (x *VectorIndex) Entries(_ context.Context, collection string) ([]app.VectorEntry, error) {
 	x.mu.RLock()
 	defer x.mu.RUnlock()
 
 	col := x.collections[collection]
 	out := make([]app.VectorEntry, 0, len(col))
-	for id, vec := range col {
-		v := make([]float32, len(vec))
-		copy(v, vec)
-		out = append(out, app.VectorEntry{ChunkID: id, Vector: v})
+	for id, sv := range col {
+		v := make([]float32, len(sv.vec))
+		copy(v, sv.vec)
+		out = append(out, app.VectorEntry{ChunkID: id, Vector: v, Metadata: sv.meta.Clone()})
 	}
 	return out, nil
 }

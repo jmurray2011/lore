@@ -77,12 +77,16 @@ type Chunker struct {
 }
 
 // Document is one source document and its chunks (with their vectors), enough to
-// reconstruct the document, its chunks, and its index entries on import.
+// reconstruct the document, its chunks, and its index entries on import. Metadata
+// is an additive field: gob ignores it when read by a binary that predates it, and
+// it decodes to nil from an artifact written without it, so no format-version bump
+// is required (the version gates only incompatible shape changes).
 type Document struct {
 	SourceURI   string
 	Hash        string
 	IngestedAt  time.Time
 	Fingerprint string
+	Metadata    map[string]string
 	Chunks      []Chunk
 }
 

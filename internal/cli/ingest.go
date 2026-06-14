@@ -42,6 +42,7 @@ func newAddCmd(deps *Deps) *cobra.Command {
 		stdin bool
 		name  string
 		ctype string
+		meta  []string
 	)
 	cmd := &cobra.Command{
 		Use:   "add <collection> <path>...  |  add <collection> --stdin",
@@ -52,6 +53,11 @@ func newAddCmd(deps *Deps) *cobra.Command {
 			}
 			collection, paths := args[0], args[1:]
 
+			md, err := parseMetaPairs(meta)
+			if err != nil {
+				return err
+			}
+
 			if stdin {
 				if len(paths) > 0 {
 					return fmt.Errorf("%w: --stdin takes no path arguments", domain.ErrInvalidArgument)
@@ -60,7 +66,7 @@ func newAddCmd(deps *Deps) *cobra.Command {
 				if err != nil {
 					return fmt.Errorf("read stdin: %w", err)
 				}
-				sum, err := deps.Ingest.IngestContent(cmd.Context(), collection, name, ctype, content)
+				sum, err := deps.Ingest.IngestContent(cmd.Context(), collection, name, ctype, content, app.WithMeta(md))
 				if err != nil {
 					return err
 				}
@@ -72,7 +78,7 @@ func newAddCmd(deps *Deps) *cobra.Command {
 			}
 			var total app.IngestSummary
 			for _, path := range paths {
-				sum, err := deps.Ingest.Ingest(cmd.Context(), collection, path)
+				sum, err := deps.Ingest.Ingest(cmd.Context(), collection, path, app.WithMeta(md))
 				if err != nil {
 					return err
 				}
@@ -87,7 +93,27 @@ func newAddCmd(deps *Deps) *cobra.Command {
 	cmd.Flags().BoolVar(&stdin, "stdin", false, "read one document's content from stdin instead of walking paths")
 	cmd.Flags().StringVar(&name, "name", "stdin", "source name/URI to record for --stdin content")
 	cmd.Flags().StringVar(&ctype, "type", "text/markdown", "content type of --stdin content")
+	cmd.Flags().StringArrayVar(&meta, "meta", nil, "attach metadata key=value to ingested documents (repeatable); filter later with --where")
 	return cmd
+}
+
+// parseMetaPairs parses repeatable --meta key=value flags into Metadata. A pair
+// without '=' or with an empty key is a usage error. Whitespace around the key and
+// value is trimmed.
+func parseMetaPairs(pairs []string) (domain.Metadata, error) {
+	if len(pairs) == 0 {
+		return nil, nil
+	}
+	md := domain.Metadata{}
+	for _, p := range pairs {
+		k, v, ok := strings.Cut(p, "=")
+		k = strings.TrimSpace(k)
+		if !ok || k == "" {
+			return nil, fmt.Errorf("%w: --meta %q must be key=value", domain.ErrInvalidArgument, p)
+		}
+		md[k] = strings.TrimSpace(v)
+	}
+	return md, nil
 }
 
 // renderIngest renders an ingestion summary (shared by path and stdin add).

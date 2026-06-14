@@ -127,15 +127,17 @@ func (f *fakeEmbedder) Embed(_ context.Context, texts []string) ([][]float32, er
 }
 
 type fakeIndex struct {
-	mu        sync.Mutex
-	matches   map[string][]domain.VectorMatch         // canned Search results
-	upserted  map[string]map[domain.ChunkID][]float32 // recorded Upserts per collection
-	searchErr error
-	upsertErr error
+	mu         sync.Mutex
+	matches    map[string][]domain.VectorMatch         // canned Search results
+	upserted   map[string]map[domain.ChunkID][]float32 // recorded Upserts per collection
+	gotEntries []app.VectorEntry                       // every entry ever upserted (with metadata)
+	searchErr  error
+	upsertErr  error
 
 	gotCollection string
 	gotQuery      []float32
 	gotK          int
+	gotFilter     domain.Predicate
 }
 
 func (f *fakeIndex) Upsert(_ context.Context, collection string, entries []app.VectorEntry) error {
@@ -154,14 +156,15 @@ func (f *fakeIndex) Upsert(_ context.Context, collection string, entries []app.V
 	}
 	for _, e := range entries {
 		col[e.ChunkID] = e.Vector
+		f.gotEntries = append(f.gotEntries, e)
 	}
 	return nil
 }
 
-func (f *fakeIndex) Search(_ context.Context, collection string, query []float32, k int) ([]domain.VectorMatch, error) {
+func (f *fakeIndex) Search(_ context.Context, collection string, query []float32, k int, filter domain.Predicate) ([]domain.VectorMatch, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.gotCollection, f.gotQuery, f.gotK = collection, query, k
+	f.gotCollection, f.gotQuery, f.gotK, f.gotFilter = collection, query, k, filter
 	if f.searchErr != nil {
 		return nil, f.searchErr
 	}

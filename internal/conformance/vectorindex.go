@@ -28,7 +28,7 @@ func RunVectorIndexSuite(t *testing.T, factory func(t *testing.T) app.VectorInde
 		idx := factory(t)
 		mustUpsert(t, idx, "docs", entries)
 
-		got, err := idx.Search(ctx, "docs", []float32{1, 0, 0}, 2)
+		got, err := idx.Search(ctx, "docs", []float32{1, 0, 0}, 2, domain.Predicate{})
 		if err != nil {
 			t.Fatalf("Search: %v", err)
 		}
@@ -43,11 +43,67 @@ func RunVectorIndexSuite(t *testing.T, factory func(t *testing.T) app.VectorInde
 		}
 	})
 
+	t.Run("search filters by metadata predicate", func(t *testing.T) {
+		idx := factory(t)
+		mustUpsert(t, idx, "docs", []app.VectorEntry{
+			{ChunkID: "alice-1", Vector: []float32{1, 0, 0}, Metadata: domain.Metadata{"author": "alice", "date": "2025-06-01"}},
+			{ChunkID: "alice-2", Vector: []float32{0.95, 0.05, 0}, Metadata: domain.Metadata{"author": "alice", "date": "2024-01-01"}},
+			{ChunkID: "bob-1", Vector: []float32{0.9, 0.1, 0}, Metadata: domain.Metadata{"author": "bob", "date": "2025-06-01"}},
+		})
+		query := []float32{1, 0, 0}
+
+		// A predicate restricts the candidate set before the top-k cut, so bob's
+		// nearer vector cannot crowd out alice's lower-ranked chunk.
+		where, err := domain.ParseWhere([]string{"author=alice"})
+		if err != nil {
+			t.Fatalf("ParseWhere: %v", err)
+		}
+		got, err := idx.Search(ctx, "docs", query, 2, where)
+		if err != nil {
+			t.Fatalf("Search: %v", err)
+		}
+		if len(got) != 2 || got[0].ChunkID != "alice-1" || got[1].ChunkID != "alice-2" {
+			t.Fatalf("author=alice should yield [alice-1 alice-2] in score order, got %+v", got)
+		}
+
+		// Conjunction across two keys, with date coercion.
+		where2, _ := domain.ParseWhere([]string{"author=alice", "date>=2025-01-01"})
+		got2, err := idx.Search(ctx, "docs", query, 10, where2)
+		if err != nil {
+			t.Fatalf("Search: %v", err)
+		}
+		if len(got2) != 1 || got2[0].ChunkID != "alice-1" {
+			t.Errorf("author=alice AND date>=2025-01-01 should yield only alice-1, got %+v", got2)
+		}
+
+		// The zero predicate filters nothing.
+		all, err := idx.Search(ctx, "docs", query, 10, domain.Predicate{})
+		if err != nil {
+			t.Fatalf("Search: %v", err)
+		}
+		if len(all) != 3 {
+			t.Errorf("zero predicate must match all 3 entries, got %d", len(all))
+		}
+
+		// An entry with no metadata is excluded by any condition (it cannot prove
+		// it satisfies the filter).
+		mustUpsert(t, idx, "docs", []app.VectorEntry{{ChunkID: "nometa", Vector: []float32{1, 0, 0}}})
+		got3, err := idx.Search(ctx, "docs", query, 10, where)
+		if err != nil {
+			t.Fatalf("Search: %v", err)
+		}
+		for _, m := range got3 {
+			if m.ChunkID == "nometa" {
+				t.Errorf("entry without metadata must not satisfy author=alice")
+			}
+		}
+	})
+
 	t.Run("k larger than index returns all", func(t *testing.T) {
 		idx := factory(t)
 		mustUpsert(t, idx, "docs", entries)
 
-		got, err := idx.Search(ctx, "docs", []float32{1, 0, 0}, 100)
+		got, err := idx.Search(ctx, "docs", []float32{1, 0, 0}, 100, domain.Predicate{})
 		if err != nil {
 			t.Fatalf("Search: %v", err)
 		}
@@ -61,7 +117,7 @@ func RunVectorIndexSuite(t *testing.T, factory func(t *testing.T) app.VectorInde
 		mustUpsert(t, idx, "docs", entries)
 
 		for _, k := range []int{0, -1} {
-			got, err := idx.Search(ctx, "docs", []float32{1, 0, 0}, k)
+			got, err := idx.Search(ctx, "docs", []float32{1, 0, 0}, k, domain.Predicate{})
 			if err != nil || len(got) != 0 {
 				t.Errorf("k=%d: want empty, nil; got %v, %v", k, got, err)
 			}
@@ -70,7 +126,7 @@ func RunVectorIndexSuite(t *testing.T, factory func(t *testing.T) app.VectorInde
 
 	t.Run("unknown collection yields no matches, no error", func(t *testing.T) {
 		idx := factory(t)
-		got, err := idx.Search(ctx, "nope", []float32{1, 0, 0}, 5)
+		got, err := idx.Search(ctx, "nope", []float32{1, 0, 0}, 5, domain.Predicate{})
 		if err != nil || len(got) != 0 {
 			t.Errorf("want empty, nil; got %v, %v", got, err)
 		}
@@ -81,7 +137,7 @@ func RunVectorIndexSuite(t *testing.T, factory func(t *testing.T) app.VectorInde
 		mustUpsert(t, idx, "docs", entries[:1])
 		mustUpsert(t, idx, "notes", entries[1:2])
 
-		got, err := idx.Search(ctx, "notes", []float32{1, 0, 0}, 10)
+		got, err := idx.Search(ctx, "notes", []float32{1, 0, 0}, 10, domain.Predicate{})
 		if err != nil {
 			t.Fatalf("Search: %v", err)
 		}
@@ -97,7 +153,7 @@ func RunVectorIndexSuite(t *testing.T, factory func(t *testing.T) app.VectorInde
 		mustUpsert(t, idx, "docs", []app.VectorEntry{{ChunkID: "a", Vector: []float32{0, 1, 0}}})
 		mustUpsert(t, idx, "docs", []app.VectorEntry{{ChunkID: "a", Vector: []float32{1, 0, 0}}})
 
-		got, err := idx.Search(ctx, "docs", []float32{1, 0, 0}, 10)
+		got, err := idx.Search(ctx, "docs", []float32{1, 0, 0}, 10, domain.Predicate{})
 		if err != nil {
 			t.Fatalf("Search: %v", err)
 		}
@@ -165,7 +221,7 @@ func RunVectorIndexSuite(t *testing.T, factory func(t *testing.T) app.VectorInde
 		}
 		got[0].Vector[0] = -1 // mutate the returned vector
 
-		again, err := idx.Search(ctx, "docs", []float32{1, 0, 0}, 1)
+		again, err := idx.Search(ctx, "docs", []float32{1, 0, 0}, 1, domain.Predicate{})
 		if err != nil {
 			t.Fatalf("Search: %v", err)
 		}
@@ -181,7 +237,7 @@ func RunVectorIndexSuite(t *testing.T, factory func(t *testing.T) app.VectorInde
 		if err := idx.Delete(ctx, "docs", []domain.ChunkID{"a", "does-not-exist"}); err != nil {
 			t.Fatalf("Delete: %v", err)
 		}
-		got, err := idx.Search(ctx, "docs", []float32{1, 0, 0}, 10)
+		got, err := idx.Search(ctx, "docs", []float32{1, 0, 0}, 10, domain.Predicate{})
 		if err != nil {
 			t.Fatalf("Search: %v", err)
 		}
@@ -201,7 +257,7 @@ func RunVectorIndexSuite(t *testing.T, factory func(t *testing.T) app.VectorInde
 		mustUpsert(t, idx, "docs", []app.VectorEntry{{ChunkID: "a", Vector: vec}})
 		vec[0] = -1 // mutate after upsert
 
-		got, err := idx.Search(ctx, "docs", []float32{1, 0, 0}, 1)
+		got, err := idx.Search(ctx, "docs", []float32{1, 0, 0}, 1, domain.Predicate{})
 		if err != nil {
 			t.Fatalf("Search: %v", err)
 		}
