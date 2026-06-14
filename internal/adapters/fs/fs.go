@@ -18,10 +18,16 @@ import (
 	"strings"
 
 	"github.com/jmurray2011/lore/internal/app"
+	"github.com/jmurray2011/lore/internal/limitio"
 )
 
 // fingerprintSample bounds the head/tail bytes hashed into a file's fingerprint.
 const fingerprintSample = 8192
+
+// maxFileBytes caps a single file read on ingest, so a pathologically large
+// file cannot exhaust memory. It is a var, not a const, only so tests can lower
+// it.
+var maxFileBytes int64 = 256 << 20
 
 // Source walks the filesystem. Its zero value is ready to use.
 type Source struct{}
@@ -68,7 +74,7 @@ func (Source) Walk(ctx context.Context, root string, fn func(app.SourceItem) err
 			URI:         uri,
 			ContentType: contentType(path),
 			Fingerprint: fp,
-			Open:        func() ([]byte, error) { return os.ReadFile(path) },
+			Open:        func() ([]byte, error) { return readCapped(path, maxFileBytes) },
 		})
 	})
 }
@@ -114,6 +120,16 @@ func hashSample(h io.Writer, r io.Reader, n int) error {
 	}
 	_, _ = h.Write(buf[:read])
 	return nil
+}
+
+// readCapped reads the whole file at path, failing if it exceeds max bytes.
+func readCapped(path string, max int64) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	return limitio.ReadAll(f, max)
 }
 
 func hidden(name string) bool { return len(name) > 1 && name[0] == '.' }

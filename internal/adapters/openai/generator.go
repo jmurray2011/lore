@@ -56,7 +56,7 @@ var answerSchema = map[string]any{
 }
 
 // Capabilities declares what the configured provider supports beyond plain
-// chat. They are config-declared (decision 19), not probed: a capability set
+// chat. They are config-declared, not probed: a capability set
 // here that the backend lacks surfaces as an error at call time.
 type Capabilities struct {
 	StructuredOutput bool // JSON-schema response_format
@@ -76,7 +76,7 @@ type Generator struct {
 }
 
 // NewGenerator constructs a Generator. caps must reflect only what the provider
-// actually supports (decision 19). auth selects the API-key scheme (AuthBearer
+// actually supports. auth selects the API-key scheme (AuthBearer
 // for OpenAI, AuthAPIKey for Azure). A nil httpClient uses http.DefaultClient.
 func NewGenerator(baseURL, apiKey, model string, caps Capabilities, auth AuthStyle, httpClient *http.Client) (*Generator, error) {
 	if strings.TrimSpace(baseURL) == "" {

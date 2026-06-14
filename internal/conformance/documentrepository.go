@@ -14,7 +14,7 @@ import (
 // RunDocumentRepositorySuite verifies the app.DocumentRepository contract. The
 // factory must return a fresh, empty repository per call.
 //
-// The within-port cascade (deleting a Document deletes its Chunks, invariant 3)
+// The within-port cascade (deleting a Document deletes its Chunks)
 // is covered here. The Chunks' vectors live in the VectorIndex; removing those
 // is the use case's job and is verified at that layer.
 func RunDocumentRepositorySuite(t *testing.T, factory func(t *testing.T) app.DocumentRepository) {
@@ -289,7 +289,7 @@ func RunDocumentRepositorySuite(t *testing.T, factory func(t *testing.T) app.Doc
 			t.Fatalf("GetChunks: %v", err)
 		}
 		if len(got) != 0 {
-			t.Errorf("deleting a document must delete its chunks (invariant 3); got %d", len(got))
+			t.Errorf("deleting a document must delete its chunks; got %d", len(got))
 		}
 	})
 

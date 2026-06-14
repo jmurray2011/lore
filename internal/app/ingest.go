@@ -24,8 +24,8 @@ type IngestSummary struct {
 }
 
 // Ingestor walks a Source, extracts and chunks each document, embeds the
-// chunks, and stores chunks and their vectors. Ingestion is idempotent
-// (invariant 2): a source whose extracted content is unchanged is a no-op.
+// chunks, and stores chunks and their vectors. Ingestion is idempotent:
+// a source whose extracted content is unchanged is a no-op.
 type Ingestor struct {
 	collections CollectionRepository
 	docs        DocumentRepository
@@ -74,7 +74,7 @@ func NewIngestor(collections CollectionRepository, docs DocumentRepository, inde
 
 // Ingest processes every document the Source yields under root into the named
 // collection, concurrently with bounded parallelism. It enforces space
-// coherence up front (invariant 1) and fails fast on the first error; because
+// coherence up front and fails fast on the first error; because
 // ingestion is idempotent, re-running resumes safely over already-stored
 // documents.
 func (i *Ingestor) Ingest(ctx context.Context, collection, root string) (IngestSummary, error) {
@@ -150,8 +150,8 @@ const (
 
 // IngestContent ingests a single in-memory document (e.g. read from stdin) into
 // the collection, identified by uri with the given content type. Like Ingest it
-// enforces space coherence (invariant 1) and is idempotent by content hash
-// (invariant 2). Unlike Ingest it records no sync source — there is no path to
+// enforces space coherence and is idempotent by content hash. Unlike Ingest it
+// records no sync source — there is no path to
 // replay — and an unsupported content type is reported, not an error.
 func (i *Ingestor) IngestContent(ctx context.Context, collection, uri, contentType string, content []byte) (IngestSummary, error) {
 	coll, err := i.collections.Get(ctx, collection)
@@ -285,7 +285,7 @@ func (i *Ingestor) ingestItem(ctx context.Context, coll *domain.Collection, item
 
 	// For a changed document, drop the prior version's chunks and vectors before
 	// writing the new ones — otherwise a shrunk document leaves orphaned tail
-	// vectors in the index (invariant 3). Embedding happened first, so a failure
+	// vectors in the index. Embedding happened first, so a failure
 	// there leaves the prior version intact; deleting here means a failure before
 	// the document is re-stored just reprocesses on the next run.
 	if prior != nil {

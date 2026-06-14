@@ -26,7 +26,7 @@ func NewCatalog(collections CollectionRepository, docs DocumentRepository, embed
 }
 
 // Init creates a collection pinned to the embedder's current EmbeddingSpace
-// (invariant 1) and the active chunker spec (re-ingest under a different chunker
+// and the active chunker spec (re-ingest under a different chunker
 // is then refused). It fails with ErrAlreadyExists if the name is taken and
 // ErrInvalidArgument if the name is invalid.
 func (c *Catalog) Init(ctx context.Context, name string) (*domain.Collection, error) {

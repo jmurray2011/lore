@@ -226,7 +226,7 @@ func TestEndToEndAnswerCache(t *testing.T) {
 	}
 }
 
-// TestEndToEndSplitEmbedChatEndpoints proves the headline of decision 60: in a
+// TestEndToEndSplitEmbedChatEndpoints proves that in a
 // single process the embed role and the chat role reach independently-configured
 // endpoints with independently-configured auth. Embed is pointed at one server
 // with bearer auth; chat at a different server with api-key auth; the shared

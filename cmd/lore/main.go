@@ -90,11 +90,10 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		cleanup = store.close
 
 		// Embed and chat are independently-targetable: each resolves its own
-		// connection (per-role override → shared provider.* → default, decision
-		// 60), so one process can embed against one endpoint and chat against
-		// another. A separate http.Client per role carries that role's timeout (0
-		// disables) — the safety net against a hung provider in non-interactive
-		// use (decision 36).
+		// connection (per-role override → shared provider.* → default), so one
+		// process can embed against one endpoint and chat against another. A
+		// separate http.Client per role carries that role's timeout (0 disables) —
+		// the safety net against a hung provider in non-interactive use.
 		embedConn := cfg.Provider.EmbedConnection()
 		chatConn := cfg.Provider.ChatConnection()
 

@@ -12,7 +12,7 @@ import (
 )
 
 // Sentinel errors shared across ports. Adapters wrap these with %w so
-// callers can use errors.Is; the CLI maps them to exit codes (DESIGN.md).
+// callers can use errors.Is; the CLI maps them to exit codes.
 var (
 	ErrNotFound      = errors.New("not found")
 	ErrAlreadyExists = errors.New("already exists")
@@ -31,7 +31,7 @@ type CollectionRepository interface {
 	List(ctx context.Context) ([]*domain.Collection, error)
 	// Delete removes the collection record, failing with ErrNotFound if no
 	// such collection exists. Cascading removal of its documents and vectors
-	// (invariant 3) is orchestrated by the use case, which holds the
+	// is orchestrated by the use case, which holds the
 	// DocumentRepository and VectorIndex; this port cannot reach them.
 	Delete(ctx context.Context, name string) error
 	// RecordSource adds source to the collection's remembered Sources,
@@ -68,12 +68,12 @@ type DocumentRepository interface {
 	ListDocuments(ctx context.Context, collection string) ([]*domain.Document, error)
 	// Delete removes the document and its chunks, returning the removed chunk
 	// IDs so the use case can delete their vectors via the VectorIndex
-	// (invariant 3 — this port cannot reach it). Fails with ErrNotFound if no
+	// (this port cannot reach it). Fails with ErrNotFound if no
 	// such document exists in the collection.
 	Delete(ctx context.Context, collection string, id domain.DocumentID) ([]domain.ChunkID, error)
 	// DeleteChunks removes the chunks with the given IDs that belong to the
 	// collection, returning the IDs actually removed so the use case can delete
-	// their vectors (invariant 3). The owning documents are left in place — a
+	// their vectors. The owning documents are left in place — a
 	// document keeps its record even after losing chunks (sub-document
 	// redaction, not document deletion). IDs absent from the collection
 	// (unknown, or owned by another collection) are skipped, so the caller can
@@ -94,10 +94,10 @@ type VectorEntry struct {
 }
 
 // VectorIndex stores and searches vectors. It is deliberately dumb: space
-// coherence (invariant 1) is enforced by the use cases via
+// coherence is enforced by the use cases via
 // Collection.AcceptsSpace before anything reaches the index.
 //
-// Semantics (verified by conformance.RunVectorIndexSuite):
+// Semantics:
 //   - Upsert replaces entries with the same ChunkID.
 //   - Search returns up to k matches, best first (higher score = more
 //     similar). Unknown collection or k <= 0 yields no matches, no error.
@@ -114,7 +114,7 @@ type VectorIndex interface {
 }
 
 // Embedder turns texts into vectors and reports the space it produces,
-// so use cases can enforce invariant 1 against the target collection.
+// so use cases can enforce space coherence against the target collection.
 type Embedder interface {
 	Space(ctx context.Context) (domain.EmbeddingSpace, error)
 	// Embed returns one vector per input text, in input order.
@@ -156,7 +156,7 @@ type StreamingGenerator interface {
 // in the caller, not the store, which keeps the store a dumb time-indexed KV and
 // the conformance suite deterministic.
 //
-// Semantics (verified by conformance.RunAnswerCacheSuite):
+// Semantics:
 //   - Get returns a hit only when an entry exists AND was stored at or after
 //     notBefore; an older entry is a miss (expired), as is an unknown key.
 //   - Put replaces any existing entry for key.
