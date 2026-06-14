@@ -135,10 +135,13 @@ func newHarness(t *testing.T, scope []string, withRerank bool) *harness {
 		Tokens:  fakeTokens{},
 		Index:   h.index,
 	}
+	var reranker *app.Reranker
 	if withRerank {
 		h.rerank = &fakeReranker{}
-		deps.Rerank = app.NewReranker(h.rerank)
+		reranker = app.NewReranker(h.rerank)
+		deps.Rerank = reranker
 	}
+	deps.Retriever = app.NewRetriever(querier, reranker, h.index)
 	srv, err := New(deps, Config{Collections: scope, Version: "test"}, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)

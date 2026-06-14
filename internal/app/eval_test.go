@@ -65,11 +65,16 @@ func TestEvaluator(t *testing.T) {
 	}}
 	emb := &fakeEmbedder{space: space, byText: map[string][]float32{"how does auth work?": {1, 0, 0}}}
 	querier := app.NewQuerier(newFakeCollections(coll), idx, docs, emb, &fakeLexical{})
+	// retrieve mirrors what the CLI/MCP build from the Retriever; here a plain
+	// top-2 vector search suffices to exercise the metrics.
+	retrieve := func(ctx context.Context, q string) ([]domain.ChunkHit, error) {
+		return querier.Query(ctx, "docs", q, 2, "", domain.Predicate{})
+	}
 
 	t.Run("retrieval metrics over expected chunks", func(t *testing.T) {
-		ev := app.NewEvaluator(querier, nil, nil)
+		ev := app.NewEvaluator(nil, nil)
 		cases := []app.EvalCase{{Question: "how does auth work?", ExpectedChunks: []string{string(ca.ID)}}}
-		report, err := ev.Evaluate(ctx, "docs", cases, 2, false)
+		report, err := ev.Evaluate(ctx, "docs", cases, 2, false, retrieve)
 		if err != nil {
 			t.Fatalf("Evaluate: %v", err)
 		}
@@ -85,9 +90,9 @@ func TestEvaluator(t *testing.T) {
 		// Both retrieved chunks (ca, cb) come from the one relevant document. Metrics
 		// must judge the document once: recall and nDCG are bounded by [0,1] and must
 		// not scale with how many chunks the document contributed.
-		ev := app.NewEvaluator(querier, nil, nil)
+		ev := app.NewEvaluator(nil, nil)
 		cases := []app.EvalCase{{Question: "how does auth work?", ExpectedSources: []string{"file:///a.md"}}}
-		report, err := ev.Evaluate(ctx, "docs", cases, 2, false)
+		report, err := ev.Evaluate(ctx, "docs", cases, 2, false, retrieve)
 		if err != nil {
 			t.Fatalf("Evaluate: %v", err)
 		}
@@ -110,10 +115,10 @@ func TestEvaluator(t *testing.T) {
 		asker := app.NewAsker(querier, gen)
 		catalog := app.NewCatalog(newFakeCollections(coll), docs, emb, domain.Registry{})
 		checker := app.NewChecker(&fakeVerifier{}, catalog) // default: supported
-		ev := app.NewEvaluator(querier, asker, checker)
+		ev := app.NewEvaluator(asker, checker)
 
 		cases := []app.EvalCase{{Question: "how does auth work?"}}
-		report, err := ev.Evaluate(ctx, "docs", cases, 2, true)
+		report, err := ev.Evaluate(ctx, "docs", cases, 2, true, retrieve)
 		if err != nil {
 			t.Fatalf("Evaluate verify: %v", err)
 		}
@@ -126,8 +131,8 @@ func TestEvaluator(t *testing.T) {
 	})
 
 	t.Run("verify without an asker/checker is an error", func(t *testing.T) {
-		ev := app.NewEvaluator(querier, nil, nil)
-		if _, err := ev.Evaluate(ctx, "docs", []app.EvalCase{{Question: "how does auth work?"}}, 2, true); !errors.Is(err, domain.ErrInvalidArgument) {
+		ev := app.NewEvaluator(nil, nil)
+		if _, err := ev.Evaluate(ctx, "docs", []app.EvalCase{{Question: "how does auth work?"}}, 2, true, retrieve); !errors.Is(err, domain.ErrInvalidArgument) {
 			t.Errorf("want ErrInvalidArgument, got %v", err)
 		}
 	})

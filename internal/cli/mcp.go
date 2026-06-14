@@ -44,12 +44,13 @@ func newMCPCmd(deps *Deps) *cobra.Command {
 				token = os.Getenv("LORE_MCP_TOKEN")
 			}
 			srv, err := loremcp.New(loremcp.Deps{
-				Catalog: deps.Catalog,
-				Query:   deps.Query,
-				Ask:     deps.Ask,
-				Rerank:  deps.Rerank,
-				Tokens:  deps.Tokens,
-				Index:   deps.Index,
+				Catalog:   deps.Catalog,
+				Query:     deps.Query,
+				Ask:       deps.Ask,
+				Retriever: deps.Retriever,
+				Rerank:    deps.Rerank,
+				Tokens:    deps.Tokens,
+				Index:     deps.Index,
 			}, loremcp.Config{Collections: collections, Version: cmd.Root().Version}, deps.Log)
 			if err != nil {
 				return err

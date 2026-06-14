@@ -151,6 +151,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		catalog := app.NewCatalog(store.collections, store.docs, embedder, chunkers)
 		ingestor := app.NewIngestor(store.collections, store.docs, store.index, embedder, extractor, source, chunkers, store.lexical, app.WithConcurrency(cfg.Ingest.Concurrency))
 		querier := app.NewQuerier(store.collections, store.index, store.docs, embedder, store.lexical)
+		retriever := app.NewRetriever(querier, reranker, store.index)
 		remover := app.NewRemover(store.collections, store.docs, store.index, store.lexical)
 		asker := app.NewAsker(querier, generator)
 
@@ -168,13 +169,14 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			Sync:            app.NewSyncer(catalog, ingestor, remover, source),
 			Query:           querier,
 			Ask:             asker,
+			Retriever:       retriever,
 			Rerank:          reranker,
 			Remove:          remover,
 			Tokens:          counter,
 			Export:          app.NewExporter(store.collections, store.docs, store.index),
 			Import:          app.NewImporter(store.collections, store.docs, store.index, remover, store.lexical),
 			Verify:          checker,
-			Eval:            app.NewEvaluator(querier, asker, checker),
+			Eval:            app.NewEvaluator(asker, checker),
 			Index:           store.index,
 			Log:             logger,
 			RetrievalHybrid: cfg.Retrieval.Hybrid,

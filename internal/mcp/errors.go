@@ -20,10 +20,3 @@ var (
 	errNoCollection  = fmt.Errorf("%w: a collection is required", domain.ErrInvalidArgument)
 	errNoChunkIDs    = fmt.Errorf("%w: at least one chunk_id is required", domain.ErrInvalidArgument)
 )
-
-// errRerankUnconfigured mirrors the CLI's usage error (internal/cli/retrieval.go)
-// for requesting reranking without a configured rerank provider, naming the
-// config to set.
-func errRerankUnconfigured() error {
-	return fmt.Errorf("%w: reranking is not configured; set rerank.base_url and rerank.model (or LORE_RERANK_BASE_URL / LORE_RERANK_MODEL)", domain.ErrInvalidArgument)
-}

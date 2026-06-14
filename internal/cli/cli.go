@@ -27,6 +27,9 @@ type Deps struct {
 	Sync    *app.Syncer
 	Query   *app.Querier
 	Ask     *app.Asker
+	// Retriever composes retrieval (hybrid/rerank/mmr/recency/cap) for query/ask;
+	// the one source of truth shared with the eval harness and the MCP server.
+	Retriever *app.Retriever
 	// Rerank is nil when no rerank provider is configured; commands that need it
 	// (rerank, query/ask --rerank) report a usage error in that case.
 	Rerank *app.Reranker

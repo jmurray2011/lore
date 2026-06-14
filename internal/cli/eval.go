@@ -1,11 +1,13 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -40,10 +42,20 @@ var knownMetrics = map[string]bool{
 
 func newEvalCmd(deps *Deps) *cobra.Command {
 	var (
-		file      string
-		k         int
-		verify    bool
-		failUnder []string
+		file         string
+		k            int
+		verify       bool
+		failUnder    []string
+		source       string
+		where        []string
+		rerank       bool
+		candidates   int
+		hybrid       bool
+		mmr          bool
+		mmrLambda    float64
+		recency      bool
+		halfLifeDays float64
+		maxPerSource int
 	)
 	cmd := &cobra.Command{
 		Use:   "eval <collection>",
@@ -64,7 +76,32 @@ func newEvalCmd(deps *Deps) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			report, err := deps.Eval.Evaluate(cmd.Context(), args[0], cases, k, verify)
+			filter, err := domain.ParseWhere(where)
+			if err != nil {
+				return err
+			}
+			// Evaluate the retrieval the user actually runs: the same Retriever and
+			// options as query/ask, so eval metrics reflect the configured pipeline,
+			// not a fixed cosine baseline.
+			retrieve := func(ctx context.Context, question string) ([]domain.ChunkHit, error) {
+				hits, _, rerr := deps.Retriever.Resolve(ctx, app.RetrieveOptions{
+					Collections:  []string{args[0]},
+					Query:        question,
+					K:            k,
+					Candidates:   candidates,
+					Source:       source,
+					Filter:       filter,
+					Rerank:       rerank,
+					Hybrid:       hybrid,
+					MMR:          mmr,
+					MMRLambda:    mmrLambda,
+					Recency:      recency,
+					HalfLife:     time.Duration(halfLifeDays * 24 * float64(time.Hour)),
+					MaxPerSource: maxPerSource,
+				})
+				return hits, rerr
+			}
+			report, err := deps.Eval.Evaluate(cmd.Context(), args[0], cases, k, verify, retrieve)
 			if err != nil {
 				return err
 			}
@@ -78,6 +115,17 @@ func newEvalCmd(deps *Deps) *cobra.Command {
 	cmd.Flags().IntVarP(&k, "top-k", "k", 8, "number of chunks to retrieve per question")
 	cmd.Flags().BoolVar(&verify, "verify", false, "also synthesize and verify each answer, reporting the support rate")
 	cmd.Flags().StringArrayVar(&failUnder, "fail-under", nil, "exit 5 if an aggregate metric is below value, e.g. 'recall=0.8' (repeatable)")
+	// Retrieval flags mirror query/ask so eval measures the configured pipeline.
+	cmd.Flags().StringVar(&source, "source", "", "restrict retrieval to documents whose source matches this glob")
+	cmd.Flags().StringArrayVar(&where, "where", nil, "restrict retrieval to documents whose metadata matches this predicate (repeatable; ANDed)")
+	cmd.Flags().BoolVar(&rerank, "rerank", false, "evaluate two-stage retrieval (wide vector pool then cross-encoder rerank)")
+	cmd.Flags().IntVar(&candidates, "rerank-candidates", 50, "pre-rerank vector candidate pool (must be >= -k)")
+	cmd.Flags().BoolVar(&hybrid, "hybrid", deps.RetrievalHybrid, "evaluate hybrid (BM25 + vector) retrieval")
+	cmd.Flags().BoolVar(&mmr, "mmr", false, "evaluate MMR-diversified retrieval (single-collection; not with --rerank)")
+	cmd.Flags().Float64Var(&mmrLambda, "mmr-lambda", 0.5, "MMR relevance/diversity trade-off in [0,1]")
+	cmd.Flags().BoolVar(&recency, "recency", false, "evaluate recency-aware retrieval (not with --rerank/--mmr)")
+	cmd.Flags().Float64Var(&halfLifeDays, "half-life-days", 90, "recency half-life in days (with --recency)")
+	cmd.Flags().IntVar(&maxPerSource, "max-per-source", 0, "cap retrieved chunks per source document (0 = no cap)")
 	return cmd
 }
 

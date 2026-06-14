@@ -162,9 +162,11 @@ func (s *stubRerankProvider) Rerank(_ context.Context, _ string, docs []string, 
 	return out, nil
 }
 
-// withReranker attaches a Reranker use case (over prov) to deps.
+// withReranker attaches a Reranker use case (over prov) to deps and rebuilds the
+// Retriever so query/ask --rerank can reach it.
 func withReranker(deps cli.Deps, prov app.RerankProvider) cli.Deps {
 	deps.Rerank = app.NewReranker(prov)
+	deps.Retriever = app.NewRetriever(deps.Query, deps.Rerank, deps.Index)
 	return deps
 }
 
@@ -183,18 +185,19 @@ func newDeps(emb app.Embedder, gen app.Generator) (cli.Deps, *memstore.Collectio
 	asker := app.NewAsker(q, gen)
 	checker := app.NewChecker(stubVerifier{}, catalog)
 	deps := cli.Deps{
-		Catalog: catalog,
-		Ingest:  ingestor,
-		Sync:    app.NewSyncer(catalog, ingestor, remover, source),
-		Query:   q,
-		Ask:     asker,
-		Remove:  remover,
-		Tokens:  wordTokenCounter{},
-		Export:  app.NewExporter(colls, docs, index),
-		Import:  app.NewImporter(colls, docs, index, remover, lexical),
-		Verify:  checker,
-		Eval:    app.NewEvaluator(q, asker, checker),
-		Index:   index,
+		Catalog:   catalog,
+		Ingest:    ingestor,
+		Sync:      app.NewSyncer(catalog, ingestor, remover, source),
+		Query:     q,
+		Ask:       asker,
+		Retriever: app.NewRetriever(q, nil, index),
+		Remove:    remover,
+		Tokens:    wordTokenCounter{},
+		Export:    app.NewExporter(colls, docs, index),
+		Import:    app.NewImporter(colls, docs, index, remover, lexical),
+		Verify:    checker,
+		Eval:      app.NewEvaluator(asker, checker),
+		Index:     index,
 	}
 	return deps, colls, docs, index
 }
@@ -1934,6 +1937,24 @@ func TestCLIEval(t *testing.T) {
 	t.Run("an unknown --fail-under metric is a usage error", func(t *testing.T) {
 		if _, code := execStdin(deps, jsonl, "eval", "docs", "--fail-under", "bogus=0.5"); code != 2 {
 			t.Errorf("unknown metric should exit 2, got %d", code)
+		}
+	})
+
+	t.Run("evaluates the configured retrieval (a retrieval flag is wired through)", func(t *testing.T) {
+		// --hybrid must reach the shared Retriever; with the stub lexical it degrades
+		// to vector but still runs and reports metrics.
+		out, code := execStdin(deps, jsonl, "eval", "docs", "--hybrid", "--json")
+		if code != 0 {
+			t.Fatalf("eval --hybrid exit %d, out %q", code, out)
+		}
+		if !strings.Contains(out, "recall") {
+			t.Errorf("eval --hybrid should still report metrics: %q", out)
+		}
+	})
+
+	t.Run("retrieval guards reach eval (recency+rerank is a usage error)", func(t *testing.T) {
+		if _, code := execStdin(deps, jsonl, "eval", "docs", "--recency", "--rerank"); code != 2 {
+			t.Errorf("eval --recency --rerank should exit 2 (mutually exclusive), got %d", code)
 		}
 	})
 }

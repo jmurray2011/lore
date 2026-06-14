@@ -120,21 +120,23 @@ const (
 // Evaluator runs an eval set against a collection, computing retrieval metrics
 // and — when verify is set — answer faithfulness, via the existing use cases.
 type Evaluator struct {
-	querier *Querier
 	asker   *Asker
 	checker *Checker
 }
 
 // NewEvaluator wires an Evaluator. asker and checker are needed only for
 // verification; pass them (the CLI always wires them) so --verify works.
-func NewEvaluator(querier *Querier, asker *Asker, checker *Checker) *Evaluator {
-	return &Evaluator{querier: querier, asker: asker, checker: checker}
+func NewEvaluator(asker *Asker, checker *Checker) *Evaluator {
+	return &Evaluator{asker: asker, checker: checker}
 }
 
-// Evaluate runs every case: retrieve top-k, score retrieval against the case's
-// expectations, and — when verify — synthesize an answer and verify its claims.
-// Retrieval metrics use expected_chunks when present (exact), else expected_sources.
-func (e *Evaluator) Evaluate(ctx context.Context, collection string, cases []EvalCase, k int, verify bool) (EvalReport, error) {
+// Evaluate runs every case: retrieve via the supplied retrieve func — the caller
+// builds it from the same Retriever the CLI/MCP use, so eval measures the *actual*
+// configured retrieval (hybrid/rerank/recency/…), not a fixed cosine baseline —
+// score retrieval against the case's expectations, and, when verify, synthesize
+// and verify the answer. Retrieval metrics use expected_chunks when present
+// (exact), else expected_sources.
+func (e *Evaluator) Evaluate(ctx context.Context, collection string, cases []EvalCase, k int, verify bool, retrieve func(context.Context, string) ([]domain.ChunkHit, error)) (EvalReport, error) {
 	if verify && (e.asker == nil || e.checker == nil) {
 		return EvalReport{}, fmt.Errorf("%w: verification is not available", domain.ErrInvalidArgument)
 	}
@@ -143,7 +145,7 @@ func (e *Evaluator) Evaluate(ctx context.Context, collection string, cases []Eva
 	sums := map[string]float64{}
 
 	for _, c := range cases {
-		hits, err := e.querier.Query(ctx, collection, c.Question, k, "", domain.Predicate{})
+		hits, err := retrieve(ctx, c.Question)
 		if err != nil {
 			return EvalReport{}, fmt.Errorf("eval %q: %w", c.Question, err)
 		}

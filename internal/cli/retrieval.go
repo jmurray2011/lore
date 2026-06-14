@@ -73,11 +73,10 @@ func newQueryCmd(deps *Deps) *cobra.Command {
 				return err
 			}
 
-			hits, runnerUp, err := resolveHits(cmd, deps, collections, queryText, k, candidates, source, filter, rerank, explain, hybrid, mmr, mmrLambda, recency, halfLifeDays)
+			hits, runnerUp, err := resolveHits(cmd, deps, collections, queryText, k, candidates, source, filter, rerank, explain, hybrid, mmr, mmrLambda, recency, halfLifeDays, maxPerSource)
 			if err != nil {
 				return err
 			}
-			hits = domain.CapPerSource(hits, maxPerSource)
 			hits, tokens := budgetTrim(hits, budget, deps.Tokens)
 
 			views, md := hitViews(hits)
@@ -153,171 +152,28 @@ func budgetTrim(hits []domain.ChunkHit, budget int, counter app.TokenCounter) ([
 	return out, total
 }
 
-// mmrPoolMin is the minimum candidate pool fetched for MMR before it selects the
-// final -k diverse hits (MMR adds nothing if the pool is no larger than k).
-const mmrPoolMin = 50
-
-// resolveHits performs retrieval for query and ask, over one or many collections:
-// a plain top-k vector search, or — with --rerank — two-stage retrieval (a wide
-// vector candidate pool reranked to the final top-k), or — with --mmr —
-// diversified selection from a wider pool, or — with --recency — a time-decay
-// re-rank of a wider pool. --recency, --mmr, and --rerank each reorder the pool
-// and are mutually exclusive. With more than one collection the
-// candidates are merged across them by score (each carrying its origin
-// collection). It returns the hits plus, for --explain, the runner-up score (the
-// best candidate just outside the returned set, by whichever ordering is in
-// effect — rerank score when reranking, similarity otherwise).
-func resolveHits(cmd *cobra.Command, deps *Deps, collections []string, queryText string, k, candidates int, source string, filter domain.Predicate, rerank, explain, hybrid, mmr bool, mmrLambda float64, recency bool, halfLifeDays float64) ([]domain.ChunkHit, *float64, error) {
-	if recency {
-		if mmr {
-			return nil, nil, fmt.Errorf("%w: --recency and --mmr are mutually exclusive (both reorder the candidate pool)", domain.ErrInvalidArgument)
-		}
-		return resolveRecency(cmd, deps, collections, queryText, k, source, filter, rerank, hybrid, halfLifeDays)
-	}
-	if mmr {
-		return resolveMMR(cmd, deps, collections, queryText, k, source, filter, rerank, hybrid, mmrLambda)
-	}
-	if rerank {
-		if deps.Rerank == nil {
-			return nil, nil, errRerankUnconfigured()
-		}
-		if candidates < k {
-			return nil, nil, fmt.Errorf("%w: --rerank-candidates (%d) must be >= -k (%d)", domain.ErrInvalidArgument, candidates, k)
-		}
-		// --hybrid feeds the rerank pool: fuse a wide vector+lexical candidate set,
-		// then the cross-encoder reorders it to the final top-k.
-		pool, err := queryHits(cmd, deps, collections, queryText, candidates, source, filter, hybrid)
-		if err != nil {
-			return nil, nil, err
-		}
-		// With --explain, rerank the whole pool so the runner-up (k+1th by rerank
-		// score) is visible; otherwise truncate to k in the use case.
-		topN := k
-		if explain {
-			topN = 0
-		}
-		reranked, err := deps.Rerank.Rerank(cmd.Context(), queryText, pool, topN)
-		if err != nil {
-			return nil, nil, err
-		}
-		var runnerUp *float64
-		if explain && k > 0 && len(reranked) > k {
-			if rs := reranked[k].RerankScore; rs != nil {
-				s := *rs
-				runnerUp = &s
-			}
-			reranked = reranked[:k]
-		}
-		return reranked, runnerUp, nil
-	}
-	if explain {
-		ret, err := explainHits(cmd, deps, collections, queryText, k, source, filter, hybrid)
-		if err != nil {
-			return nil, nil, err
-		}
-		return ret.Hits, nextScorePtr(ret), nil
-	}
-	hits, err := queryHits(cmd, deps, collections, queryText, k, source, filter, hybrid)
-	return hits, nil, err
-}
-
-// queryHits retrieves the top-k hits for one collection (the byte-for-byte
-// legacy path) or merges across several same-space collections.
-func queryHits(cmd *cobra.Command, deps *Deps, collections []string, queryText string, k int, source string, filter domain.Predicate, hybrid bool) ([]domain.ChunkHit, error) {
-	if len(collections) > 1 {
-		if hybrid {
-			return nil, errHybridMultiCollection()
-		}
-		return deps.Query.QueryAcross(cmd.Context(), collections, queryText, k, source, filter)
-	}
-	if hybrid {
-		return deps.Query.QueryHybrid(cmd.Context(), collections[0], queryText, k, source, filter)
-	}
-	return deps.Query.Query(cmd.Context(), collections[0], queryText, k, source, filter)
-}
-
-// explainHits is queryHits' --explain twin: it also surfaces the runner-up just
-// outside the returned top-k, single- or multi-collection.
-func explainHits(cmd *cobra.Command, deps *Deps, collections []string, queryText string, k int, source string, filter domain.Predicate, hybrid bool) (app.Retrieval, error) {
-	if len(collections) > 1 {
-		if hybrid {
-			return app.Retrieval{}, errHybridMultiCollection()
-		}
-		return deps.Query.ExplainAcross(cmd.Context(), collections, queryText, k, source, filter)
-	}
-	if hybrid {
-		return deps.Query.ExplainHybrid(cmd.Context(), collections[0], queryText, k, source, filter)
-	}
-	return deps.Query.Explain(cmd.Context(), collections[0], queryText, k, source, filter)
-}
-
-// resolveMMR retrieves a wider candidate pool, then selects the final -k by
-// Maximal Marginal Relevance for diversity. It is single-collection and mutually
-// exclusive with --rerank (both reorder the candidate pool); it composes with
-// --hybrid (the pool can be fused), --where, and --source. The candidate vectors
-// come from the (existing) VectorIndex.Entries — the MMR redundancy penalty needs
-// them; relevance is each hit's cosine Score.
-func resolveMMR(cmd *cobra.Command, deps *Deps, collections []string, queryText string, k int, source string, filter domain.Predicate, rerank, hybrid bool, lambda float64) ([]domain.ChunkHit, *float64, error) {
-	if rerank {
-		return nil, nil, fmt.Errorf("%w: --mmr and --rerank are mutually exclusive (both reorder the candidate pool)", domain.ErrInvalidArgument)
-	}
-	if len(collections) > 1 {
-		return nil, nil, fmt.Errorf("%w: --mmr does not support multiple collections (-c); query each separately", domain.ErrInvalidArgument)
-	}
-	if deps.Index == nil {
-		return nil, nil, fmt.Errorf("%w: --mmr needs the vector index, which is not available", domain.ErrInvalidArgument)
-	}
-	pool := k
-	if pool < mmrPoolMin {
-		pool = mmrPoolMin
-	}
-	hits, err := queryHits(cmd, deps, collections, queryText, pool, source, filter, hybrid)
-	if err != nil {
-		return nil, nil, err
-	}
-	entries, err := deps.Index.Entries(cmd.Context(), collections[0])
-	if err != nil {
-		return nil, nil, fmt.Errorf("read vectors for --mmr: %w", err)
-	}
-	vecByID := make(map[domain.ChunkID][]float32, len(entries))
-	for _, e := range entries {
-		vecByID[e.ChunkID] = e.Vector
-	}
-	cands := make([]domain.MMRCandidate, len(hits))
-	for i, h := range hits {
-		cands[i] = domain.MMRCandidate{Hit: h, Vector: vecByID[h.Chunk.ID]}
-	}
-	return domain.SelectMMR(cands, lambda, k), nil, nil
-}
-
-// recencyPoolMin is the minimum candidate pool fetched for --recency before the
-// time-decay re-rank picks the final -k, so a fresh-but-slightly-less-relevant
-// chunk that missed cosine-top-k can still surface.
-const recencyPoolMin = 50
-
-// resolveRecency retrieves a wider candidate pool, then re-ranks it by relevance
-// blended with a time decay (domain.DecayByRecency) and trims to -k. It needs no
-// vectors (unlike MMR), so it composes with --hybrid, --where, --source, and
-// multiple collections; it is mutually exclusive with --rerank (both reorder the
-// pool). The decay timestamp is each hit's document date metadata, then ingest
-// time (domain.HitTime); now is the wall clock, passed into the pure transform.
-func resolveRecency(cmd *cobra.Command, deps *Deps, collections []string, queryText string, k int, source string, filter domain.Predicate, rerank, hybrid bool, halfLifeDays float64) ([]domain.ChunkHit, *float64, error) {
-	if rerank {
-		return nil, nil, fmt.Errorf("%w: --recency and --rerank are mutually exclusive (both reorder the candidate pool)", domain.ErrInvalidArgument)
-	}
-	if halfLifeDays <= 0 {
-		return nil, nil, fmt.Errorf("%w: --half-life-days must be > 0, got %v", domain.ErrInvalidArgument, halfLifeDays)
-	}
-	pool := k
-	if pool < recencyPoolMin {
-		pool = recencyPoolMin
-	}
-	hits, err := queryHits(cmd, deps, collections, queryText, pool, source, filter, hybrid)
-	if err != nil {
-		return nil, nil, err
-	}
-	halfLife := time.Duration(halfLifeDays * 24 * float64(time.Hour))
-	return domain.DecayByRecency(hits, halfLife, time.Now(), k), nil, nil
+// resolveHits translates query/ask flags into app.RetrieveOptions and resolves
+// them through the shared Retriever — the one place retrieval composition lives
+// (also used by the eval harness and the MCP server). It returns the ranked hits
+// plus, for --explain, the runner-up score (the best candidate just outside the
+// returned set).
+func resolveHits(cmd *cobra.Command, deps *Deps, collections []string, queryText string, k, candidates int, source string, filter domain.Predicate, rerank, explain, hybrid, mmr bool, mmrLambda float64, recency bool, halfLifeDays float64, maxPerSource int) ([]domain.ChunkHit, *float64, error) {
+	return deps.Retriever.Resolve(cmd.Context(), app.RetrieveOptions{
+		Collections:  collections,
+		Query:        queryText,
+		K:            k,
+		Candidates:   candidates,
+		Source:       source,
+		Filter:       filter,
+		Rerank:       rerank,
+		Explain:      explain,
+		Hybrid:       hybrid,
+		MMR:          mmr,
+		MMRLambda:    mmrLambda,
+		Recency:      recency,
+		HalfLife:     time.Duration(halfLifeDays * 24 * float64(time.Hour)),
+		MaxPerSource: maxPerSource,
+	})
 }
 
 // verificationViews builds the --json per-claim verdicts for ask --verify.
@@ -361,13 +217,6 @@ func supportedCount(claims []domain.Claim) int {
 		}
 	}
 	return n
-}
-
-// errHybridMultiCollection is the usage error (exit 2) for combining --hybrid with
-// multiple collections, which v1.0 does not support (RRF fusion is per-collection;
-// a cross-collection fused merge is a follow-up).
-func errHybridMultiCollection() error {
-	return fmt.Errorf("%w: --hybrid does not support multiple collections (-c); query each collection separately", domain.ErrInvalidArgument)
 }
 
 // resolveCollectionArgs derives the target collection set and the query/question
@@ -472,16 +321,6 @@ func writeQueryExplain(cmd *cobra.Command, ev explainView) error {
 	return err
 }
 
-// nextScorePtr returns the runner-up score as a pointer, or nil when there was
-// no further candidate (so --json renders next_score: null).
-func nextScorePtr(ret app.Retrieval) *float64 {
-	if !ret.HasNext {
-		return nil
-	}
-	s := ret.NextScore
-	return &s
-}
-
 func newAskCmd(deps *Deps) *cobra.Command {
 	var (
 		k            int
@@ -561,11 +400,10 @@ func newAskCmd(deps *Deps) *cobra.Command {
 				// when enabled. Uses the Synthesize seam and replicates Ask's strict
 				// guard, which it lacks.
 				var hits []domain.ChunkHit
-				hits, runnerUp, err = resolveHits(cmd, deps, collections, question, k, candidates, source, filter, rerank, explain, hybrid, mmr, mmrLambda, recency, halfLifeDays)
+				hits, runnerUp, err = resolveHits(cmd, deps, collections, question, k, candidates, source, filter, rerank, explain, hybrid, mmr, mmrLambda, recency, halfLifeDays, maxPerSource)
 				if err != nil {
 					return err
 				}
-				hits = domain.CapPerSource(hits, maxPerSource)
 				if budget > 0 {
 					var tokens int
 					hits, tokens = budgetTrim(hits, budget, deps.Tokens)
@@ -589,7 +427,7 @@ func newAskCmd(deps *Deps) *cobra.Command {
 				ret.Hits = hits
 			case explain:
 				ans, ret, err = deps.Ask.AskExplain(cmd.Context(), collections[0], question, k, attachments, strict, source, filter)
-				runnerUp = nextScorePtr(ret)
+				runnerUp = app.NextScorePtr(ret)
 			default:
 				ans, err = deps.Ask.Ask(cmd.Context(), collections[0], question, k, attachments, strict, source, filter)
 			}

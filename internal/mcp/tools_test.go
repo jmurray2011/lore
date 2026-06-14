@@ -279,3 +279,35 @@ func TestCollectionStatus_UnknownIsToolError(t *testing.T) {
 		t.Fatal("want tool error for unknown collection")
 	}
 }
+
+func TestQuery_HybridRoutesAndReturnsHits(t *testing.T) {
+	cs := connect(t, newHarness(t, nil, false).srv)
+	res := callTool(t, cs, "query", QueryInput{Collections: []string{"docs"}, Query: "auth", Hybrid: true})
+	if res.IsError {
+		t.Fatalf("hybrid query should route through the Retriever, got error: %v", res)
+	}
+	if out := decodeOut[QueryOutput](t, res); len(out.Hits) == 0 {
+		t.Error("hybrid query should return hits")
+	}
+}
+
+func TestQuery_WhereFiltersByMetadata(t *testing.T) {
+	cs := connect(t, newHarness(t, nil, false).srv)
+	// No seeded doc carries an author, so the predicate matches nothing — proving
+	// the where filter reaches the index, not that it is ignored.
+	res := callTool(t, cs, "query", QueryInput{Collections: []string{"docs"}, Query: "auth", Where: []string{"author=nobody"}})
+	if res.IsError {
+		t.Fatalf("where query errored: %v", res)
+	}
+	if out := decodeOut[QueryOutput](t, res); len(out.Hits) != 0 {
+		t.Errorf("where author=nobody should match nothing, got %d hits", len(out.Hits))
+	}
+}
+
+func TestQuery_MMRWithRerankIsToolError(t *testing.T) {
+	cs := connect(t, newHarness(t, nil, true).srv) // rerank configured
+	res := callTool(t, cs, "query", QueryInput{Collections: []string{"docs"}, Query: "auth", MMR: true, Rerank: true})
+	if !res.IsError {
+		t.Error("mmr + rerank should be a tool error (both reorder the pool)")
+	}
+}

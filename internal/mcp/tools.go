@@ -47,6 +47,10 @@ type AskInput struct {
 	K              int      `json:"k,omitempty" jsonschema:"number of chunks to ground on (default 8)"`
 	Budget         int      `json:"budget,omitempty" jsonschema:"cap the grounding to roughly this many tokens, trimming within k (0 = no cap)"`
 	Rerank         bool     `json:"rerank,omitempty" jsonschema:"two-stage retrieval: search a wide vector pool then cross-encoder rerank to the top k (requires a configured rerank provider)"`
+	Hybrid         bool     `json:"hybrid,omitempty" jsonschema:"fuse BM25 keyword search with vector search (recovers exact-term and identifier matches)"`
+	MMR            bool     `json:"mmr,omitempty" jsonschema:"diversify grounding with Maximal Marginal Relevance (single-collection; not with rerank)"`
+	Recency        bool     `json:"recency,omitempty" jsonschema:"prefer recently-updated documents via a time decay (not with rerank/mmr)"`
+	Where          []string `json:"where,omitempty" jsonschema:"restrict grounding to documents whose metadata matches these predicates, e.g. 'author=alice' (ANDed)"`
 	SourceGlob     string   `json:"source_glob,omitempty" jsonschema:"restrict grounding to documents whose source matches this glob, e.g. '*.pdf'"`
 	Strict         bool     `json:"strict,omitempty" jsonschema:"when true, return an error instead of an ungrounded answer if no chunks match"`
 	IncludeSources *bool    `json:"include_sources,omitempty" jsonschema:"include each cited chunk's full text in the citations (default true)"`
@@ -81,7 +85,9 @@ func (s *Server) ask(ctx context.Context, _ *mcpsdk.CallToolRequest, in AskInput
 		return nil, AskOutput{}, err
 	}
 
-	hits, err := s.resolveHits(ctx, collections, in.Question, in.K, in.SourceGlob, in.Rerank)
+	hits, err := s.resolveHits(ctx, collections, in.Question, retrieveParams{
+		K: in.K, Source: in.SourceGlob, Where: in.Where, Rerank: in.Rerank, Hybrid: in.Hybrid, MMR: in.MMR, Recency: in.Recency,
+	})
 	if err != nil {
 		return nil, AskOutput{}, err
 	}
@@ -171,6 +177,10 @@ type QueryInput struct {
 	K           int      `json:"k,omitempty" jsonschema:"number of chunks to return (default 8)"`
 	SourceGlob  string   `json:"source_glob,omitempty" jsonschema:"restrict to documents whose source matches this glob, e.g. '*.pdf'"`
 	Rerank      bool     `json:"rerank,omitempty" jsonschema:"two-stage retrieval: search a wide vector pool then cross-encoder rerank to the top k (requires a configured rerank provider)"`
+	Hybrid      bool     `json:"hybrid,omitempty" jsonschema:"fuse BM25 keyword search with vector search (recovers exact-term and identifier matches)"`
+	MMR         bool     `json:"mmr,omitempty" jsonschema:"diversify results with Maximal Marginal Relevance (single-collection; not with rerank)"`
+	Recency     bool     `json:"recency,omitempty" jsonschema:"prefer recently-updated documents via a time decay (not with rerank/mmr)"`
+	Where       []string `json:"where,omitempty" jsonschema:"restrict to documents whose metadata matches these predicates, e.g. 'author=alice' (ANDed)"`
 }
 
 // Hit is one retrieved chunk in the query result (the standard lore hit object
@@ -202,7 +212,9 @@ func (s *Server) query(ctx context.Context, _ *mcpsdk.CallToolRequest, in QueryI
 		return nil, QueryOutput{}, err
 	}
 
-	hits, err := s.resolveHits(ctx, collections, in.Query, in.K, in.SourceGlob, in.Rerank)
+	hits, err := s.resolveHits(ctx, collections, in.Query, retrieveParams{
+		K: in.K, Source: in.SourceGlob, Where: in.Where, Rerank: in.Rerank, Hybrid: in.Hybrid, MMR: in.MMR, Recency: in.Recency,
+	})
 	if err != nil {
 		return nil, QueryOutput{}, err
 	}

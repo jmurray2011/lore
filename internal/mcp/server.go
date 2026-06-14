@@ -35,6 +35,9 @@ type Deps struct {
 	Catalog *app.Catalog
 	Query   *app.Querier
 	Ask     *app.Asker
+	// Retriever composes retrieval (hybrid/rerank/mmr/recency/where/cap) for the
+	// ask/query tools — the same use case the CLI and eval use.
+	Retriever *app.Retriever
 	// Rerank is nil when no rerank provider is configured; the ask/query tools
 	// return a tool error if rerank is requested in that case (mirroring the CLI).
 	Rerank *app.Reranker
