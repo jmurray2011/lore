@@ -325,17 +325,35 @@ lore query notes "current key rotation policy" --recency
 lore ask   notes "what is the policy now?" --recency --half-life-days 30
 ```
 
-Each hit's cosine score is multiplied by `2^(−age/half-life)`, where age comes
-from the document's `updated` metadata, then `created`, then ingest time; the
-pool is re-sorted by the adjusted score and trimmed to `-k` (the cosine score is
+Each hit's cosine score is multiplied by `2^(−age/half-life)`; the pool is
+re-sorted by the adjusted score and trimmed to `-k` (the cosine score is
 preserved for display — only the order changes). `--half-life-days` (default 90)
 sets how fast relevance gives way to freshness: a chunk one half-life old keeps
 half its weight; a shorter half-life prefers recency more aggressively.
-Documents with **no** date keep full weight, so recency never buries an undated
-chunk on a guess. Like the other rerankers, `--recency` operates on a wider pool
-then trims to `-k`; it composes with `--hybrid`, `--where`, `--source`,
-`--budget`, and multiple `-c` collections, and is mutually exclusive with
-`--rerank` and `--mmr` (all three reorder the pool).
+
+**A document's date is inferred from the file, not assumed from one format.**
+`lore` tries, strongest to weakest:
+
+1. an explicit *last-modified* front-matter field — `updated`, `modified`,
+   `lastmod`, `updated_at`, `last_modified` (matched case-insensitively);
+2. the file's **filesystem modify time**, captured at ingest under the `mtime`
+   metadata key (so it travels in `export` artifacts and is itself
+   `--where`-queryable, e.g. `--where 'mtime>=2026-06-01'`);
+3. a date in the **filename or path** — an ISO date (`2026-06-09`) or ISO week
+   (`2026-W20`), which covers date-named work logs that have no front matter;
+4. a *created*-style field — `created`, `created_at`, `date`, `published`
+   (ranked below modify-time so an actively-edited note with only a stale
+   `created:` isn't treated as old);
+5. the document's ingest time, as a last resort.
+
+A document with **no** discoverable date keeps full weight, so recency never
+buries an undated chunk on a guess. Filename/path dates are read at query time
+(no re-ingest needed); `mtime` is captured when a document is ingested.
+
+Like the other rerankers, `--recency` operates on a wider pool then trims to
+`-k`; it composes with `--hybrid`, `--where`, `--source`, `--budget`, and
+multiple `-c` collections, and is mutually exclusive with `--rerank` and `--mmr`
+(all three reorder the pool).
 
 ## Faithfulness verification & evaluation
 

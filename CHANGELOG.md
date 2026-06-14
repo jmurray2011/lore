@@ -39,11 +39,14 @@ changes migrate in place and degrade gracefully (see *Migration*).
 - **Recency — `query`/`ask --recency` (`--half-life-days`, default 90).** Vector
   similarity has no notion of time, so a stale chunk can outrank a newer
   correction. Recency re-ranks a wider candidate pool by relevance blended with
-  an exponential time decay on each document's `updated`/`created` metadata (or
-  ingest time), surfacing fresh-but-slightly-less-similar chunks that pure cosine
-  buries. Undated documents keep full weight (never demoted on a guess). Composes
-  with `--hybrid`/`--where`/`--source`/`--budget` and multiple collections;
-  mutually exclusive with `--rerank`/`--mmr`.
+  an exponential time decay, surfacing fresh-but-slightly-less-similar chunks that
+  pure cosine buries. A document's date is **inferred from the file**, not assumed
+  from one format: last-modified front matter (`updated`/`modified`/…,
+  case-insensitive) → the file's filesystem `mtime` (captured at ingest, also
+  `--where`-queryable) → a date in the filename/path (`2026-06-09`, `2026-W20`) →
+  `created`/`date` front matter → ingest time. Undated documents keep full weight
+  (never demoted on a guess). Composes with `--hybrid`/`--where`/`--source`/
+  `--budget` and multiple collections; mutually exclusive with `--rerank`/`--mmr`.
 - **Exit code 5** — a quality gate was not met (`ask --verify-strict`,
   `lore eval --fail-under`), distinct from runtime (1) and usage (2) errors.
 
