@@ -29,22 +29,37 @@ func NewChecker(verifier Verifier, catalog *Catalog) *Checker {
 // costs no model call; each cited claim is judged against the concatenated text of
 // the chunks it cites. The aggregate support rate is domain.SupportRate(claims).
 func (c *Checker) Verify(ctx context.Context, collection string, ans Answer) ([]domain.Claim, error) {
+	textByID, err := c.chunkText(ctx, collection, ans.Citations)
+	if err != nil {
+		return nil, err
+	}
+	return c.verifyClaims(ctx, ans, textByID)
+}
+
+// VerifyWithEvidence verifies ans using caller-supplied chunk text as the
+// evidence (keyed by chunk ID) instead of fetching it from a collection. It backs
+// `synthesize --verify`, where the grounding chunks are piped in and may not live
+// in any collection (an external retriever, hand-assembled context). Semantics
+// otherwise match Verify, including the grounding-set fallback for markerless
+// answers.
+func (c *Checker) VerifyWithEvidence(ctx context.Context, ans Answer, evidenceByID map[domain.ChunkID]string) ([]domain.Claim, error) {
+	return c.verifyClaims(ctx, ans, evidenceByID)
+}
+
+// verifyClaims segments ans into claims and judges each cited claim against the
+// supplied evidence (chunk ID → text). When the answer carries citations but used
+// no inline [id] markers (every claim came back uncited), it mirrors the
+// generator's grounding-set fallback — verifying each claim against the whole
+// cited set rather than reporting a spurious 0% support rate. Uncited claims cost
+// no model call.
+func (c *Checker) verifyClaims(ctx context.Context, ans Answer, textByID map[domain.ChunkID]string) ([]domain.Claim, error) {
 	claims := domain.SegmentClaims(ans.Text, ans.Citations)
-	// When the answer carries citations but used no inline [id] markers (so every
-	// claim came back uncited), the model grounded its whole answer in the retrieved
-	// set without per-sentence brackets. Mirror the generator's grounding-set
-	// fallback: verify each claim against the full evidence rather than reporting it
-	// unverifiable, which would otherwise show a spurious 0% support rate.
 	if len(claims) > 0 && len(ans.Citations) > 0 && !anyCited(claims) {
 		ground := citationIDs(ans.Citations)
 		for i := range claims {
 			claims[i].CitedChunks = ground
 			claims[i].Verdict = ""
 		}
-	}
-	textByID, err := c.chunkText(ctx, collection, ans.Citations)
-	if err != nil {
-		return nil, err
 	}
 	for i := range claims {
 		if claims[i].Verdict != "" {

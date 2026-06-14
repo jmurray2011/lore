@@ -67,6 +67,49 @@ func TestCheckerVerify(t *testing.T) {
 	}
 }
 
+func TestCheckerVerifyWithEvidence(t *testing.T) {
+	ctx := context.Background()
+	c0 := domain.DeriveChunkID(domain.DeriveDocumentID("docs", "file:///a.md"), 0)
+	c1 := domain.DeriveChunkID(domain.DeriveDocumentID("docs", "file:///a.md"), 1)
+
+	// No catalog: the evidence is supplied by the caller (e.g. synthesize's piped
+	// hits), so verification works for chunks that live in no collection.
+	verifier := &fakeVerifier{unsupported: map[string]bool{"Grass is purple": true}}
+	checker := app.NewChecker(verifier, nil)
+
+	ans := app.Answer{
+		Text: "The sky is blue [" + string(c0) + "]. Grass is purple [" + string(c1) + "]. Mars is red.",
+		Citations: []domain.Citation{
+			{ChunkID: c0, Source: "file:///a.md", Seq: 0},
+			{ChunkID: c1, Source: "file:///a.md", Seq: 1},
+		},
+	}
+	evidence := map[domain.ChunkID]string{c0: "The sky is blue.", c1: "Grass is usually green."}
+
+	claims, err := checker.VerifyWithEvidence(ctx, ans, evidence)
+	if err != nil {
+		t.Fatalf("VerifyWithEvidence: %v", err)
+	}
+	if len(claims) != 3 {
+		t.Fatalf("want 3 claims, got %d: %+v", len(claims), claims)
+	}
+	if claims[0].Verdict != domain.VerdictSupported {
+		t.Errorf("claim 0 should be supported, got %q", claims[0].Verdict)
+	}
+	if claims[1].Verdict != domain.VerdictUnsupported {
+		t.Errorf("claim 1 should be unsupported, got %q", claims[1].Verdict)
+	}
+	if claims[2].Verdict != domain.VerdictUncited {
+		t.Errorf("claim 2 (no citation) should be uncited, got %q", claims[2].Verdict)
+	}
+	if verifier.gotEvidence["The sky is blue"] != "The sky is blue." {
+		t.Errorf("claim 0 evidence = %q, want the supplied chunk text", verifier.gotEvidence["The sky is blue"])
+	}
+	if verifier.calls != 2 {
+		t.Errorf("want 2 verify calls (uncited skipped), got %d", verifier.calls)
+	}
+}
+
 func TestCheckerVerifyGroundingFallback(t *testing.T) {
 	ctx := context.Background()
 	space := testSpace()

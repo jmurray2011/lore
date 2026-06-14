@@ -1486,6 +1486,68 @@ func TestCLISynthesize(t *testing.T) {
 	})
 }
 
+func TestCLISynthesizeParity(t *testing.T) {
+	c0 := domain.DeriveChunkID(domain.DeriveDocumentID("docs", "file:///a.md"), 0)
+	qvec := []float32{1, 0, 0}
+	// First sentence cites c0; the second is uncited (drives the strict gate).
+	gen := stubGenerator{text: "The sky is blue [" + string(c0) + "]. An uncited sentence."}
+	deps, _, docs, index := newDeps(stubEmbedder{space: testSpace(), vec: qvec}, gen)
+	if _, code := exec(deps, "init", "docs"); code != 0 {
+		t.Fatal("init failed")
+	}
+	ctx := context.Background()
+	doc, _ := domain.NewDocument("docs", "file:///a.md", domain.HashContent([]byte("x")), time.Now())
+	chunk, _ := domain.NewChunk(doc.ID, 0, "the sky is blue today")
+	if err := docs.Upsert(ctx, doc, []domain.Chunk{chunk}); err != nil {
+		t.Fatal(err)
+	}
+	if err := index.Upsert(ctx, "docs", []app.VectorEntry{{ChunkID: chunk.ID, Vector: qvec}}); err != nil {
+		t.Fatal(err)
+	}
+	hitsJSON, code := exec(deps, "query", "docs", "anything", "--json")
+	if code != 0 {
+		t.Fatalf("query exit %d", code)
+	}
+
+	t.Run("--verify judges the piped hits and reports a support rate", func(t *testing.T) {
+		out, code := execStdin(deps, hitsJSON, "synthesize", "q", "--verify", "--json")
+		if code != 0 {
+			t.Fatalf("synthesize --verify exit %d, out %q", code, out)
+		}
+		var v struct {
+			SupportRate  *float64 `json:"support_rate"`
+			Verification []struct {
+				Verdict string `json:"verdict"`
+			} `json:"verification"`
+		}
+		if err := json.Unmarshal([]byte(out), &v); err != nil {
+			t.Fatalf("bad JSON %q: %v", out, err)
+		}
+		if len(v.Verification) != 2 || v.Verification[0].Verdict != "supported" || v.Verification[1].Verdict != "uncited" {
+			t.Errorf("verdicts = %+v", v.Verification)
+		}
+		if v.SupportRate == nil || *v.SupportRate != 0.5 {
+			t.Errorf("support rate = %v, want 0.5", v.SupportRate)
+		}
+	})
+
+	t.Run("--verify-strict exits 5 when a claim is not supported", func(t *testing.T) {
+		if _, code := execStdin(deps, hitsJSON, "synthesize", "q", "--verify-strict"); code != 5 {
+			t.Errorf("want exit 5, got %d", code)
+		}
+	})
+
+	t.Run("--stream emits the answer and exits 0", func(t *testing.T) {
+		out, code := execStdin(deps, hitsJSON, "synthesize", "q", "--stream")
+		if code != 0 {
+			t.Fatalf("synthesize --stream exit %d, out %q", code, out)
+		}
+		if !strings.Contains(out, "sky is blue") {
+			t.Errorf("streamed output missing the answer prose: %q", out)
+		}
+	})
+}
+
 func TestCLIAskAttach(t *testing.T) {
 	t.Run("--attach reads a file into an Attachment passed to the generator", func(t *testing.T) {
 		var got []domain.Attachment
