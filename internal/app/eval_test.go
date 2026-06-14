@@ -81,6 +81,27 @@ func TestEvaluator(t *testing.T) {
 		}
 	})
 
+	t.Run("source metrics judge documents, not chunk positions", func(t *testing.T) {
+		// Both retrieved chunks (ca, cb) come from the one relevant document. Metrics
+		// must judge the document once: recall and nDCG are bounded by [0,1] and must
+		// not scale with how many chunks the document contributed.
+		ev := app.NewEvaluator(querier, nil, nil)
+		cases := []app.EvalCase{{Question: "how does auth work?", ExpectedSources: []string{"file:///a.md"}}}
+		report, err := ev.Evaluate(ctx, "docs", cases, 2, false)
+		if err != nil {
+			t.Fatalf("Evaluate: %v", err)
+		}
+		if got := report.Aggregates[app.MetricRecall]; got != 1 {
+			t.Errorf("recall = %v, want 1 (one relevant doc, found); recall must never exceed 1", got)
+		}
+		if got := report.Aggregates[app.MetricNDCG]; got > 1 {
+			t.Errorf("ndcg = %v, want <= 1 (nDCG is normalized)", got)
+		}
+		if got := report.Aggregates[app.MetricHitRate]; got != 1 {
+			t.Errorf("hit_rate = %v, want 1", got)
+		}
+	})
+
 	t.Run("verification produces a support rate", func(t *testing.T) {
 		gen := &fakeGenerator{answer: app.Answer{
 			Text:      "Auth uses API keys [" + string(ca.ID) + "].",

@@ -211,8 +211,17 @@ func relevanceFor(c EvalCase, hits []domain.ChunkHit) (relevant map[string]bool,
 		return relevant, retrieved, true
 	case len(c.ExpectedSources) > 0:
 		relevant = toSet(c.ExpectedSources)
+		// expected_sources judges documents, not chunk positions: collapse the
+		// per-chunk source list to distinct sources in first-appearance (best-rank)
+		// order so a document with several retrieved chunks counts once. Without
+		// this, recall and nDCG exceed their [0,1] range when one relevant document
+		// supplies many of the top-k chunks.
+		seen := make(map[string]bool, len(hits))
 		for _, h := range hits {
-			retrieved = append(retrieved, h.Source)
+			if !seen[h.Source] {
+				seen[h.Source] = true
+				retrieved = append(retrieved, h.Source)
+			}
 		}
 		return relevant, retrieved, true
 	default:
