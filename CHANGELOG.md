@@ -52,7 +52,11 @@ changes migrate in place and degrade gracefully (see *Migration*).
 
 ### Changed
 
-- Retrieval composition order is defined and documented: fuse/rerank/MMR →
+- **`synthesize` reaches parity with `ask` on the synthesis side** — `--verify`/
+  `--verify-strict`, `--stream`/`--no-stream`, and `--expand`. `synthesize --verify`
+  checks claims against the **piped chunks** (no collection lookup), so faithfulness
+  gating works for externally-retrieved or hand-assembled context, not just `ask`.
+- Retrieval composition order is defined and documented: fuse/rerank/recency/MMR →
   `--max-per-source` → `--budget` trim.
 - `query`/`ask` hit `--json` gains an optional `metadata` field; `docs --json`
   gains `metadata`. Both are `omitempty`, so output without metadata is unchanged.

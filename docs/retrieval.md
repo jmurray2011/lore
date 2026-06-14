@@ -6,14 +6,26 @@ reranking, token budgets, cross-collection search, streaming, and chunking.
 
 ## `query` → `synthesize`: the retrieval/synthesis seam
 
-`ask` is retrieval + synthesis in one step. To get *between* them — filter,
-re-rank, threshold, or merge hits yourself — pipe `query --json` into
-`synthesize`, which reads hits on stdin and answers from exactly those:
+`ask` is retrieval + synthesis in one step, and most retrieval shaping is now a
+flag on it (`--hybrid`, `--rerank`, `--mmr`, `--max-per-source`, `--recency`,
+`--where`, `--budget`). `synthesize` is the escape hatch for the rest: it reads
+hits on stdin and answers from *exactly* those, so you can interpose arbitrary
+`jq` surgery — or feed chunks from a **different retriever entirely** — between
+retrieval and synthesis:
 
 ```bash
 lore query kb "tenant isolation" --json \
   | jq 'map(select(.score > 0.3))' \
   | lore synthesize "how is tenant isolation enforced?"
+```
+
+The synthesis-side flags match `ask`: `--verify`/`--verify-strict`, `--stream`/
+`--no-stream`, `--expand`, and `--attach`. Crucially, `synthesize --verify`
+checks each claim against the **piped chunks themselves** (no collection lookup),
+so faithfulness gating works even when the grounding came from outside `lore`:
+
+```bash
+lore query kb "key rotation" --json | lore synthesize "current policy?" --verify-strict
 ```
 
 Query hits and answer citations are tagged with their source as `source#chunk`,
