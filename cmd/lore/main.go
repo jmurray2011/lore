@@ -152,17 +152,29 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		ingestor := app.NewIngestor(store.collections, store.docs, store.index, embedder, extractor, source, chunkers, store.lexical, app.WithConcurrency(cfg.Ingest.Concurrency))
 		querier := app.NewQuerier(store.collections, store.index, store.docs, embedder, store.lexical)
 		remover := app.NewRemover(store.collections, store.docs, store.index, store.lexical)
+		asker := app.NewAsker(querier, generator)
+
+		// Faithfulness verification reuses the chat model (decision): a Verifier over
+		// the same chat connection, no extra dependency. The Checker fetches cited
+		// chunk text via the Catalog as evidence; the Evaluator runs eval sets.
+		verifier, err := openai.NewVerifier(chatConn.BaseURL, chatConn.APIKey, cfg.Provider.ChatModel, cfg.Provider.StructuredOutput, authStyle(chatConn.Auth), &http.Client{Timeout: chatConn.Timeout})
+		if err != nil {
+			return cli.Deps{}, err
+		}
+		checker := app.NewChecker(verifier, catalog)
 		return cli.Deps{
 			Catalog:         catalog,
 			Ingest:          ingestor,
 			Sync:            app.NewSyncer(catalog, ingestor, remover, source),
 			Query:           querier,
-			Ask:             app.NewAsker(querier, generator),
+			Ask:             asker,
 			Rerank:          reranker,
 			Remove:          remover,
 			Tokens:          counter,
 			Export:          app.NewExporter(store.collections, store.docs, store.index),
 			Import:          app.NewImporter(store.collections, store.docs, store.index, remover, store.lexical),
+			Verify:          checker,
+			Eval:            app.NewEvaluator(querier, asker, checker),
 			Index:           store.index,
 			Log:             logger,
 			RetrievalHybrid: cfg.Retrieval.Hybrid,

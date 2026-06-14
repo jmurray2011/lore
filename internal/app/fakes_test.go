@@ -22,6 +22,7 @@ var (
 	_ app.LexicalIndex         = (*fakeLexical)(nil)
 	_ app.Embedder             = (*fakeEmbedder)(nil)
 	_ app.Generator            = (*fakeGenerator)(nil)
+	_ app.Verifier             = (*fakeVerifier)(nil)
 	_ app.Source               = (*fakeSource)(nil)
 	_ app.Extractor            = (*fakeExtractor)(nil)
 )
@@ -418,6 +419,29 @@ type fakeGenerator struct {
 func (f *fakeGenerator) Synthesize(_ context.Context, question string, hits []domain.ChunkHit, attachments []domain.Attachment) (app.Answer, error) {
 	f.gotQuestion, f.gotHits, f.gotAttachments = question, hits, attachments
 	return f.answer, f.err
+}
+
+// fakeVerifier returns canned verdicts keyed by claim text (default supported) and
+// records the claim/evidence pairs it was asked to judge.
+type fakeVerifier struct {
+	mu          sync.Mutex
+	unsupported map[string]bool // claim text → true means return unsupported
+	gotEvidence map[string]string
+	calls       int
+}
+
+func (f *fakeVerifier) Verify(_ context.Context, claim, evidence string) (app.Verdict, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+	if f.gotEvidence == nil {
+		f.gotEvidence = map[string]string{}
+	}
+	f.gotEvidence[claim] = evidence
+	if f.unsupported[claim] {
+		return app.Verdict{Supported: false, Rationale: "not entailed"}, nil
+	}
+	return app.Verdict{Supported: true, Rationale: "entailed"}, nil
 }
 
 type fakeSource struct {

@@ -36,6 +36,10 @@ type Deps struct {
 	// Export and Import move a collection to/from a single portable artifact file.
 	Export *app.Exporter
 	Import *app.Importer
+	// Verify checks an answer's faithfulness (ask --verify); Eval runs an eval set
+	// (lore eval). Both may be nil if the runtime was built without them.
+	Verify *app.Checker
+	Eval   *app.Evaluator
 	// Index is the vector index, exposed read-only for the mcp server's
 	// collection_status chunk count. Other commands reach vectors via use cases.
 	Index app.VectorIndex
@@ -117,6 +121,7 @@ func NewRootCommand(build Builder, version string, out, errOut io.Writer) *cobra
 		newCatCmd(&deps),
 		newQueryCmd(&deps),
 		newAskCmd(&deps),
+		newEvalCmd(&deps),
 		newSynthesizeCmd(&deps),
 		newRerankCmd(&deps),
 		newExportCmd(&deps),
@@ -149,6 +154,8 @@ func ExitCode(err error) int {
 		return 3
 	case errors.Is(err, domain.ErrSpaceMismatch), errors.Is(err, domain.ErrChunkerMismatch):
 		return 4
+	case errors.Is(err, app.ErrGateUnmet):
+		return 5
 	default:
 		return 1
 	}
@@ -283,6 +290,19 @@ type answerView struct {
 	// reported only when --budget is set; omitempty keeps output unchanged
 	// otherwise.
 	GroundingTokens *int `json:"grounding_tokens,omitempty"`
+	// Verification carries the per-claim faithfulness verdicts when --verify is set;
+	// SupportRate is the fraction of claims supported. omitempty keeps output
+	// unchanged without --verify.
+	Verification []verificationClaimView `json:"verification,omitempty"`
+	SupportRate  *float64                `json:"support_rate,omitempty"`
+}
+
+// verificationClaimView is one claim's faithfulness verdict in --json output.
+type verificationClaimView struct {
+	Claim       string   `json:"claim"`
+	CitedChunks []string `json:"cited_chunks"`
+	Verdict     string   `json:"verdict"`
+	Rationale   string   `json:"rationale,omitempty"`
 }
 
 // explainView is the --explain diagnostic: the returned hits' score

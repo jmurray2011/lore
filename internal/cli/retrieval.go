@@ -277,6 +277,49 @@ func resolveMMR(cmd *cobra.Command, deps *Deps, collections []string, queryText 
 	return domain.SelectMMR(cands, lambda, k), nil, nil
 }
 
+// verificationViews builds the --json per-claim verdicts for ask --verify.
+func verificationViews(claims []domain.Claim) []verificationClaimView {
+	out := make([]verificationClaimView, len(claims))
+	for i, c := range claims {
+		ids := make([]string, len(c.CitedChunks))
+		for j, id := range c.CitedChunks {
+			ids[j] = string(id)
+		}
+		out[i] = verificationClaimView{Claim: c.Text, CitedChunks: ids, Verdict: string(c.Verdict), Rationale: c.Rationale}
+	}
+	return out
+}
+
+// verificationMarkdown renders the human verification block: a support-rate header
+// and each claim marked by verdict (✓ supported, ✗ unsupported, ? uncited).
+func verificationMarkdown(claims []domain.Claim, supportRate float64) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "## Verification\n\n**Support rate: %.0f%%** (%d/%d claims supported)\n\n", supportRate*100, supportedCount(claims), len(claims))
+	mark := map[domain.ClaimVerdict]string{
+		domain.VerdictSupported:   "✓",
+		domain.VerdictUnsupported: "✗",
+		domain.VerdictUncited:     "?",
+	}
+	for _, c := range claims {
+		fmt.Fprintf(&b, "- %s %s\n", mark[c.Verdict], c.Text)
+		if c.Verdict == domain.VerdictUnsupported && c.Rationale != "" {
+			fmt.Fprintf(&b, "  - _%s_\n", c.Rationale)
+		}
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// supportedCount counts the supported claims.
+func supportedCount(claims []domain.Claim) int {
+	n := 0
+	for _, c := range claims {
+		if c.Verdict == domain.VerdictSupported {
+			n++
+		}
+	}
+	return n
+}
+
 // errHybridMultiCollection is the usage error (exit 2) for combining --hybrid with
 // multiple collections, which v1.0 does not support (RRF fusion is per-collection;
 // a cross-collection fused merge is a follow-up).
@@ -412,6 +455,8 @@ func newAskCmd(deps *Deps) *cobra.Command {
 		maxPerSource int
 		mmr          bool
 		mmrLambda    float64
+		verify       bool
+		verifyStrict bool
 		collFlags    []string
 		streamFlag   bool
 		noStreamFlag bool
@@ -443,6 +488,15 @@ func newAskCmd(deps *Deps) *cobra.Command {
 			stream, err := wantStream(cmd, streamFlag, noStreamFlag)
 			if err != nil {
 				return err
+			}
+			if verifyStrict {
+				verify = true // --verify-strict implies verification
+			}
+			if verify {
+				if deps.Verify == nil {
+					return fmt.Errorf("%w: verification is not available", domain.ErrInvalidArgument)
+				}
+				stream = false // verification needs the whole answer; cannot verify a token stream
 			}
 			multi := len(collections) > 1
 			collLabel := strings.Join(collections, ", ")
@@ -538,6 +592,25 @@ func newAskCmd(deps *Deps) *cobra.Command {
 				md = expandedSources(ans, textByChunk)
 			}
 
+			// --verify: check each claim's faithfulness against its cited chunks. The
+			// per-claim verdicts ride in --json and append a human block; --verify-strict
+			// turns any unsupported claim into a non-zero exit (gateErr, code 5),
+			// returned only after the report is rendered so CI sees what failed.
+			var gateErr error
+			if verify {
+				claims, err := deps.Verify.Verify(cmd.Context(), collections[0], ans)
+				if err != nil {
+					return err
+				}
+				view.Verification = verificationViews(claims)
+				sr := domain.SupportRate(claims)
+				view.SupportRate = &sr
+				md += "\n\n" + verificationMarkdown(claims, sr)
+				if verifyStrict && !domain.AllSupported(claims) {
+					gateErr = fmt.Errorf("ask %q: %w: %d/%d claims supported", collLabel, app.ErrGateUnmet, supportedCount(claims), len(claims))
+				}
+			}
+
 			// --explain: report the score distribution of the chunks that grounded
 			// the answer, plus the runner-up, annotated with which were cited.
 			// Orthogonal to --expand and --source. JSON carries it inside the
@@ -547,16 +620,24 @@ func newAskCmd(deps *Deps) *cobra.Command {
 				ev := buildExplain(ret.Hits, runnerUp, citedSet(ans))
 				if asJSON, _ := cmd.Flags().GetBool("json"); asJSON {
 					view.Explain = &ev
-					return render(cmd, view, md)
+					if err := render(cmd, view, md); err != nil {
+						return err
+					}
+					return gateErr
 				}
 				if err := render(cmd, view, md); err != nil {
 					return err
 				}
-				_, err := io.WriteString(cmd.ErrOrStderr(), explainText(ev))
-				return err
+				if _, err := io.WriteString(cmd.ErrOrStderr(), explainText(ev)); err != nil {
+					return err
+				}
+				return gateErr
 			}
 
-			return render(cmd, view, md)
+			if err := render(cmd, view, md); err != nil {
+				return err
+			}
+			return gateErr
 		},
 	}
 	cmd.Flags().IntVarP(&k, "top-k", "k", 8, "number of chunks to ground on (0 to ground on attachments only)")
@@ -566,6 +647,8 @@ func newAskCmd(deps *Deps) *cobra.Command {
 	cmd.Flags().StringArrayVar(&where, "where", nil, "restrict grounding to documents whose metadata matches this predicate, e.g. 'author=alice' (repeatable; ANDed)")
 	cmd.Flags().BoolVar(&expand, "expand", false, "append the full text of each cited chunk after the answer")
 	cmd.Flags().BoolVar(&explain, "explain", false, "print the retrieval score distribution to stderr (the answer's explain key under --json)")
+	cmd.Flags().BoolVar(&verify, "verify", false, "check each answer sentence is entailed by the chunk(s) it cites; report per-claim verdicts and a support rate")
+	cmd.Flags().BoolVar(&verifyStrict, "verify-strict", false, "as --verify, but exit non-zero (5) if any claim is unsupported (a CI faithfulness gate)")
 	cmd.Flags().BoolVar(&rerank, "rerank", false, "two-stage retrieval: vector-search a wide pool, then rerank to the top -k before synthesis")
 	cmd.Flags().IntVar(&candidates, "rerank-candidates", 50, "size of the pre-rerank vector candidate pool (must be >= -k)")
 	cmd.Flags().IntVar(&budget, "budget", 0, "cap grounding to this many tokens (after ranking/rerank; trims within -k)")

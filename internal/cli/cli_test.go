@@ -180,19 +180,34 @@ func newDeps(emb app.Embedder, gen app.Generator) (cli.Deps, *memstore.Collectio
 	catalog := app.NewCatalog(colls, docs, emb, chunkers)
 	ingestor := app.NewIngestor(colls, docs, index, emb, extract.New(), source, chunkers, lexical)
 	remover := app.NewRemover(colls, docs, index, lexical)
+	asker := app.NewAsker(q, gen)
+	checker := app.NewChecker(stubVerifier{}, catalog)
 	deps := cli.Deps{
 		Catalog: catalog,
 		Ingest:  ingestor,
 		Sync:    app.NewSyncer(catalog, ingestor, remover, source),
 		Query:   q,
-		Ask:     app.NewAsker(q, gen),
+		Ask:     asker,
 		Remove:  remover,
 		Tokens:  wordTokenCounter{},
 		Export:  app.NewExporter(colls, docs, index),
 		Import:  app.NewImporter(colls, docs, index, remover, lexical),
+		Verify:  checker,
+		Eval:    app.NewEvaluator(q, asker, checker),
 		Index:   index,
 	}
 	return deps, colls, docs, index
+}
+
+// stubVerifier judges a claim supported unless its text is in unsupported (keyed
+// on the segmented claim text, citation markers stripped).
+type stubVerifier struct{ unsupported map[string]bool }
+
+func (v stubVerifier) Verify(_ context.Context, claim, _ string) (app.Verdict, error) {
+	if v.unsupported[claim] {
+		return app.Verdict{Supported: false, Rationale: "not entailed"}, nil
+	}
+	return app.Verdict{Supported: true, Rationale: "entailed"}, nil
 }
 
 // wordTokenCounter is a deterministic stand-in for the real tiktoken counter in
@@ -1673,6 +1688,114 @@ func TestCLIDiversity(t *testing.T) {
 	t.Run("--mmr with multiple collections is a usage error", func(t *testing.T) {
 		if _, code := exec(deps, "query", "docs", "-c", "notes", "anything", "--mmr"); code != 2 {
 			t.Errorf("--mmr + -c should exit 2, got %d", code)
+		}
+	})
+}
+
+func TestCLIAskVerify(t *testing.T) {
+	c0 := domain.DeriveChunkID(domain.DeriveDocumentID("docs", "file:///a.md"), 0)
+	qvec := []float32{1, 0, 0}
+	// The canned answer cites c0 in its first sentence and leaves the second uncited.
+	gen := stubGenerator{text: "The sky is blue [" + string(c0) + "]. An uncited sentence."}
+	deps, _, docs, index := newDeps(stubEmbedder{space: testSpace(), vec: qvec}, gen)
+	if _, code := exec(deps, "init", "docs"); code != 0 {
+		t.Fatal("init failed")
+	}
+	ctx := context.Background()
+	doc, _ := domain.NewDocument("docs", "file:///a.md", domain.HashContent([]byte("x")), time.Now())
+	chunk, _ := domain.NewChunk(doc.ID, 0, "the sky is blue today")
+	if err := docs.Upsert(ctx, doc, []domain.Chunk{chunk}); err != nil {
+		t.Fatal(err)
+	}
+	if err := index.Upsert(ctx, "docs", []app.VectorEntry{{ChunkID: chunk.ID, Vector: qvec}}); err != nil {
+		t.Fatal(err)
+	}
+
+	type verifyJSON struct {
+		SupportRate  *float64 `json:"support_rate"`
+		Verification []struct {
+			Claim       string   `json:"claim"`
+			Verdict     string   `json:"verdict"`
+			CitedChunks []string `json:"cited_chunks"`
+		} `json:"verification"`
+	}
+
+	t.Run("--verify reports per-claim verdicts and a support rate", func(t *testing.T) {
+		out, code := exec(deps, "ask", "docs", "q", "--verify", "--json")
+		if code != 0 {
+			t.Fatalf("ask --verify exit %d, out %q", code, out)
+		}
+		var v verifyJSON
+		if err := json.Unmarshal([]byte(out), &v); err != nil {
+			t.Fatalf("bad JSON %q: %v", out, err)
+		}
+		if len(v.Verification) != 2 {
+			t.Fatalf("want 2 claims, got %+v", v.Verification)
+		}
+		if v.Verification[0].Verdict != "supported" || v.Verification[1].Verdict != "uncited" {
+			t.Errorf("verdicts = %q, %q", v.Verification[0].Verdict, v.Verification[1].Verdict)
+		}
+		if v.SupportRate == nil || *v.SupportRate != 0.5 {
+			t.Errorf("support rate = %v, want 0.5", v.SupportRate)
+		}
+	})
+
+	t.Run("--verify-strict exits 5 when a claim is unsupported", func(t *testing.T) {
+		if _, code := exec(deps, "ask", "docs", "q", "--verify-strict"); code != 5 {
+			t.Errorf("--verify-strict with an uncited claim should exit 5, got %d", code)
+		}
+	})
+}
+
+func TestCLIEval(t *testing.T) {
+	c0 := domain.DeriveChunkID(domain.DeriveDocumentID("docs", "file:///a.md"), 0)
+	qvec := []float32{1, 0, 0}
+	deps, _, docs, index := newDeps(stubEmbedder{space: testSpace(), vec: qvec}, stubGenerator{text: "answer"})
+	if _, code := exec(deps, "init", "docs"); code != 0 {
+		t.Fatal("init failed")
+	}
+	ctx := context.Background()
+	doc, _ := domain.NewDocument("docs", "file:///a.md", domain.HashContent([]byte("x")), time.Now())
+	chunk, _ := domain.NewChunk(doc.ID, 0, "auth uses keys")
+	if err := docs.Upsert(ctx, doc, []domain.Chunk{chunk}); err != nil {
+		t.Fatal(err)
+	}
+	if err := index.Upsert(ctx, "docs", []app.VectorEntry{{ChunkID: chunk.ID, Vector: qvec}}); err != nil {
+		t.Fatal(err)
+	}
+	jsonl := `{"version":1}` + "\n" + `{"question":"q","expected_chunks":["` + string(c0) + `"]}` + "\n"
+
+	t.Run("reports aggregate metrics as JSON", func(t *testing.T) {
+		out, code := execStdin(deps, jsonl, "eval", "docs", "--json")
+		if code != 0 {
+			t.Fatalf("eval exit %d, out %q", code, out)
+		}
+		var report struct {
+			Aggregates map[string]float64 `json:"aggregates"`
+		}
+		if err := json.Unmarshal([]byte(out), &report); err != nil {
+			t.Fatalf("bad JSON %q: %v", out, err)
+		}
+		if report.Aggregates["recall"] != 1 || report.Aggregates["hit_rate"] != 1 {
+			t.Errorf("aggregates = %+v (want recall/hit 1)", report.Aggregates)
+		}
+	})
+
+	t.Run("--fail-under passes when the metric meets the threshold", func(t *testing.T) {
+		if _, code := execStdin(deps, jsonl, "eval", "docs", "--fail-under", "recall=0.5"); code != 0 {
+			t.Errorf("recall 1.0 >= 0.5 should pass, got exit %d", code)
+		}
+	})
+
+	t.Run("--fail-under exits 5 when the metric is below the threshold", func(t *testing.T) {
+		if _, code := execStdin(deps, jsonl, "eval", "docs", "--fail-under", "recall=1.5"); code != 5 {
+			t.Errorf("recall 1.0 < 1.5 should exit 5, got %d", code)
+		}
+	})
+
+	t.Run("an unknown --fail-under metric is a usage error", func(t *testing.T) {
+		if _, code := execStdin(deps, jsonl, "eval", "docs", "--fail-under", "bogus=0.5"); code != 2 {
+			t.Errorf("unknown metric should exit 2, got %d", code)
 		}
 	})
 }

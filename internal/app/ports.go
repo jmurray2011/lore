@@ -20,6 +20,11 @@ var (
 	// chunks and no attachments were supplied — there is nothing to ground an
 	// answer in, so the LLM is not called.
 	ErrNoGrounding = errors.New("no grounding")
+	// ErrGateUnmet marks a quality gate that did not pass: ask --verify-strict
+	// found unsupported claims, or lore eval missed a --fail-under threshold. It is
+	// distinct from a runtime error so CI can tell "the answer/retrieval did not
+	// meet the bar" (an actionable, expected signal) from "the tool broke" (exit 1).
+	ErrGateUnmet = errors.New("quality gate not met")
 )
 
 // CollectionRepository persists Collection aggregates.
@@ -223,6 +228,21 @@ type Source interface {
 type Extractor interface {
 	Supports(contentType string) bool
 	Extract(contentType string, raw []byte) (string, error)
+}
+
+// Verdict is the entailment judgment for one claim against candidate evidence:
+// whether the evidence supports the claim, with an optional short rationale.
+type Verdict struct {
+	Supported bool
+	Rationale string
+}
+
+// Verifier judges whether a claim is entailed by evidence text — the model call
+// behind faithfulness verification (ask --verify). The default implementation
+// reuses the chat model via a structured entailment prompt, so it needs no new
+// dependency and inherits the chat endpoint configuration.
+type Verifier interface {
+	Verify(ctx context.Context, claim, evidence string) (Verdict, error)
 }
 
 // TokenCounter approximates how many tokens a piece of text occupies in an
