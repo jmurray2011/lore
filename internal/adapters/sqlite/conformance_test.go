@@ -37,6 +37,12 @@ func TestVectorIndexConformance(t *testing.T) {
 	})
 }
 
+func TestLexicalIndexConformance(t *testing.T) {
+	conformance.RunLexicalIndexSuite(t, func(t *testing.T) app.LexicalIndex {
+		return newStore(t).Lexical()
+	})
+}
+
 func TestAnswerCacheConformance(t *testing.T) {
 	conformance.RunAnswerCacheSuite(t, func(t *testing.T) app.AnswerCache {
 		return newStore(t).Cache()

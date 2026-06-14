@@ -126,7 +126,7 @@ func newHarness(t *testing.T, scope []string, withRerank bool) *harness {
 	})
 
 	emb := &fakeEmbedder{space: testSpace, vec: []float32{1, 0}}
-	querier := app.NewQuerier(h.colls, h.index, h.docs, emb)
+	querier := app.NewQuerier(h.colls, h.index, h.docs, emb, memstore.NewLexicalIndex())
 	catalog := app.NewCatalog(h.colls, h.docs, emb, domain.Registry{})
 	deps := Deps{
 		Catalog: catalog,

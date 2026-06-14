@@ -16,12 +16,18 @@ type Querier struct {
 	index       VectorIndex
 	docs        DocumentRepository
 	embedder    Embedder
+	lexical     LexicalIndex
 }
 
-// NewQuerier wires a Querier from the ports it needs.
-func NewQuerier(collections CollectionRepository, index VectorIndex, docs DocumentRepository, embedder Embedder) *Querier {
-	return &Querier{collections: collections, index: index, docs: docs, embedder: embedder}
+// NewQuerier wires a Querier from the ports it needs. The lexical index powers
+// hybrid retrieval; a nil lexical index degrades --hybrid to vector-only.
+func NewQuerier(collections CollectionRepository, index VectorIndex, docs DocumentRepository, embedder Embedder, lexical LexicalIndex) *Querier {
+	return &Querier{collections: collections, index: index, docs: docs, embedder: embedder, lexical: lexical}
 }
+
+// hybridPool is the minimum candidate pool fetched from each retriever (vector and
+// lexical) before fusion, so RRF has enough overlap to work with even for a small k.
+const hybridPool = 50
 
 // sourceOverfetch multiplies k when a source filter is set, so enough candidates
 // are retrieved for the filter to fill k. It is best-effort: if matching
@@ -200,6 +206,95 @@ func (q *Querier) retrieve(ctx context.Context, collection, query string, k int,
 		return Retrieval{}, err
 	}
 	return splitTopK(hits, k), nil
+}
+
+// QueryHybrid retrieves with hybrid retrieval: a vector search and a BM25 lexical
+// search, each over a candidate pool, merged by Reciprocal Rank Fusion
+// (domain.FuseRRF) into the top-k. A hit's Score stays its cosine similarity (0.0
+// for a chunk found only by lexical match, where no vector similarity was
+// computed); the returned order is the fusion order. The --where filter and
+// --source compose as in Query. With no lexical index wired it degrades to
+// vector-only ranking. Unknown collection is ErrNotFound; empty query is
+// ErrInvalidArgument.
+func (q *Querier) QueryHybrid(ctx context.Context, collection, query string, k int, source string, filter domain.Predicate) ([]domain.ChunkHit, error) {
+	r, err := q.retrieveHybrid(ctx, collection, query, k, source, filter)
+	return r.Hits, err
+}
+
+// ExplainHybrid is QueryHybrid plus the runner-up just outside the fused top-k,
+// for --explain. The over-fetched fusion pool makes the runner-up available
+// without an extra search.
+func (q *Querier) ExplainHybrid(ctx context.Context, collection, query string, k int, source string, filter domain.Predicate) (Retrieval, error) {
+	return q.retrieveHybrid(ctx, collection, query, k, source, filter)
+}
+
+func (q *Querier) retrieveHybrid(ctx context.Context, collection, query string, k int, source string, filter domain.Predicate) (Retrieval, error) {
+	if strings.TrimSpace(query) == "" {
+		return Retrieval{}, fmt.Errorf("query: %w: text must not be empty", domain.ErrInvalidArgument)
+	}
+	coll, err := q.collections.Get(ctx, collection)
+	if err != nil {
+		return Retrieval{}, err
+	}
+	vec, err := q.embedQuery(ctx, query, coll)
+	if err != nil {
+		return Retrieval{}, err
+	}
+
+	pool := hybridSearchBudget(k, source)
+	vMatches, err := q.index.Search(ctx, coll.Name, vec, pool, filter)
+	if err != nil {
+		return Retrieval{}, fmt.Errorf("search %q: %w", coll.Name, err)
+	}
+	var lexIDs []domain.ChunkID
+	if q.lexical != nil {
+		lexIDs, err = q.lexical.Search(ctx, coll.Name, query, pool, filter)
+		if err != nil {
+			return Retrieval{}, fmt.Errorf("lexical search %q: %w", coll.Name, err)
+		}
+	}
+
+	vecIDs := make([]domain.ChunkID, len(vMatches))
+	cosineByID := make(map[domain.ChunkID]float64, len(vMatches))
+	for i, m := range vMatches {
+		vecIDs[i] = m.ChunkID
+		cosineByID[m.ChunkID] = m.Score
+	}
+
+	fused := domain.FuseRRF(domain.RRFDefaultK, vecIDs, lexIDs)
+	if len(fused) == 0 {
+		return Retrieval{}, nil
+	}
+	// Carry cosine similarity through fusion order (0 for lexical-only hits); the
+	// fused order is the ranking, hydrate preserves it and applies the source glob.
+	matches := make([]domain.VectorMatch, len(fused))
+	for i, r := range fused {
+		matches[i] = domain.VectorMatch{ChunkID: r.ID, Score: cosineByID[r.ID]}
+	}
+
+	hits, err := q.hydrate(ctx, matches, nil, source)
+	if err != nil {
+		return Retrieval{}, err
+	}
+	return splitTopK(hits, k), nil
+}
+
+// hybridSearchBudget is the per-retriever candidate pool for hybrid retrieval: at
+// least hybridPool so fusion has overlap, widened by the source over-fetch factor
+// when a source glob will thin the results. k <= 0 fetches nothing (mirrors
+// Search), so a hybrid request with no budget yields no hits.
+func hybridSearchBudget(k int, source string) int {
+	if k <= 0 {
+		return 0
+	}
+	pool := k
+	if pool < hybridPool {
+		pool = hybridPool
+	}
+	if source != "" {
+		pool *= sourceOverfetch
+	}
+	return pool
 }
 
 // retrieveAcross is the shared body of QueryAcross and ExplainAcross: it embeds

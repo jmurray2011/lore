@@ -22,13 +22,21 @@ import (
 
 // Config is lore's resolved configuration.
 type Config struct {
-	Provider Provider
-	Rerank   Rerank
-	Storage  Storage
-	Ingest   Ingest
-	Chunk    Chunk
-	Cache    Cache
-	Log      Log
+	Provider  Provider
+	Rerank    Rerank
+	Storage   Storage
+	Ingest    Ingest
+	Chunk     Chunk
+	Cache     Cache
+	Retrieval Retrieval
+	Log       Log
+}
+
+// Retrieval configures default retrieval behavior. Hybrid turns on BM25⊕vector
+// hybrid retrieval by default for query/ask; the per-command --hybrid flag still
+// overrides it (use --hybrid=false to force vector-only when the default is on).
+type Retrieval struct {
+	Hybrid bool
 }
 
 // Chunk configures how documents are split into retrieval units. Strategy is
@@ -324,6 +332,9 @@ type fileConfig struct {
 		Enabled bool   `toml:"enabled"`
 		TTL     string `toml:"ttl"`
 	} `toml:"cache"`
+	Retrieval struct {
+		Hybrid bool `toml:"hybrid"`
+	} `toml:"retrieval"`
 	Log struct {
 		Level  string `toml:"level"`
 		Format string `toml:"format"`
@@ -386,6 +397,9 @@ func applyFile(cfg *Config, fc fileConfig) error {
 			return err
 		}
 		cfg.Cache.TTL = d
+	}
+	if fc.Retrieval.Hybrid {
+		cfg.Retrieval.Hybrid = true
 	}
 	setString(&cfg.Log.Format, fc.Log.Format)
 	if fc.Provider.Dimensions != 0 {
@@ -488,6 +502,9 @@ func applyEnv(cfg *Config, getenv func(string) string) error {
 		return err
 	}
 	if err := applyBoolEnv(&cfg.Cache.Enabled, getenv, "LORE_CACHE"); err != nil {
+		return err
+	}
+	if err := applyBoolEnv(&cfg.Retrieval.Hybrid, getenv, "LORE_RETRIEVAL_HYBRID"); err != nil {
 		return err
 	}
 	if v := getenv("LORE_CACHE_TTL"); v != "" {

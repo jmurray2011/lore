@@ -42,6 +42,9 @@ type Deps struct {
 	// Log is lore's configured logger (stderr), handed to the long-running mcp
 	// server so it honors --log-level/--log-format; nil is tolerated.
 	Log *slog.Logger
+	// RetrievalHybrid is the configured default for hybrid retrieval; it sets the
+	// default value of query/ask --hybrid (overridable per command).
+	RetrievalHybrid bool
 }
 
 // GlobalOptions are the resolved global flags the composition root needs to

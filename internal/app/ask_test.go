@@ -90,7 +90,7 @@ func TestAsker(t *testing.T) {
 
 	newAsker := func(gen *fakeGenerator, emb *fakeEmbedder, idx *fakeIndex, docs *fakeDocs) *app.Asker {
 		coll := mustCollection(t, "docs", space)
-		q := app.NewQuerier(newFakeCollections(coll), idx, docs, emb)
+		q := app.NewQuerier(newFakeCollections(coll), idx, docs, emb, &fakeLexical{})
 		return app.NewAsker(q, gen)
 	}
 
@@ -128,7 +128,7 @@ func TestAsker(t *testing.T) {
 
 	t.Run("propagates retrieval errors without calling the generator", func(t *testing.T) {
 		gen := &fakeGenerator{}
-		q := app.NewQuerier(newFakeCollections(), &fakeIndex{}, &fakeDocs{}, &fakeEmbedder{space: space})
+		q := app.NewQuerier(newFakeCollections(), &fakeIndex{}, &fakeDocs{}, &fakeEmbedder{space: space}, &fakeLexical{})
 		a := app.NewAsker(q, gen)
 
 		if _, err := a.Ask(ctx, "missing", "why", 1, nil, false, "", domain.Predicate{}); !errors.Is(err, app.ErrNotFound) {
@@ -243,7 +243,7 @@ func TestAsker(t *testing.T) {
 	t.Run("Synthesize generates over given hits without retrieving", func(t *testing.T) {
 		gen := &fakeGenerator{answer: app.Answer{Text: "synthesized"}}
 		// The querier is empty — Synthesize must not consult it.
-		q := app.NewQuerier(newFakeCollections(), &fakeIndex{}, &fakeDocs{}, &fakeEmbedder{space: space})
+		q := app.NewQuerier(newFakeCollections(), &fakeIndex{}, &fakeDocs{}, &fakeEmbedder{space: space}, &fakeLexical{})
 		a := app.NewAsker(q, gen)
 
 		hits := []domain.ChunkHit{{Chunk: c0, Score: 0.9, Source: "file:///a.md"}}
@@ -261,7 +261,7 @@ func TestAsker(t *testing.T) {
 
 	t.Run("Synthesize with no hits or attachments is ungrounded", func(t *testing.T) {
 		gen := &fakeGenerator{answer: app.Answer{Text: "from nothing"}}
-		a := app.NewAsker(app.NewQuerier(newFakeCollections(), &fakeIndex{}, &fakeDocs{}, &fakeEmbedder{space: space}), gen)
+		a := app.NewAsker(app.NewQuerier(newFakeCollections(), &fakeIndex{}, &fakeDocs{}, &fakeEmbedder{space: space}, &fakeLexical{}), gen)
 
 		ans, err := a.Synthesize(ctx, "why", nil, nil)
 		if err != nil {

@@ -19,8 +19,8 @@ func TestSyncer(t *testing.T) {
 		colls := newFakeCollections(coll)
 		emb := &fakeEmbedder{space: space}
 		catalog := app.NewCatalog(colls, docs, emb, chunker41(t))
-		ingestor := app.NewIngestor(colls, docs, idx, emb, &fakeExtractor{}, src, chunker41(t))
-		remover := app.NewRemover(colls, docs, idx)
+		ingestor := app.NewIngestor(colls, docs, idx, emb, &fakeExtractor{}, src, chunker41(t), &fakeLexical{})
+		remover := app.NewRemover(colls, docs, idx, &fakeLexical{})
 		return app.NewSyncer(catalog, ingestor, remover, src)
 	}
 

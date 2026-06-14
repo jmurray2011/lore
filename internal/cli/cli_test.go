@@ -172,13 +172,14 @@ func newDeps(emb app.Embedder, gen app.Generator) (cli.Deps, *memstore.Collectio
 	colls := memstore.NewCollectionRepository()
 	docs := memstore.NewDocumentRepository()
 	index := memstore.NewVectorIndex()
-	q := app.NewQuerier(colls, index, docs, emb)
+	lexical := memstore.NewLexicalIndex()
+	q := app.NewQuerier(colls, index, docs, emb, lexical)
 	fixed, _ := domain.NewFixedChunker(domain.DefaultChunkSize, domain.DefaultChunkOverlap)
 	chunkers, _ := domain.NewRegistry(testChunkerSpec(), fixed, nil)
 	source := fs.NewSource()
 	catalog := app.NewCatalog(colls, docs, emb, chunkers)
-	ingestor := app.NewIngestor(colls, docs, index, emb, extract.New(), source, chunkers)
-	remover := app.NewRemover(colls, docs, index)
+	ingestor := app.NewIngestor(colls, docs, index, emb, extract.New(), source, chunkers, lexical)
+	remover := app.NewRemover(colls, docs, index, lexical)
 	deps := cli.Deps{
 		Catalog: catalog,
 		Ingest:  ingestor,
@@ -188,7 +189,7 @@ func newDeps(emb app.Embedder, gen app.Generator) (cli.Deps, *memstore.Collectio
 		Remove:  remover,
 		Tokens:  wordTokenCounter{},
 		Export:  app.NewExporter(colls, docs, index),
-		Import:  app.NewImporter(colls, docs, index, remover),
+		Import:  app.NewImporter(colls, docs, index, remover, lexical),
 	}
 	return deps, colls, docs, index
 }
@@ -1549,6 +1550,46 @@ func TestCLIAddThenQuery(t *testing.T) {
 	if len(hits) < 1 || !strings.Contains(hits[0].Text, "hello grounded world") {
 		t.Errorf("hits = %+v", hits)
 	}
+}
+
+func TestCLIHybridRetrieval(t *testing.T) {
+	// The stub embedder returns the same vector for every chunk, so cosine ties —
+	// only the BM25 lexical signal (populated through the real add path) can
+	// distinguish a keyword match. Hybrid fusion must therefore surface it.
+	deps, _, _, _ := newDeps(stubEmbedder{space: testSpace(), vec: []float32{1, 0, 0}}, stubGenerator{})
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "fox.txt"), []byte("the quick brown fox jumps over the lazy dog"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "lorem.txt"), []byte("lorem ipsum dolor sit amet consectetur"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, code := exec(deps, "init", "docs"); code != 0 {
+		t.Fatal("init failed")
+	}
+	if _, code := exec(deps, "add", "docs", dir); code != 0 {
+		t.Fatal("add failed")
+	}
+
+	t.Run("--hybrid surfaces the keyword match the vector tie would bury", func(t *testing.T) {
+		out, code := exec(deps, "query", "docs", "fox", "--hybrid", "--json")
+		if code != 0 {
+			t.Fatalf("query --hybrid exit %d, out %q", code, out)
+		}
+		var hits []hitViewJSON
+		if err := json.Unmarshal([]byte(out), &hits); err != nil {
+			t.Fatalf("bad JSON %q: %v", out, err)
+		}
+		if len(hits) == 0 || !strings.Contains(hits[0].Source, "fox.txt") {
+			t.Errorf("--hybrid should rank the keyword match (fox.txt) first, got %+v", hits)
+		}
+	})
+
+	t.Run("--hybrid with multiple collections is a usage error", func(t *testing.T) {
+		if _, code := exec(deps, "query", "docs", "-c", "notes", "fox", "--hybrid"); code != 2 {
+			t.Errorf("--hybrid + -c should exit 2, got %d", code)
+		}
+	})
 }
 
 func TestCLIAddCountsUnsupportedSeparately(t *testing.T) {

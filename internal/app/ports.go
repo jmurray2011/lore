@@ -120,6 +120,34 @@ type VectorIndex interface {
 	Delete(ctx context.Context, collection string, ids []domain.ChunkID) error
 }
 
+// LexicalDoc is one chunk's lexical content for the LexicalIndex: its identity,
+// the text to index, and the document metadata a --where filter applies to. It is
+// the lexical-side sibling of VectorEntry.
+type LexicalDoc struct {
+	ChunkID  domain.ChunkID
+	Text     string
+	Metadata domain.Metadata
+}
+
+// LexicalIndex is a keyword (BM25) index over chunk text — the lexical half of
+// hybrid retrieval, a sibling of VectorIndex kept separate so each port stays
+// small and every adapter implements it honestly (memstore in-memory BM25, sqlite
+// FTS5). Results feed rank-based fusion (domain.FuseRRF) with the vector results,
+// so Search returns only the ranked identities, not scores.
+//
+// Semantics:
+//   - Upsert replaces entries with the same ChunkID.
+//   - Search returns up to k chunk IDs ranked by lexical relevance, best first,
+//     considering only entries whose Metadata satisfies filter. An empty query,
+//     unknown collection, or k <= 0 yields no matches, no error. A chunk is a
+//     candidate when it contains at least one query term.
+//   - Delete of absent IDs is a no-op.
+type LexicalIndex interface {
+	Upsert(ctx context.Context, collection string, docs []LexicalDoc) error
+	Search(ctx context.Context, collection string, query string, k int, filter domain.Predicate) ([]domain.ChunkID, error)
+	Delete(ctx context.Context, collection string, ids []domain.ChunkID) error
+}
+
 // Embedder turns texts into vectors and reports the space it produces,
 // so use cases can enforce space coherence against the target collection.
 type Embedder interface {

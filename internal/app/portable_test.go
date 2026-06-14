@@ -43,7 +43,7 @@ func seedExportable(t *testing.T, colls *fakeCollections, docs *fakeDocs, idx *f
 }
 
 func newImporter(colls *fakeCollections, docs *fakeDocs, idx *fakeIndex) *app.Importer {
-	return app.NewImporter(colls, docs, idx, app.NewRemover(colls, docs, idx))
+	return app.NewImporter(colls, docs, idx, app.NewRemover(colls, docs, idx, &fakeLexical{}), &fakeLexical{})
 }
 
 func TestExportImportRoundTrip(t *testing.T) {
