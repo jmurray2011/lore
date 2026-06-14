@@ -55,6 +55,31 @@ func TestSegmentClaims(t *testing.T) {
 			t.Errorf("want no claims, got %+v", claims)
 		}
 	})
+
+	t.Run("does not over-split on abbreviations, initials, or decimals", func(t *testing.T) {
+		// One real sentence carrying "U.S.", "e.g.", and a decimal version. A bare
+		// [.!?] split shatters this into fragments and orphans the citation, which
+		// deflates the support rate on ordinary prose.
+		text := "The service runs in the U.S. and is used by e.g. agencies on gpt-5.4 builds [" + string(a) + "]."
+		claims := domain.SegmentClaims(text, cites)
+		if len(claims) != 1 {
+			t.Fatalf("want 1 claim (abbreviations/initials/decimals are not sentence ends), got %d: %+v", len(claims), claims)
+		}
+		if len(claims[0].CitedChunks) != 1 || claims[0].CitedChunks[0] != a {
+			t.Errorf("the citation must stay attached to its claim, got %+v", claims[0])
+		}
+	})
+
+	t.Run("still splits genuine sentence boundaries", func(t *testing.T) {
+		text := "Keys rotate yearly [" + string(a) + "]. Backups run nightly [" + string(b) + "]."
+		claims := domain.SegmentClaims(text, cites)
+		if len(claims) != 2 {
+			t.Fatalf("want 2 claims, got %d: %+v", len(claims), claims)
+		}
+		if claims[0].CitedChunks[0] != a || claims[1].CitedChunks[0] != b {
+			t.Errorf("claims = %+v", claims)
+		}
+	})
 }
 
 func TestSupportRate(t *testing.T) {

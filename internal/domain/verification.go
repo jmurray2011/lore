@@ -28,10 +28,67 @@ type Claim struct {
 	Rationale   string
 }
 
-// sentenceSplitRE breaks text into sentences at terminal punctuation followed by
-// whitespace, or at line breaks. It is a heuristic (abbreviations like "U.S." can
-// over-split); claim segmentation is best-effort, not linguistic parsing.
-var sentenceSplitRE = regexp.MustCompile(`[.!?]+\s+|\n+`)
+// sentenceBoundaryRE finds candidate sentence ends: terminal punctuation followed
+// by whitespace (group 1 = the punctuation), or one-or-more line breaks (group 3).
+// Whether a candidate is a real boundary is decided by splitSentences.
+var sentenceBoundaryRE = regexp.MustCompile(`([.!?]+)(\s+)|(\n+)`)
+
+// acronymRE matches a dotted acronym or a lone initial in the token preceding a
+// period — "U.S", "U.K", "e.g", "i.e", "a.m", "A.B.C", or a single "A" — none of
+// which end a sentence.
+var acronymRE = regexp.MustCompile(`^[A-Za-z](?:\.[A-Za-z])*$`)
+
+// sentenceAbbrev are common abbreviations (sans trailing dot, lower-cased) that a
+// period follows without ending a sentence.
+var sentenceAbbrev = map[string]bool{
+	"etc": true, "vs": true, "cf": true, "al": true, "approx": true,
+	"no": true, "fig": true, "eq": true, "inc": true, "ltd": true,
+	"co": true, "corp": true, "dept": true, "mr": true, "mrs": true,
+	"ms": true, "dr": true, "prof": true, "sr": true, "jr": true, "st": true,
+}
+
+// segmentSentences breaks text into sentences at terminal punctuation followed by
+// whitespace (or at line breaks), but does not split after a common abbreviation
+// ("e.g.", "U.S.", "etc."), a dotted acronym, or a single-letter initial — the
+// over-split a bare [.!?] regex causes on real prose. It is a heuristic biased
+// toward keeping a claim whole (under-splitting) rather than fragmenting it, since
+// a fragment orphans its citation. The terminal punctuation/line break is dropped
+// from the returned segments.
+func segmentSentences(text string) []string {
+	var out []string
+	start := 0
+	for _, loc := range sentenceBoundaryRE.FindAllStringSubmatchIndex(text, -1) {
+		punctStart := loc[2] // group 1 ([.!?]+) start, or -1 for a line-break boundary
+		contentEnd := loc[0]
+		if punctStart >= 0 {
+			contentEnd = punctStart
+			if isAbbreviation(text[start:punctStart]) {
+				continue // not a real sentence end; fold into the current sentence
+			}
+		}
+		out = append(out, text[start:contentEnd])
+		start = loc[1] // resume past the full boundary (punctuation+space or newline)
+	}
+	if start < len(text) {
+		out = append(out, text[start:])
+	}
+	return out
+}
+
+// isAbbreviation reports whether the last whitespace-delimited token of preceding
+// (the text up to a candidate period) is an abbreviation, acronym, or initial that
+// does not end a sentence.
+func isAbbreviation(preceding string) bool {
+	fields := strings.Fields(preceding)
+	if len(fields) == 0 {
+		return false
+	}
+	last := fields[len(fields)-1]
+	if acronymRE.MatchString(last) {
+		return true
+	}
+	return sentenceAbbrev[strings.ToLower(strings.Trim(last, "."))]
+}
 
 // claimCitationRE matches a bracketed citation marker like [<chunkID>] or
 // [<id1>, <id2>] (mirrors the openai/cli citation regex).
@@ -49,7 +106,7 @@ func SegmentClaims(answer string, citations []Citation) []Claim {
 	}
 
 	var claims []Claim
-	for _, sentence := range sentenceSplitRE.Split(answer, -1) {
+	for _, sentence := range segmentSentences(answer) {
 		cited := citedChunks(sentence, valid)
 		text := strings.TrimSpace(claimCitationRE.ReplaceAllString(sentence, ""))
 		text = strings.Join(strings.Fields(text), " ") // collapse whitespace left by stripping markers
