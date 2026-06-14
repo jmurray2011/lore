@@ -8,52 +8,79 @@ import (
 )
 
 func TestHitTime(t *testing.T) {
-	ingested := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
-	mkHit := func(meta domain.Metadata) domain.ChunkHit {
-		return domain.ChunkHit{Metadata: meta, IngestedAt: ingested}
-	}
+	date := func(y int, m time.Month, d int) time.Time { return time.Date(y, m, d, 0, 0, 0, 0, time.UTC) }
 
-	t.Run("prefers updated over created and ingested", func(t *testing.T) {
-		h := mkHit(domain.Metadata{"updated": "2026-06-01", "created": "2025-01-01"})
-		got, ok := domain.HitTime(h)
-		if !ok || !got.Equal(time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)) {
-			t.Fatalf("HitTime = %v, %v; want 2026-06-01", got, ok)
+	t.Run("explicit modified front-matter wins over everything", func(t *testing.T) {
+		h := domain.ChunkHit{
+			Source:     "file:///logs/2024-01-01.md",
+			Metadata:   domain.Metadata{"updated": "2026-06-01", "created": "2020-01-01", domain.MetaKeyModTime: "2025-01-01"},
+			IngestedAt: date(2023, 1, 1),
+		}
+		if got, ok := domain.HitTime(h); !ok || !got.Equal(date(2026, 6, 1)) {
+			t.Fatalf("HitTime = %v,%v; want updated 2026-06-01", got, ok)
 		}
 	})
 
-	t.Run("falls back to created when no updated", func(t *testing.T) {
-		h := mkHit(domain.Metadata{"created": "2025-03-04"})
-		got, ok := domain.HitTime(h)
-		if !ok || !got.Equal(time.Date(2025, 3, 4, 0, 0, 0, 0, time.UTC)) {
-			t.Fatalf("HitTime = %v, %v; want 2025-03-04", got, ok)
+	t.Run("modified synonyms match case-insensitively", func(t *testing.T) {
+		for _, key := range []string{"Updated", "modified", "lastmod", "last_modified"} {
+			h := domain.ChunkHit{Metadata: domain.Metadata{key: "2026-06-02"}}
+			if got, ok := domain.HitTime(h); !ok || !got.Equal(date(2026, 6, 2)) {
+				t.Errorf("key %q: HitTime = %v,%v; want 2026-06-02", key, got, ok)
+			}
 		}
 	})
 
-	t.Run("falls back to IngestedAt when no date metadata", func(t *testing.T) {
-		got, ok := domain.HitTime(mkHit(nil))
-		if !ok || !got.Equal(ingested) {
-			t.Fatalf("HitTime = %v, %v; want IngestedAt", got, ok)
+	t.Run("filesystem mtime beats filename and created", func(t *testing.T) {
+		h := domain.ChunkHit{
+			Source:   "file:///logs/2024-03-03.md",
+			Metadata: domain.Metadata{domain.MetaKeyModTime: "2026-06-10T08:00:00Z", "created": "2020-01-01"},
+		}
+		if got, ok := domain.HitTime(h); !ok || !got.Equal(time.Date(2026, 6, 10, 8, 0, 0, 0, time.UTC)) {
+			t.Fatalf("HitTime = %v,%v; want mtime 2026-06-10T08:00", got, ok)
 		}
 	})
 
-	t.Run("parses RFC3339", func(t *testing.T) {
-		h := mkHit(domain.Metadata{"updated": "2026-06-01T12:30:00Z"})
-		got, ok := domain.HitTime(h)
-		if !ok || !got.Equal(time.Date(2026, 6, 1, 12, 30, 0, 0, time.UTC)) {
-			t.Fatalf("HitTime = %v, %v", got, ok)
+	t.Run("filename ISO date beats created when no modified/mtime", func(t *testing.T) {
+		h := domain.ChunkHit{Source: "file:///Work-Log/daily/2026-06-09.md", Metadata: domain.Metadata{"created": "2020-01-01"}}
+		if got, ok := domain.HitTime(h); !ok || !got.Equal(date(2026, 6, 9)) {
+			t.Fatalf("HitTime = %v,%v; want filename 2026-06-09", got, ok)
 		}
 	})
 
-	t.Run("unknown when no metadata and zero IngestedAt", func(t *testing.T) {
-		if _, ok := domain.HitTime(domain.ChunkHit{}); ok {
-			t.Error("want unknown (ok=false) for an undated hit with zero IngestedAt")
+	t.Run("filename ISO week resolves to that week's Monday", func(t *testing.T) {
+		got, ok := domain.HitTime(domain.ChunkHit{Source: "file:///Work-Log/weekly/2026-W20.md"})
+		if !ok {
+			t.Fatal("want a date from the ISO-week filename")
+		}
+		y, w := got.ISOWeek()
+		if y != 2026 || w != 20 || got.Weekday() != time.Monday {
+			t.Fatalf("HitTime = %v (ISO %d-W%02d, %s); want Monday of 2026-W20", got, y, w, got.Weekday())
 		}
 	})
 
-	t.Run("unparseable date falls through to IngestedAt", func(t *testing.T) {
-		got, ok := domain.HitTime(mkHit(domain.Metadata{"updated": "last tuesday"}))
-		if !ok || !got.Equal(ingested) {
-			t.Fatalf("HitTime = %v, %v; want IngestedAt fallback", got, ok)
+	t.Run("created/date front-matter used only after stronger signals", func(t *testing.T) {
+		if got, ok := domain.HitTime(domain.ChunkHit{Metadata: domain.Metadata{"date": "2025-03-04"}}); !ok || !got.Equal(date(2025, 3, 4)) {
+			t.Fatalf("HitTime = %v,%v; want created/date 2025-03-04", got, ok)
+		}
+	})
+
+	t.Run("ingest time is the last resort", func(t *testing.T) {
+		h := domain.ChunkHit{Source: "file:///notes/architecture.md", IngestedAt: date(2024, 1, 1)}
+		if got, ok := domain.HitTime(h); !ok || !got.Equal(date(2024, 1, 1)) {
+			t.Fatalf("HitTime = %v,%v; want IngestedAt", got, ok)
+		}
+	})
+
+	t.Run("unknown when no signal at all", func(t *testing.T) {
+		if _, ok := domain.HitTime(domain.ChunkHit{Source: "file:///notes/architecture.md"}); ok {
+			t.Error("want unknown (ok=false) when no date signal exists")
+		}
+	})
+
+	t.Run("an unparseable explicit date falls through to the next signal", func(t *testing.T) {
+		h := domain.ChunkHit{Source: "file:///logs/2026-06-09.md", Metadata: domain.Metadata{"updated": "last tuesday"}}
+		if got, ok := domain.HitTime(h); !ok || !got.Equal(date(2026, 6, 9)) {
+			t.Fatalf("HitTime = %v,%v; want filename fallback 2026-06-09", got, ok)
 		}
 	})
 }

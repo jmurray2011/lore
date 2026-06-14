@@ -215,7 +215,11 @@ type SourceItem struct {
 	URI         string
 	ContentType string
 	Fingerprint string
-	Open        func() ([]byte, error)
+	// ModTime is the source's last-modified time, recorded as recency provenance
+	// (the reserved `mtime` metadata key). Zero when the source has no meaningful
+	// timestamp (e.g. stdin).
+	ModTime time.Time
+	Open    func() ([]byte, error)
 }
 
 // Source yields raw documents from somewhere (filesystem walk, stdin, URL).

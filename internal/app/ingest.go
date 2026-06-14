@@ -271,6 +271,16 @@ func (i *Ingestor) ingestItem(ctx context.Context, coll *domain.Collection, item
 		fm, text = domain.ParseFrontMatter(text)
 		docMeta = mergeMeta(fm, docMeta)
 	}
+	// Record the source's filesystem modify time as recency provenance, for every
+	// content type. An explicit author-supplied value (front matter or --meta) wins.
+	if !item.ModTime.IsZero() {
+		if docMeta == nil {
+			docMeta = domain.Metadata{}
+		}
+		if _, ok := docMeta[domain.MetaKeyModTime]; !ok {
+			docMeta[domain.MetaKeyModTime] = item.ModTime.UTC().Format(time.RFC3339)
+		}
+	}
 	hash := domain.HashContent([]byte(text))
 	results, err := i.chunkers.Chunk(domain.ParsedDoc{Text: text, ContentType: item.ContentType, SourceURI: item.URI})
 	if err != nil {

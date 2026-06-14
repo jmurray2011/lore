@@ -176,15 +176,16 @@ func parseNumber(s string) (float64, bool) {
 	return f, err == nil
 }
 
-// parseDate parses a date-only (2006-01-02, treated as midnight UTC) or full
-// RFC3339 timestamp, reporting whether it succeeded.
+// parseDate parses a date in any accepted layout — full RFC3339, a zoneless
+// datetime, or a date-only value (treated as midnight UTC) — reporting whether it
+// succeeded. Shared by --where comparisons and recency inference so both accept
+// the same formats.
 func parseDate(s string) (time.Time, bool) {
 	s = strings.TrimSpace(s)
-	if t, err := time.Parse(time.RFC3339, s); err == nil {
-		return t, true
-	}
-	if t, err := time.Parse("2006-01-02", s); err == nil {
-		return t, true
+	for _, layout := range []string{time.RFC3339, "2006-01-02T15:04:05", "2006-01-02"} {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t, true
+		}
 	}
 	return time.Time{}, false
 }

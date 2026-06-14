@@ -126,6 +126,27 @@ func TestIngestorAttachesMetadata(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run("filesystem mtime is recorded as recency provenance", func(t *testing.T) {
+		coll := mustCollection(t, "docs", space)
+		docs := &fakeDocs{}
+		src := &fakeSource{items: []app.SourceItem{}}
+		it := textItem("file:///log.txt", words(10))
+		it.ModTime = time.Date(2026, 6, 9, 14, 30, 0, 0, time.UTC)
+		src.items = append(src.items, it)
+		ing := app.NewIngestor(newFakeCollections(coll), docs, &fakeIndex{}, &fakeEmbedder{space: space}, &fakeExtractor{}, src, chunker41(t), &fakeLexical{})
+
+		if _, err := ing.Ingest(ctx, "docs", "/root"); err != nil {
+			t.Fatalf("Ingest: %v", err)
+		}
+		got, err := docs.GetBySource(ctx, "docs", "file:///log.txt")
+		if err != nil {
+			t.Fatalf("GetBySource: %v", err)
+		}
+		if got.Metadata[domain.MetaKeyModTime] != "2026-06-09T14:30:00Z" {
+			t.Errorf("mtime metadata = %q, want 2026-06-09T14:30:00Z", got.Metadata[domain.MetaKeyModTime])
+		}
+	})
 }
 
 func TestIngestorChunkerGuard(t *testing.T) {

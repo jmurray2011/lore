@@ -74,6 +74,7 @@ func (Source) Walk(ctx context.Context, root string, fn func(app.SourceItem) err
 			URI:         uri,
 			ContentType: contentType(path),
 			Fingerprint: fp,
+			ModTime:     info.ModTime(),
 			Open:        func() ([]byte, error) { return readCapped(path, maxFileBytes) },
 		})
 	})
