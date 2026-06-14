@@ -309,8 +309,33 @@ lore ask   notes "summarize the risks" --mmr --mmr-lambda 0.5
 Marginal Relevance — `λ·relevance − (1−λ)·max-similarity-to-already-selected` —
 so near-duplicate chunks are demoted; `--mmr-lambda` (default 0.5) trades
 relevance (1.0) against diversity (0.0). Order in the pipeline:
-fuse/rerank/MMR → `--max-per-source` → `--budget`. `--mmr` is single-collection
-and not combined with `--rerank` (both reorder the pool).
+fuse/rerank/recency/MMR → `--max-per-source` → `--budget`. `--mmr` is
+single-collection and not combined with `--rerank` (both reorder the pool).
+
+## Recency (`--recency`)
+
+Vector similarity has no notion of time: over an evolving corpus, a stale chunk
+can outrank a newer correction and sweep `-k` purely on relevance. `--recency`
+re-ranks a wider candidate pool by relevance blended with an exponential time
+decay, so a fresh-but-slightly-less-similar chunk that pure cosine buried can
+surface.
+
+```console
+lore query notes "current key rotation policy" --recency
+lore ask   notes "what is the policy now?" --recency --half-life-days 30
+```
+
+Each hit's cosine score is multiplied by `2^(−age/half-life)`, where age comes
+from the document's `updated` metadata, then `created`, then ingest time; the
+pool is re-sorted by the adjusted score and trimmed to `-k` (the cosine score is
+preserved for display — only the order changes). `--half-life-days` (default 90)
+sets how fast relevance gives way to freshness: a chunk one half-life old keeps
+half its weight; a shorter half-life prefers recency more aggressively.
+Documents with **no** date keep full weight, so recency never buries an undated
+chunk on a guess. Like the other rerankers, `--recency` operates on a wider pool
+then trims to `-k`; it composes with `--hybrid`, `--where`, `--source`,
+`--budget`, and multiple `-c` collections, and is mutually exclusive with
+`--rerank` and `--mmr` (all three reorder the pool).
 
 ## Faithfulness verification & evaluation
 

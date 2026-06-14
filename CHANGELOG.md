@@ -36,6 +36,14 @@ changes migrate in place and degrade gracefully (see *Migration*).
 - **Diversity — `--max-per-source N` and `--mmr` (`--mmr-lambda`).** Stop a
   dominant document from sweeping `-k`; Maximal Marginal Relevance trades
   relevance against diversity.
+- **Recency — `query`/`ask --recency` (`--half-life-days`, default 90).** Vector
+  similarity has no notion of time, so a stale chunk can outrank a newer
+  correction. Recency re-ranks a wider candidate pool by relevance blended with
+  an exponential time decay on each document's `updated`/`created` metadata (or
+  ingest time), surfacing fresh-but-slightly-less-similar chunks that pure cosine
+  buries. Undated documents keep full weight (never demoted on a guess). Composes
+  with `--hybrid`/`--where`/`--source`/`--budget` and multiple collections;
+  mutually exclusive with `--rerank`/`--mmr`.
 - **Exit code 5** — a quality gate was not met (`ask --verify-strict`,
   `lore eval --fail-under`), distinct from runtime (1) and usage (2) errors.
 

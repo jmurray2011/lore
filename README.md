@@ -43,8 +43,10 @@ $ lore eval notes -f questions.jsonl --verify --fail-under recall=0.8 --fail-und
 ```
 
 Retrieval beyond plain cosine: **hybrid** BM25⊕vector (`--hybrid`), metadata
-filtering (`--where 'author=alice'`), cross-encoder rerank (`--rerank`), and
-diversity (`--mmr`, `--max-per-source`). See [docs/retrieval.md](docs/retrieval.md).
+filtering (`--where 'author=alice'`), cross-encoder rerank (`--rerank`),
+diversity (`--mmr`, `--max-per-source`), and **recency** time-decay ranking
+(`--recency`) so newer documents aren't buried by stale-but-similar ones. See
+[docs/retrieval.md](docs/retrieval.md).
 
 **How lore is different.** Where RAG usually means a Python framework (LlamaIndex,
 LangChain, txtai) or hand-rolled embedding + vector-store calls, lore ships a
