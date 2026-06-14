@@ -252,3 +252,107 @@ queryable, but they must be rebuilt to ingest again.
 Code-aware chunking (one chunk per function/class, via tree-sitter) is a planned
 future strategy that slots into the same registry; source files currently use
 the text chunker.
+
+## Hybrid retrieval (BM25 ⊕ vector)
+
+Pure cosine similarity misses exact keywords, rare tokens, and code identifiers.
+`--hybrid` runs a BM25 keyword search alongside the vector search and fuses the
+two ranked lists with **Reciprocal Rank Fusion** (rank-based, so the incomparable
+cosine and BM25 scales never need normalizing).
+
+```console
+lore query notes "OAuth PKCE flow" --hybrid          # fuse keyword + semantic
+lore ask   notes "what is CVE-2024-1234?" --hybrid   # keyword-heavy questions benefit most
+```
+
+`-k` is the final count; each retriever contributes a wider candidate pool that
+RRF fuses. A hit's `score` stays its cosine similarity (`0.0` for a chunk found
+only by keyword match); the returned order is the fusion order. Composes with
+`--rerank` (hybrid feeds the rerank pool), `--budget`, `--source`, and `--where`.
+Turn it on by default with `[retrieval] hybrid = true` (override per-command with
+`--hybrid=false`). Single-collection only for now.
+
+The lexical index is built as you ingest. A collection built before hybrid
+existed answers `--hybrid` queries vector-only until rebuilt (`init` + re-`add`).
+
+## Metadata filtering (`--where`)
+
+Attach structured metadata at ingest — `add --meta key=value` (repeatable) and
+markdown front-matter — then scope retrieval to it:
+
+```console
+lore add notes ./docs --meta team=platform --meta reviewed=2025-06-01
+lore query notes "rotation policy" --where 'author=alice' --where 'date>=2025-01-01'
+lore docs notes --where 'team=platform'
+```
+
+The predicate grammar is deliberately small (a filter, not a query language):
+`key op value`, AND-combined, with `op` in `= != < <= > >=` (numeric/date/string
+coercion) and `~` (case-insensitive glob with comma-list tag membership). A
+document lacking the key never matches. Filtering is exact (applied in the index
+before the top-k cut) and composes with `--source`, `--hybrid`, `--rerank`,
+`--budget`, and cross-collection `-c`. Metadata appears in `--json` hits and `docs`.
+
+## Diversity (`--max-per-source`, MMR)
+
+By default a single dominant document can sweep `-k`. Two levers fix that:
+
+```console
+lore query notes "deployment" --max-per-source 2     # at most 2 chunks per document
+lore ask   notes "summarize the risks" --mmr --mmr-lambda 0.5
+```
+
+`--max-per-source N` caps hits per source document. `--mmr` reorders by Maximal
+Marginal Relevance — `λ·relevance − (1−λ)·max-similarity-to-already-selected` —
+so near-duplicate chunks are demoted; `--mmr-lambda` (default 0.5) trades
+relevance (1.0) against diversity (0.0). Order in the pipeline:
+fuse/rerank/MMR → `--max-per-source` → `--budget`. `--mmr` is single-collection
+and not combined with `--rerank` (both reorder the pool).
+
+## Faithfulness verification & evaluation
+
+An answer is only as good as your ability to *prove* it's grounded.
+
+**`ask --verify`** runs a second pass that checks each sentence (claim) of the
+answer is entailed by the chunk(s) it cites, using the configured chat model:
+
+```console
+lore ask notes "how does key rotation work?" --verify
+```
+
+Human output appends a Verification block (✓ supported · ✗ unsupported · ?
+uncited) with a support rate; `--json` adds a `verification` array
+(`{claim, cited_chunks, verdict, rationale}`) and a `support_rate`.
+**`--verify-strict`** exits non-zero (code 5) if any claim is unsupported — a CI
+faithfulness gate. Verification buffers the answer (it can't verify a token
+stream, so it disables `--stream`) and composes with `--rerank`/`--budget`/
+`--source`/`--where`/`-c`.
+
+**`lore eval`** measures retrieval (and, with `--verify`, answer faithfulness)
+over a question set:
+
+```console
+lore eval notes -f questions.jsonl --verify \
+  --fail-under recall=0.8 --fail-under support_rate=0.9
+```
+
+The eval set is JSONL (an optional first line `{"version": 1}`), one case per line:
+
+```json
+{"question": "how does auth work?", "expected_sources": ["auth.md"]}
+{"question": "rotation cadence?", "expected_chunks": ["<chunk-id>"]}
+```
+
+It reports recall@k, precision@k, MRR, nDCG, and hit-rate (against
+`expected_chunks` when present, else `expected_sources`) plus support-rate under
+`--verify`, per-question and aggregate, human and `--json`. Repeatable
+`--fail-under <metric>=<value>` exits 5 when an aggregate is below threshold — the
+"retrieval didn't regress / the docs still answer X" CI gate.
+
+## Code-aware chunking
+
+Code-aware chunking (one chunk per function/class) is a planned future strategy
+that slots into the chunker registry. It is deferred past 1.0 to keep the
+default build cgo-free (static, cross-compiled, air-gap-clean binaries); the
+resolved approach is a pure-Go heuristic chunker. Source files currently use the
+text chunker.

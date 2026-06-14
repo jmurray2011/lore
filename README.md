@@ -1,8 +1,10 @@
-# lore
+# lore — the auditable knowledge base
 
-A fast, scriptable CLI for grounded, **cited** retrieval-augmented generation
-(RAG) over *specific* sets of documents — built for pipes, scripts, and CI, not
-GUIs.
+A fast, scriptable CLI for grounded, **cited**, and **verifiable** retrieval-augmented
+generation (RAG) over *specific* sets of documents — built for pipes, scripts, and
+CI, not GUIs. An answer is only as good as your ability to *prove* it's grounded, so
+lore makes faithfulness verification and retrieval evaluation **CI-gateable** and
+**machine-readable**.
 
 [![CI](https://github.com/jmurray2011/lore/actions/workflows/ci.yml/badge.svg)](https://github.com/jmurray2011/lore/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/jmurray2011/lore)](https://github.com/jmurray2011/lore/releases/latest)
@@ -26,10 +28,23 @@ $ lore ask notes "how does auth work?"
 
 ## Why lore
 
+- **Auditable** — every answer cites exact chunks; `ask --verify` checks each claim is
+  entailed by what it cites; `lore eval` gates retrieval and faithfulness in CI.
 - **Fast** — single static binary; concurrent ingest; millisecond vector search.
 - **Safe** — invariants enforced in code; no destructive op without explicit intent.
-- **Automation-first** — data to stdout, logs to stderr, `--json` everywhere.
+- **Automation-first** — data to stdout, logs to stderr, `--json` everywhere, meaningful exit codes.
 - **Provider-agnostic** — any OpenAI-compatible endpoint (OpenAI, Azure, Ollama, vLLM, …).
+
+```console
+# prove the answer is grounded — fail CI if any claim isn't supported by its citation
+$ lore ask notes "how does auth work?" --verify-strict
+# measure retrieval/faithfulness over a question set; non-zero exit below threshold
+$ lore eval notes -f questions.jsonl --verify --fail-under recall=0.8 --fail-under support_rate=0.9
+```
+
+Retrieval beyond plain cosine: **hybrid** BM25⊕vector (`--hybrid`), metadata
+filtering (`--where 'author=alice'`), cross-encoder rerank (`--rerank`), and
+diversity (`--mmr`, `--max-per-source`). See [docs/retrieval.md](docs/retrieval.md).
 
 **How lore is different.** Where RAG usually means a Python framework (LlamaIndex,
 LangChain, txtai) or hand-rolled embedding + vector-store calls, lore ships a

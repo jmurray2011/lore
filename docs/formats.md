@@ -20,3 +20,17 @@ Extraction is best-effort *text*: PDF layout, columns, and tables are not
 preserved, and `.xlsx` formatting and formulas are dropped (cell values only).
 See [chunking](retrieval.md#chunking) for how extracted text is split into the
 retrieval unit.
+
+## Data formats (versioned)
+
+Beyond ingested documents, lore reads and writes two versioned data formats,
+stable as of 1.0:
+
+| Format | Used by | Shape |
+|---|---|---|
+| Portable artifact (`LORECORP`) | `export` / `import` | framed magic + version + collection, documents, chunks, vectors (optionally `age`-encrypted) |
+| Eval set | `lore eval -f` | JSONL: optional first line `{"version": 1}`, then one case per line — `{"question", "expected_sources"?, "expected_chunks"?, "expected_answer"?}` |
+
+Both carry a version so a newer file is rejected with a clear error rather than
+mis-parsed. See [retrieval.md](retrieval.md#faithfulness-verification--evaluation)
+for the eval workflow.
