@@ -3,6 +3,7 @@ package domain
 import (
 	"fmt"
 	"strings"
+	"time"
 )
 
 // ChunkID is deterministic, derived from (DocumentID, Seq), so re-chunking an
@@ -89,6 +90,10 @@ type ChunkHit struct {
 	// Metadata is the chunk's document-level attributes, attached at hydration for
 	// display (--json, human output). Empty unless the document carried metadata.
 	Metadata Metadata
+	// IngestedAt is when the chunk's document was ingested, attached at hydration.
+	// It is the recency fallback (see HitTime) when the document carries no date
+	// metadata; the zero value means unknown.
+	IngestedAt time.Time
 }
 
 // Citation references a chunk an answer was grounded in, carrying the provenance

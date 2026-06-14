@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -37,6 +38,8 @@ func newQueryCmd(deps *Deps) *cobra.Command {
 		maxPerSource int
 		mmr          bool
 		mmrLambda    float64
+		recency      bool
+		halfLifeDays float64
 		fromColl     string
 		collFlags    []string
 	)
@@ -70,7 +73,7 @@ func newQueryCmd(deps *Deps) *cobra.Command {
 				return err
 			}
 
-			hits, runnerUp, err := resolveHits(cmd, deps, collections, queryText, k, candidates, source, filter, rerank, explain, hybrid, mmr, mmrLambda)
+			hits, runnerUp, err := resolveHits(cmd, deps, collections, queryText, k, candidates, source, filter, rerank, explain, hybrid, mmr, mmrLambda, recency, halfLifeDays)
 			if err != nil {
 				return err
 			}
@@ -103,6 +106,8 @@ func newQueryCmd(deps *Deps) *cobra.Command {
 	cmd.Flags().IntVar(&maxPerSource, "max-per-source", 0, "cap the number of returned chunks per source document (0 = no cap)")
 	cmd.Flags().BoolVar(&mmr, "mmr", false, "diversify results with Maximal Marginal Relevance (single-collection; not with --rerank)")
 	cmd.Flags().Float64Var(&mmrLambda, "mmr-lambda", 0.5, "MMR relevance/diversity trade-off in [0,1] (1=pure relevance, 0=pure diversity)")
+	cmd.Flags().BoolVar(&recency, "recency", false, "recency-aware ranking: re-rank a wider pool by relevance with a time decay (not with --rerank/--mmr)")
+	cmd.Flags().Float64Var(&halfLifeDays, "half-life-days", 90, "recency half-life in days: a chunk this old keeps half its score (used with --recency)")
 	cmd.Flags().StringVar(&fromColl, "from-collection", "", "use this collection's stored vectors as the queries (no re-embedding), grouping hits by source chunk")
 	cmd.Flags().StringArrayVarP(&collFlags, "collection", "c", nil, "additional collection to search; repeatable (results merge across same-space collections)")
 	return cmd
@@ -155,12 +160,20 @@ const mmrPoolMin = 50
 // resolveHits performs retrieval for query and ask, over one or many collections:
 // a plain top-k vector search, or — with --rerank — two-stage retrieval (a wide
 // vector candidate pool reranked to the final top-k), or — with --mmr —
-// diversified selection from a wider pool. With more than one collection the
+// diversified selection from a wider pool, or — with --recency — a time-decay
+// re-rank of a wider pool. --recency, --mmr, and --rerank each reorder the pool
+// and are mutually exclusive. With more than one collection the
 // candidates are merged across them by score (each carrying its origin
 // collection). It returns the hits plus, for --explain, the runner-up score (the
 // best candidate just outside the returned set, by whichever ordering is in
 // effect — rerank score when reranking, similarity otherwise).
-func resolveHits(cmd *cobra.Command, deps *Deps, collections []string, queryText string, k, candidates int, source string, filter domain.Predicate, rerank, explain, hybrid, mmr bool, mmrLambda float64) ([]domain.ChunkHit, *float64, error) {
+func resolveHits(cmd *cobra.Command, deps *Deps, collections []string, queryText string, k, candidates int, source string, filter domain.Predicate, rerank, explain, hybrid, mmr bool, mmrLambda float64, recency bool, halfLifeDays float64) ([]domain.ChunkHit, *float64, error) {
+	if recency {
+		if mmr {
+			return nil, nil, fmt.Errorf("%w: --recency and --mmr are mutually exclusive (both reorder the candidate pool)", domain.ErrInvalidArgument)
+		}
+		return resolveRecency(cmd, deps, collections, queryText, k, source, filter, rerank, hybrid, halfLifeDays)
+	}
 	if mmr {
 		return resolveMMR(cmd, deps, collections, queryText, k, source, filter, rerank, hybrid, mmrLambda)
 	}
@@ -275,6 +288,36 @@ func resolveMMR(cmd *cobra.Command, deps *Deps, collections []string, queryText 
 		cands[i] = domain.MMRCandidate{Hit: h, Vector: vecByID[h.Chunk.ID]}
 	}
 	return domain.SelectMMR(cands, lambda, k), nil, nil
+}
+
+// recencyPoolMin is the minimum candidate pool fetched for --recency before the
+// time-decay re-rank picks the final -k, so a fresh-but-slightly-less-relevant
+// chunk that missed cosine-top-k can still surface.
+const recencyPoolMin = 50
+
+// resolveRecency retrieves a wider candidate pool, then re-ranks it by relevance
+// blended with a time decay (domain.DecayByRecency) and trims to -k. It needs no
+// vectors (unlike MMR), so it composes with --hybrid, --where, --source, and
+// multiple collections; it is mutually exclusive with --rerank (both reorder the
+// pool). The decay timestamp is each hit's document date metadata, then ingest
+// time (domain.HitTime); now is the wall clock, passed into the pure transform.
+func resolveRecency(cmd *cobra.Command, deps *Deps, collections []string, queryText string, k int, source string, filter domain.Predicate, rerank, hybrid bool, halfLifeDays float64) ([]domain.ChunkHit, *float64, error) {
+	if rerank {
+		return nil, nil, fmt.Errorf("%w: --recency and --rerank are mutually exclusive (both reorder the candidate pool)", domain.ErrInvalidArgument)
+	}
+	if halfLifeDays <= 0 {
+		return nil, nil, fmt.Errorf("%w: --half-life-days must be > 0, got %v", domain.ErrInvalidArgument, halfLifeDays)
+	}
+	pool := k
+	if pool < recencyPoolMin {
+		pool = recencyPoolMin
+	}
+	hits, err := queryHits(cmd, deps, collections, queryText, pool, source, filter, hybrid)
+	if err != nil {
+		return nil, nil, err
+	}
+	halfLife := time.Duration(halfLifeDays * 24 * float64(time.Hour))
+	return domain.DecayByRecency(hits, halfLife, time.Now(), k), nil, nil
 }
 
 // verificationViews builds the --json per-claim verdicts for ask --verify.
@@ -455,6 +498,8 @@ func newAskCmd(deps *Deps) *cobra.Command {
 		maxPerSource int
 		mmr          bool
 		mmrLambda    float64
+		recency      bool
+		halfLifeDays float64
 		verify       bool
 		verifyStrict bool
 		collFlags    []string
@@ -509,14 +554,14 @@ func newAskCmd(deps *Deps) *cobra.Command {
 				streamedRaw string
 			)
 			switch {
-			case rerank || budget > 0 || multi || stream || hybrid || mmr || maxPerSource > 0:
+			case rerank || budget > 0 || multi || stream || hybrid || mmr || recency || maxPerSource > 0:
 				// Interpose between retrieval and synthesis: resolve hits (across
 				// collections, two-stage via --rerank, and/or --hybrid fusion), cap
 				// them to the token --budget, then synthesize — streaming the prose
 				// when enabled. Uses the Synthesize seam and replicates Ask's strict
 				// guard, which it lacks.
 				var hits []domain.ChunkHit
-				hits, runnerUp, err = resolveHits(cmd, deps, collections, question, k, candidates, source, filter, rerank, explain, hybrid, mmr, mmrLambda)
+				hits, runnerUp, err = resolveHits(cmd, deps, collections, question, k, candidates, source, filter, rerank, explain, hybrid, mmr, mmrLambda, recency, halfLifeDays)
 				if err != nil {
 					return err
 				}
@@ -656,6 +701,8 @@ func newAskCmd(deps *Deps) *cobra.Command {
 	cmd.Flags().IntVar(&maxPerSource, "max-per-source", 0, "cap the number of grounding chunks per source document (0 = no cap)")
 	cmd.Flags().BoolVar(&mmr, "mmr", false, "diversify grounding with Maximal Marginal Relevance (single-collection; not with --rerank)")
 	cmd.Flags().Float64Var(&mmrLambda, "mmr-lambda", 0.5, "MMR relevance/diversity trade-off in [0,1] (1=pure relevance, 0=pure diversity)")
+	cmd.Flags().BoolVar(&recency, "recency", false, "recency-aware grounding: re-rank a wider pool by relevance with a time decay (not with --rerank/--mmr)")
+	cmd.Flags().Float64Var(&halfLifeDays, "half-life-days", 90, "recency half-life in days: a chunk this old keeps half its score (used with --recency)")
 	cmd.Flags().StringArrayVarP(&collFlags, "collection", "c", nil, "additional collection to ground on; repeatable (merges across same-space collections)")
 	cmd.Flags().BoolVar(&streamFlag, "stream", false, "stream the answer's tokens as they arrive (forced on; the default on an interactive terminal)")
 	cmd.Flags().BoolVar(&noStreamFlag, "no-stream", false, "disable streaming; buffer and render the full answer (restores rich Markdown output)")

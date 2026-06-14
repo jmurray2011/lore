@@ -6,6 +6,7 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/jmurray2011/lore/internal/domain"
 )
@@ -446,9 +447,9 @@ func (q *Querier) hydrate(ctx context.Context, matches []domain.VectorMatch, col
 
 	hits := make([]domain.ChunkHit, 0, len(chunks))
 	for _, c := range chunks {
-		uri, meta := "", domain.Metadata(nil)
+		uri, meta, ingestedAt := "", domain.Metadata(nil), time.Time{}
 		if d := docsByID[c.DocumentID]; d != nil {
-			uri, meta = d.SourceURI, d.Metadata
+			uri, meta, ingestedAt = d.SourceURI, d.Metadata, d.IngestedAt
 		}
 		if source != "" && !matchSource(source, uri) {
 			continue
@@ -459,6 +460,7 @@ func (q *Querier) hydrate(ctx context.Context, matches []domain.VectorMatch, col
 			Source:     uri,
 			Collection: collByID[c.ID],
 			Metadata:   meta,
+			IngestedAt: ingestedAt,
 		})
 	}
 	return hits, nil

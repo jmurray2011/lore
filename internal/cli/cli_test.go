@@ -1692,6 +1692,82 @@ func TestCLIDiversity(t *testing.T) {
 	})
 }
 
+func TestCLIRecency(t *testing.T) {
+	qvec := []float32{1, 0, 0}
+	deps, _, docs, index := newDeps(stubEmbedder{space: testSpace(), vec: qvec}, stubGenerator{})
+	if _, code := exec(deps, "init", "docs"); code != 0 {
+		t.Fatal("init failed")
+	}
+	ctx := context.Background()
+	seed := func(uri, updated string, vec []float32) {
+		did := domain.DeriveDocumentID("docs", uri)
+		doc, err := domain.NewDocument("docs", uri, domain.HashContent([]byte(uri)), time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		doc.Metadata = domain.Metadata{"updated": updated}
+		ch, err := domain.NewChunk(did, 0, uri+" content")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := docs.Upsert(ctx, doc, []domain.Chunk{ch}); err != nil {
+			t.Fatal(err)
+		}
+		if err := index.Upsert(ctx, "docs", []app.VectorEntry{{ChunkID: ch.ID, Vector: vec}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// old.md is MORE relevant by cosine (vector == query) but stale; new.md is
+	// slightly less relevant but fresh.
+	seed("file:///old.md", "2020-01-01", []float32{1, 0, 0})
+	seed("file:///new.md", "2026-06-13", []float32{0.7, 0.7, 0})
+
+	topSource := func(args ...string) string {
+		out, code := exec(deps, args...)
+		if code != 0 {
+			t.Fatalf("exit %d: %s", code, out)
+		}
+		var hits []hitViewJSON
+		if err := json.Unmarshal([]byte(out), &hits); err != nil {
+			t.Fatalf("bad JSON: %v", err)
+		}
+		if len(hits) == 0 {
+			t.Fatal("no hits")
+		}
+		return hits[0].Source
+	}
+
+	t.Run("plain ranks the stale-but-more-relevant doc first", func(t *testing.T) {
+		if src := topSource("query", "docs", "anything", "--json"); src != "file:///old.md" {
+			t.Errorf("plain top hit = %s, want old.md (higher cosine)", src)
+		}
+	})
+
+	t.Run("--recency surfaces the fresher doc first", func(t *testing.T) {
+		if src := topSource("query", "docs", "anything", "--recency", "--json"); src != "file:///new.md" {
+			t.Errorf("--recency top hit = %s, want new.md (fresher)", src)
+		}
+	})
+
+	t.Run("--recency with --rerank is a usage error", func(t *testing.T) {
+		if _, code := exec(deps, "query", "docs", "anything", "--recency", "--rerank"); code != 2 {
+			t.Errorf("--recency + --rerank should exit 2, got %d", code)
+		}
+	})
+
+	t.Run("--recency with --mmr is a usage error", func(t *testing.T) {
+		if _, code := exec(deps, "query", "docs", "anything", "--recency", "--mmr"); code != 2 {
+			t.Errorf("--recency + --mmr should exit 2, got %d", code)
+		}
+	})
+
+	t.Run("--half-life-days <= 0 is a usage error", func(t *testing.T) {
+		if _, code := exec(deps, "query", "docs", "anything", "--recency", "--half-life-days", "0"); code != 2 {
+			t.Errorf("--half-life-days 0 should exit 2, got %d", code)
+		}
+	})
+}
+
 func TestCLIAskVerify(t *testing.T) {
 	c0 := domain.DeriveChunkID(domain.DeriveDocumentID("docs", "file:///a.md"), 0)
 	qvec := []float32{1, 0, 0}
