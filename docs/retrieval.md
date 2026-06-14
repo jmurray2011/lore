@@ -42,7 +42,10 @@ lore ask notes "…" --expand --json           # answer object gains an "expansi
 usage error (exit 2); a well-formed but absent one warns on stderr, still prints
 the chunks that were found, and exits 3. `--expand` (and `--explain`, below) are
 orthogonal to each other, to `--source`, and to `--strict` (strict still
-hard-errors on an ungrounded question before either runs).
+hard-errors before either runs when retrieval returns no chunks — an empty
+collection or an over-narrow `--source`/`--where`, *not* a question the corpus
+merely answers poorly; for "is the answer actually supported by what it cites?"
+use `--verify-strict`, the faithfulness gate).
 
 To delete a specific chunk rather than read it — e.g. a passage that should no
 longer be retrievable — use `rm --chunk` (the write-side counterpart of

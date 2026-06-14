@@ -88,7 +88,8 @@ lore query notes "rotation policy" --source '*.pdf'         # scope to matching 
 
 # ask a grounded question (retrieval + synthesis with citations)
 lore ask notes "what is our key rotation policy?"
-lore ask notes "unrelated question" --strict   # --strict: ungrounded → hard error (exit 1)
+lore ask notes "…" --strict          # exit 1 if retrieval finds no chunks (empty collection, over-narrow --source/--where)
+lore ask notes "…" --verify-strict   # exit 5 if any answer claim isn't supported by its citation (faithfulness gate)
 
 # inventory & cleanup
 lore ls                          # collections
@@ -149,6 +150,7 @@ stdout carries data (human-readable on a TTY, JSON with `--json`); logs/errors t
 | 2 | usage error |
 | 3 | not found |
 | 4 | invariant violation (e.g. embedding-space mismatch) |
+| 5 | quality gate not met (`ask --verify-strict`, `eval --fail-under`) |
 
 ## Documentation
 
