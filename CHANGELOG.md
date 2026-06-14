@@ -52,6 +52,14 @@ changes migrate in place and degrade gracefully (see *Migration*).
 
 ### Changed
 
+- **`lore eval` evaluates the retrieval you actually run.** It now accepts the
+  `query`/`ask` retrieval flags (`--hybrid`, `--rerank`, `--recency`, `--mmr`,
+  `--where`, `--source`, `--max-per-source`) and resolves each question through the
+  same engine, so eval metrics reflect your configured pipeline instead of a fixed
+  cosine baseline.
+- **MCP `ask`/`query` tools reach retrieval parity with the CLI** — added `hybrid`,
+  `mmr`, `recency`, and `where` arguments (previously rerank/source only). The MCP
+  server and CLI now share one retrieval engine, so they can't drift.
 - **`synthesize` reaches parity with `ask` on the synthesis side** — `--verify`/
   `--verify-strict`, `--stream`/`--no-stream`, and `--expand`. `synthesize --verify`
   checks claims against the **piped chunks** (no collection lookup), so faithfulness

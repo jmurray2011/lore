@@ -407,6 +407,12 @@ It reports recall@k, precision@k, MRR, nDCG, and hit-rate (against
 `--fail-under <metric>=<value>` exits 5 when an aggregate is below threshold — the
 "retrieval didn't regress / the docs still answer X" CI gate.
 
+`eval` evaluates the **same retrieval you run**, not a fixed baseline: it accepts
+the `query`/`ask` retrieval flags (`--hybrid`, `--rerank`, `--recency`, `--mmr`,
+`--where`, `--source`, `--max-per-source`) and resolves each question through the
+same engine, so your metrics reflect your actual pipeline. Measure a change
+before adopting it — e.g. `lore eval notes -f q.jsonl` vs `… --hybrid --recency`.
+
 ## Code-aware chunking
 
 Code-aware chunking (one chunk per function/class) is a planned future strategy
