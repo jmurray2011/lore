@@ -124,13 +124,16 @@ type Importer struct {
 	collections CollectionRepository
 	docs        DocumentRepository
 	index       VectorIndex
+	lexical     LexicalIndex
 	remover     *Remover
 }
 
 // NewImporter wires an Importer; the Remover handles the cascade when --force
-// replaces an existing collection.
-func NewImporter(collections CollectionRepository, docs DocumentRepository, index VectorIndex, remover *Remover) *Importer {
-	return &Importer{collections: collections, docs: docs, index: index, remover: remover}
+// replaces an existing collection. The lexical index is rebuilt from the imported
+// chunks (it is derived content, not carried in the artifact); a nil lexical index
+// imports without one.
+func NewImporter(collections CollectionRepository, docs DocumentRepository, index VectorIndex, remover *Remover, lexical LexicalIndex) *Importer {
+	return &Importer{collections: collections, docs: docs, index: index, lexical: lexical, remover: remover}
 }
 
 // Import reconstructs the collection in r (a plaintext artifact; any decryption
@@ -220,6 +223,11 @@ func (im *Importer) Import(ctx context.Context, r io.Reader, name string, force 
 		}
 		if err := im.index.Upsert(ctx, target, entries); err != nil {
 			return TransferSummary{}, fmt.Errorf("import vectors for %q: %w", d.SourceURI, err)
+		}
+		if im.lexical != nil {
+			if err := im.lexical.Upsert(ctx, target, lexicalDocs(chunks, meta)); err != nil {
+				return TransferSummary{}, fmt.Errorf("import lexical for %q: %w", d.SourceURI, err)
+			}
 		}
 		chunkCount += len(chunks)
 	}

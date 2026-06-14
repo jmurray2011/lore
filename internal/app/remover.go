@@ -15,11 +15,13 @@ type Remover struct {
 	collections CollectionRepository
 	docs        DocumentRepository
 	index       VectorIndex
+	lexical     LexicalIndex
 }
 
-// NewRemover wires a Remover over the three persistence ports.
-func NewRemover(collections CollectionRepository, docs DocumentRepository, index VectorIndex) *Remover {
-	return &Remover{collections: collections, docs: docs, index: index}
+// NewRemover wires a Remover over the persistence ports. The lexical index is
+// part of the cascade so a removed chunk leaves no lexical entry behind.
+func NewRemover(collections CollectionRepository, docs DocumentRepository, index VectorIndex, lexical LexicalIndex) *Remover {
+	return &Remover{collections: collections, docs: docs, index: index, lexical: lexical}
 }
 
 // RemoveCollection deletes the collection and everything in it: its documents,
@@ -36,6 +38,9 @@ func (r *Remover) RemoveCollection(ctx context.Context, name string) error {
 	if err := r.index.Delete(ctx, name, chunkIDs); err != nil {
 		return fmt.Errorf("delete vectors: %w", err)
 	}
+	if err := r.deleteLexical(ctx, name, chunkIDs); err != nil {
+		return err
+	}
 	return r.collections.Delete(ctx, name)
 }
 
@@ -50,7 +55,7 @@ func (r *Remover) RemoveDocument(ctx context.Context, collection, sourceURI stri
 	if err := r.index.Delete(ctx, collection, chunkIDs); err != nil {
 		return fmt.Errorf("delete vectors: %w", err)
 	}
-	return nil
+	return r.deleteLexical(ctx, collection, chunkIDs)
 }
 
 // RemoveChunks deletes specific chunks by ID and their vectors, returning the
@@ -69,5 +74,20 @@ func (r *Remover) RemoveChunks(ctx context.Context, collection string, ids []dom
 	if err := r.index.Delete(ctx, collection, removed); err != nil {
 		return nil, fmt.Errorf("delete vectors: %w", err)
 	}
+	if err := r.deleteLexical(ctx, collection, removed); err != nil {
+		return nil, err
+	}
 	return removed, nil
+}
+
+// deleteLexical removes chunk IDs from the lexical index, tolerating a nil index
+// (a backend wired without hybrid retrieval).
+func (r *Remover) deleteLexical(ctx context.Context, collection string, ids []domain.ChunkID) error {
+	if r.lexical == nil || len(ids) == 0 {
+		return nil
+	}
+	if err := r.lexical.Delete(ctx, collection, ids); err != nil {
+		return fmt.Errorf("delete lexical entries: %w", err)
+	}
+	return nil
 }

@@ -60,7 +60,7 @@ func TestIngestorAttachesMetadata(t *testing.T) {
 		docs := &fakeDocs{}
 		idx := &fakeIndex{}
 		src := &fakeSource{items: []app.SourceItem{textItem("file:///a.txt", words(10))}}
-		ing := app.NewIngestor(newFakeCollections(coll), docs, idx, &fakeEmbedder{space: space}, &fakeExtractor{}, src, chunker41(t))
+		ing := app.NewIngestor(newFakeCollections(coll), docs, idx, &fakeEmbedder{space: space}, &fakeExtractor{}, src, chunker41(t), &fakeLexical{})
 
 		meta := domain.Metadata{"author": "alice", "team": "platform"}
 		if _, err := ing.Ingest(ctx, "docs", "/root", app.WithMeta(meta)); err != nil {
@@ -96,7 +96,7 @@ func TestIngestorAttachesMetadata(t *testing.T) {
 			Open:        func() ([]byte, error) { return []byte(content), nil },
 		}
 		src := &fakeSource{items: []app.SourceItem{md}}
-		ing := app.NewIngestor(newFakeCollections(coll), docs, idx, &fakeEmbedder{space: space}, &fakeExtractor{}, src, chunker41(t))
+		ing := app.NewIngestor(newFakeCollections(coll), docs, idx, &fakeEmbedder{space: space}, &fakeExtractor{}, src, chunker41(t), &fakeLexical{})
 
 		if _, err := ing.Ingest(ctx, "docs", "/root", app.WithMeta(domain.Metadata{"author": "alice"})); err != nil {
 			t.Fatalf("Ingest: %v", err)
@@ -134,7 +134,7 @@ func TestIngestorChunkerGuard(t *testing.T) {
 	src := &fakeSource{items: []app.SourceItem{textItem("file:///a.txt", words(10))}}
 
 	ingest := func(coll *domain.Collection) error {
-		ing := app.NewIngestor(newFakeCollections(coll), &fakeDocs{}, &fakeIndex{}, &fakeEmbedder{space: space}, &fakeExtractor{}, src, chunker41(t))
+		ing := app.NewIngestor(newFakeCollections(coll), &fakeDocs{}, &fakeIndex{}, &fakeEmbedder{space: space}, &fakeExtractor{}, src, chunker41(t), &fakeLexical{})
 		_, err := ing.Ingest(ctx, "docs", "/root")
 		return err
 	}
@@ -185,7 +185,7 @@ func TestIngestorEmbedsPrefixStoresOriginal(t *testing.T) {
 	emb := &fakeEmbedder{space: space}
 	docs := &fakeDocs{}
 	src := &fakeSource{items: []app.SourceItem{textItem("file:///a.md", "anything")}}
-	ing := app.NewIngestor(newFakeCollections(coll), docs, &fakeIndex{}, emb, &fakeExtractor{}, src, reg)
+	ing := app.NewIngestor(newFakeCollections(coll), docs, &fakeIndex{}, emb, &fakeExtractor{}, src, reg, &fakeLexical{})
 
 	if _, err := ing.Ingest(ctx, "docs", "/root"); err != nil {
 		t.Fatalf("Ingest: %v", err)
@@ -213,7 +213,7 @@ func TestIngestor(t *testing.T) {
 	space := testSpace()
 
 	newIngestor := func(coll *domain.Collection, src *fakeSource, ext *fakeExtractor, emb *fakeEmbedder, docs *fakeDocs, idx *fakeIndex) *app.Ingestor {
-		return app.NewIngestor(newFakeCollections(coll), docs, idx, emb, ext, src, chunker41(t))
+		return app.NewIngestor(newFakeCollections(coll), docs, idx, emb, ext, src, chunker41(t), &fakeLexical{})
 	}
 
 	t.Run("ingests new documents, storing chunks and vectors", func(t *testing.T) {
@@ -249,7 +249,7 @@ func TestIngestor(t *testing.T) {
 		coll := mustCollection(t, "docs", space)
 		colls := newFakeCollections(coll)
 		src := &fakeSource{items: []app.SourceItem{textItem("file:///a.txt", words(10))}}
-		ing := app.NewIngestor(colls, &fakeDocs{}, &fakeIndex{}, &fakeEmbedder{space: space}, &fakeExtractor{}, src, chunker41(t))
+		ing := app.NewIngestor(colls, &fakeDocs{}, &fakeIndex{}, &fakeEmbedder{space: space}, &fakeExtractor{}, src, chunker41(t), &fakeLexical{})
 
 		if _, err := ing.Ingest(ctx, "docs", "/root"); err != nil {
 			t.Fatalf("Ingest: %v", err)
@@ -302,7 +302,7 @@ func TestIngestor(t *testing.T) {
 				Open: func() ([]byte, error) { opens++; return []byte(words(10)), nil }}
 		}
 		src := &fakeSource{items: []app.SourceItem{mkItem("fp-1")}}
-		ing := app.NewIngestor(newFakeCollections(coll), &fakeDocs{}, &fakeIndex{}, &fakeEmbedder{space: space}, &fakeExtractor{}, src, chunker41(t))
+		ing := app.NewIngestor(newFakeCollections(coll), &fakeDocs{}, &fakeIndex{}, &fakeEmbedder{space: space}, &fakeExtractor{}, src, chunker41(t), &fakeLexical{})
 
 		if _, err := ing.Ingest(ctx, "docs", "/root"); err != nil {
 			t.Fatalf("first Ingest: %v", err)
@@ -332,7 +332,7 @@ func TestIngestor(t *testing.T) {
 				Open: func() ([]byte, error) { opens++; return []byte(content), nil }}
 		}
 		src := &fakeSource{items: []app.SourceItem{mkItem("fp-1")}}
-		ing := app.NewIngestor(newFakeCollections(coll), &fakeDocs{}, &fakeIndex{}, &fakeEmbedder{space: space}, &fakeExtractor{}, src, chunker41(t))
+		ing := app.NewIngestor(newFakeCollections(coll), &fakeDocs{}, &fakeIndex{}, &fakeEmbedder{space: space}, &fakeExtractor{}, src, chunker41(t), &fakeLexical{})
 
 		if _, err := ing.Ingest(ctx, "docs", "/root"); err != nil { // stores fp-1, opens=1
 			t.Fatalf("first Ingest: %v", err)
@@ -473,7 +473,7 @@ func TestIngestor(t *testing.T) {
 		coll := mustCollection(t, "docs", space)
 		colls := newFakeCollections(coll)
 		ext := &fakeExtractor{unsupported: map[string]bool{"image/png": true}}
-		ing := app.NewIngestor(colls, &fakeDocs{}, &fakeIndex{}, &fakeEmbedder{space: space}, ext, &fakeSource{}, chunker41(t))
+		ing := app.NewIngestor(colls, &fakeDocs{}, &fakeIndex{}, &fakeEmbedder{space: space}, ext, &fakeSource{}, chunker41(t), &fakeLexical{})
 
 		sum, err := ing.IngestContent(ctx, "docs", "stdin", "image/png", []byte{0x89})
 		if err != nil {
@@ -503,7 +503,7 @@ func TestIngestor(t *testing.T) {
 	})
 
 	t.Run("unknown collection is ErrNotFound", func(t *testing.T) {
-		ing := app.NewIngestor(newFakeCollections(), &fakeDocs{}, &fakeIndex{}, &fakeEmbedder{space: space}, &fakeExtractor{}, &fakeSource{}, chunker41(t))
+		ing := app.NewIngestor(newFakeCollections(), &fakeDocs{}, &fakeIndex{}, &fakeEmbedder{space: space}, &fakeExtractor{}, &fakeSource{}, chunker41(t), &fakeLexical{})
 		if _, err := ing.Ingest(ctx, "missing", "/root"); !errors.Is(err, app.ErrNotFound) {
 			t.Errorf("want ErrNotFound, got %v", err)
 		}
@@ -536,7 +536,7 @@ func TestIngestor(t *testing.T) {
 			entered <- struct{}{}
 			<-release
 		}}
-		ing := app.NewIngestor(newFakeCollections(coll), &fakeDocs{}, &fakeIndex{}, emb, &fakeExtractor{}, src, chunker41(t), app.WithConcurrency(limit))
+		ing := app.NewIngestor(newFakeCollections(coll), &fakeDocs{}, &fakeIndex{}, emb, &fakeExtractor{}, src, chunker41(t), &fakeLexical{}, app.WithConcurrency(limit))
 
 		done := make(chan error, 1)
 		go func() { _, err := ing.Ingest(ctx, "docs", "/root"); done <- err }()

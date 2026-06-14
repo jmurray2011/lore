@@ -33,6 +33,7 @@ func newQueryCmd(deps *Deps) *cobra.Command {
 		rerank     bool
 		candidates int
 		budget     int
+		hybrid     bool
 		fromColl   string
 		collFlags  []string
 	)
@@ -51,6 +52,9 @@ func newQueryCmd(deps *Deps) *cobra.Command {
 				return err
 			}
 			if fromColl != "" {
+				if hybrid {
+					return fmt.Errorf("%w: --hybrid cannot be combined with --from-collection (which queries by stored vectors)", domain.ErrInvalidArgument)
+				}
 				return runQueryFrom(cmd, deps, args, fromColl, collFlags, k, source, filter)
 			}
 
@@ -63,7 +67,7 @@ func newQueryCmd(deps *Deps) *cobra.Command {
 				return err
 			}
 
-			hits, runnerUp, err := resolveHits(cmd, deps, collections, queryText, k, candidates, source, filter, rerank, explain)
+			hits, runnerUp, err := resolveHits(cmd, deps, collections, queryText, k, candidates, source, filter, rerank, explain, hybrid)
 			if err != nil {
 				return err
 			}
@@ -91,6 +95,7 @@ func newQueryCmd(deps *Deps) *cobra.Command {
 	cmd.Flags().BoolVar(&rerank, "rerank", false, "two-stage retrieval: vector-search a wide pool, then rerank to the top -k")
 	cmd.Flags().IntVar(&candidates, "rerank-candidates", 50, "size of the pre-rerank vector candidate pool (must be >= -k)")
 	cmd.Flags().IntVar(&budget, "budget", 0, "cap the returned set to this many tokens (after ranking; trims within -k)")
+	cmd.Flags().BoolVar(&hybrid, "hybrid", deps.RetrievalHybrid, "hybrid retrieval: fuse vector and BM25 keyword results (Reciprocal Rank Fusion)")
 	cmd.Flags().StringVar(&fromColl, "from-collection", "", "use this collection's stored vectors as the queries (no re-embedding), grouping hits by source chunk")
 	cmd.Flags().StringArrayVarP(&collFlags, "collection", "c", nil, "additional collection to search; repeatable (results merge across same-space collections)")
 	return cmd
@@ -143,7 +148,7 @@ func budgetTrim(hits []domain.ChunkHit, budget int, counter app.TokenCounter) ([
 // origin collection). It returns the hits plus, for --explain, the runner-up
 // score (the best candidate just outside the returned set, by whichever ordering
 // is in effect — rerank score when reranking, similarity otherwise).
-func resolveHits(cmd *cobra.Command, deps *Deps, collections []string, queryText string, k, candidates int, source string, filter domain.Predicate, rerank, explain bool) ([]domain.ChunkHit, *float64, error) {
+func resolveHits(cmd *cobra.Command, deps *Deps, collections []string, queryText string, k, candidates int, source string, filter domain.Predicate, rerank, explain, hybrid bool) ([]domain.ChunkHit, *float64, error) {
 	if rerank {
 		if deps.Rerank == nil {
 			return nil, nil, errRerankUnconfigured()
@@ -151,7 +156,9 @@ func resolveHits(cmd *cobra.Command, deps *Deps, collections []string, queryText
 		if candidates < k {
 			return nil, nil, fmt.Errorf("%w: --rerank-candidates (%d) must be >= -k (%d)", domain.ErrInvalidArgument, candidates, k)
 		}
-		pool, err := queryHits(cmd, deps, collections, queryText, candidates, source, filter)
+		// --hybrid feeds the rerank pool: fuse a wide vector+lexical candidate set,
+		// then the cross-encoder reorders it to the final top-k.
+		pool, err := queryHits(cmd, deps, collections, queryText, candidates, source, filter, hybrid)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -176,32 +183,51 @@ func resolveHits(cmd *cobra.Command, deps *Deps, collections []string, queryText
 		return reranked, runnerUp, nil
 	}
 	if explain {
-		ret, err := explainHits(cmd, deps, collections, queryText, k, source, filter)
+		ret, err := explainHits(cmd, deps, collections, queryText, k, source, filter, hybrid)
 		if err != nil {
 			return nil, nil, err
 		}
 		return ret.Hits, nextScorePtr(ret), nil
 	}
-	hits, err := queryHits(cmd, deps, collections, queryText, k, source, filter)
+	hits, err := queryHits(cmd, deps, collections, queryText, k, source, filter, hybrid)
 	return hits, nil, err
 }
 
 // queryHits retrieves the top-k hits for one collection (the byte-for-byte
 // legacy path) or merges across several same-space collections.
-func queryHits(cmd *cobra.Command, deps *Deps, collections []string, queryText string, k int, source string, filter domain.Predicate) ([]domain.ChunkHit, error) {
+func queryHits(cmd *cobra.Command, deps *Deps, collections []string, queryText string, k int, source string, filter domain.Predicate, hybrid bool) ([]domain.ChunkHit, error) {
 	if len(collections) > 1 {
+		if hybrid {
+			return nil, errHybridMultiCollection()
+		}
 		return deps.Query.QueryAcross(cmd.Context(), collections, queryText, k, source, filter)
+	}
+	if hybrid {
+		return deps.Query.QueryHybrid(cmd.Context(), collections[0], queryText, k, source, filter)
 	}
 	return deps.Query.Query(cmd.Context(), collections[0], queryText, k, source, filter)
 }
 
 // explainHits is queryHits' --explain twin: it also surfaces the runner-up just
 // outside the returned top-k, single- or multi-collection.
-func explainHits(cmd *cobra.Command, deps *Deps, collections []string, queryText string, k int, source string, filter domain.Predicate) (app.Retrieval, error) {
+func explainHits(cmd *cobra.Command, deps *Deps, collections []string, queryText string, k int, source string, filter domain.Predicate, hybrid bool) (app.Retrieval, error) {
 	if len(collections) > 1 {
+		if hybrid {
+			return app.Retrieval{}, errHybridMultiCollection()
+		}
 		return deps.Query.ExplainAcross(cmd.Context(), collections, queryText, k, source, filter)
 	}
+	if hybrid {
+		return deps.Query.ExplainHybrid(cmd.Context(), collections[0], queryText, k, source, filter)
+	}
 	return deps.Query.Explain(cmd.Context(), collections[0], queryText, k, source, filter)
+}
+
+// errHybridMultiCollection is the usage error (exit 2) for combining --hybrid with
+// multiple collections, which v1.0 does not support (RRF fusion is per-collection;
+// a cross-collection fused merge is a follow-up).
+func errHybridMultiCollection() error {
+	return fmt.Errorf("%w: --hybrid does not support multiple collections (-c); query each collection separately", domain.ErrInvalidArgument)
 }
 
 // resolveCollectionArgs derives the target collection set and the query/question
@@ -328,6 +354,7 @@ func newAskCmd(deps *Deps) *cobra.Command {
 		rerank       bool
 		candidates   int
 		budget       int
+		hybrid       bool
 		collFlags    []string
 		streamFlag   bool
 		noStreamFlag bool
@@ -371,13 +398,14 @@ func newAskCmd(deps *Deps) *cobra.Command {
 				streamedRaw string
 			)
 			switch {
-			case rerank || budget > 0 || multi || stream:
+			case rerank || budget > 0 || multi || stream || hybrid:
 				// Interpose between retrieval and synthesis: resolve hits (across
-				// collections and/or two-stage via --rerank), cap them to the token
-				// --budget, then synthesize — streaming the prose when enabled. Uses
-				// the Synthesize seam and replicates Ask's strict guard, which it lacks.
+				// collections, two-stage via --rerank, and/or --hybrid fusion), cap
+				// them to the token --budget, then synthesize — streaming the prose
+				// when enabled. Uses the Synthesize seam and replicates Ask's strict
+				// guard, which it lacks.
 				var hits []domain.ChunkHit
-				hits, runnerUp, err = resolveHits(cmd, deps, collections, question, k, candidates, source, filter, rerank, explain)
+				hits, runnerUp, err = resolveHits(cmd, deps, collections, question, k, candidates, source, filter, rerank, explain, hybrid)
 				if err != nil {
 					return err
 				}
@@ -483,6 +511,7 @@ func newAskCmd(deps *Deps) *cobra.Command {
 	cmd.Flags().BoolVar(&rerank, "rerank", false, "two-stage retrieval: vector-search a wide pool, then rerank to the top -k before synthesis")
 	cmd.Flags().IntVar(&candidates, "rerank-candidates", 50, "size of the pre-rerank vector candidate pool (must be >= -k)")
 	cmd.Flags().IntVar(&budget, "budget", 0, "cap grounding to this many tokens (after ranking/rerank; trims within -k)")
+	cmd.Flags().BoolVar(&hybrid, "hybrid", deps.RetrievalHybrid, "hybrid retrieval: fuse vector and BM25 keyword results (Reciprocal Rank Fusion) before grounding")
 	cmd.Flags().StringArrayVarP(&collFlags, "collection", "c", nil, "additional collection to ground on; repeatable (merges across same-space collections)")
 	cmd.Flags().BoolVar(&streamFlag, "stream", false, "stream the answer's tokens as they arrive (forced on; the default on an interactive terminal)")
 	cmd.Flags().BoolVar(&noStreamFlag, "no-stream", false, "disable streaming; buffer and render the full answer (restores rich Markdown output)")

@@ -46,9 +46,9 @@ func TestQuerier(t *testing.T) {
 	c0 := mustChunk(t, docID, 0, "alpha text")
 	c1 := mustChunk(t, docID, 1, "beta text")
 
-	newQuerier := func(idx *fakeIndex, docs *fakeDocs, emb *fakeEmbedder) *app.Querier {
+	newQuerier := func(idx *fakeIndex, docs *fakeDocs, emb *fakeEmbedder, lex app.LexicalIndex) *app.Querier {
 		coll := mustCollection(t, "docs", space)
-		return app.NewQuerier(newFakeCollections(coll), idx, docs, emb)
+		return app.NewQuerier(newFakeCollections(coll), idx, docs, emb, lex)
 	}
 
 	t.Run("returns hydrated hits in score order", func(t *testing.T) {
@@ -57,7 +57,7 @@ func TestQuerier(t *testing.T) {
 		}}
 		docs := &fakeDocs{chunks: map[domain.ChunkID]domain.Chunk{c0.ID: c0, c1.ID: c1}}
 		emb := &fakeEmbedder{space: space, byText: map[string][]float32{"hello": {1, 0, 0}}}
-		q := newQuerier(idx, docs, emb)
+		q := newQuerier(idx, docs, emb, &fakeLexical{})
 
 		hits, err := q.Query(ctx, "docs", "hello", 2, "", domain.Predicate{})
 		if err != nil {
@@ -93,7 +93,7 @@ func TestQuerier(t *testing.T) {
 			chunks: map[domain.ChunkID]domain.Chunk{c0.ID: c0, c1.ID: c1},
 		}
 		emb := &fakeEmbedder{space: space, byText: map[string][]float32{"q": {1, 0, 0}}}
-		q := newQuerier(idx, docs, emb)
+		q := newQuerier(idx, docs, emb, &fakeLexical{})
 
 		hits, err := q.Query(ctx, "docs", "q", 2, "", domain.Predicate{})
 		if err != nil {
@@ -119,7 +119,7 @@ func TestQuerier(t *testing.T) {
 		}}
 		docs := &fakeDocs{chunks: map[domain.ChunkID]domain.Chunk{c0.ID: c0, c1.ID: c1}}
 		emb := &fakeEmbedder{space: space, byText: map[string][]float32{"q": {1, 0, 0}}}
-		q := newQuerier(idx, docs, emb)
+		q := newQuerier(idx, docs, emb, &fakeLexical{})
 
 		hits, err := q.Query(ctx, "docs", "q", 3, "", domain.Predicate{})
 		if err != nil {
@@ -152,7 +152,7 @@ func TestQuerier(t *testing.T) {
 			chunks: map[domain.ChunkID]domain.Chunk{ca.ID: ca, cb.ID: cb},
 		}
 		emb := &fakeEmbedder{space: space, byText: map[string][]float32{"q": {1, 0, 0}}}
-		q := newQuerier(idx, docs, emb)
+		q := newQuerier(idx, docs, emb, &fakeLexical{})
 
 		hits, err := q.Query(ctx, "docs", "q", 1, "*.pdf", domain.Predicate{})
 		if err != nil {
@@ -169,7 +169,7 @@ func TestQuerier(t *testing.T) {
 	t.Run("no matches yields no hits, no error", func(t *testing.T) {
 		idx := &fakeIndex{matches: map[string][]domain.VectorMatch{}}
 		emb := &fakeEmbedder{space: space, byText: map[string][]float32{"q": {1, 0, 0}}}
-		q := newQuerier(idx, &fakeDocs{}, emb)
+		q := newQuerier(idx, &fakeDocs{}, emb, &fakeLexical{})
 
 		hits, err := q.Query(ctx, "docs", "q", 5, "", domain.Predicate{})
 		if err != nil || len(hits) != 0 {
@@ -178,14 +178,14 @@ func TestQuerier(t *testing.T) {
 	})
 
 	t.Run("empty query is ErrInvalidArgument", func(t *testing.T) {
-		q := newQuerier(&fakeIndex{}, &fakeDocs{}, &fakeEmbedder{space: space})
+		q := newQuerier(&fakeIndex{}, &fakeDocs{}, &fakeEmbedder{space: space}, &fakeLexical{})
 		if _, err := q.Query(ctx, "docs", "   ", 5, "", domain.Predicate{}); !errors.Is(err, domain.ErrInvalidArgument) {
 			t.Errorf("want ErrInvalidArgument, got %v", err)
 		}
 	})
 
 	t.Run("unknown collection is ErrNotFound", func(t *testing.T) {
-		q := app.NewQuerier(newFakeCollections(), &fakeIndex{}, &fakeDocs{}, &fakeEmbedder{space: space})
+		q := app.NewQuerier(newFakeCollections(), &fakeIndex{}, &fakeDocs{}, &fakeEmbedder{space: space}, &fakeLexical{})
 		if _, err := q.Query(ctx, "missing", "q", 5, "", domain.Predicate{}); !errors.Is(err, app.ErrNotFound) {
 			t.Errorf("want ErrNotFound, got %v", err)
 		}
@@ -196,7 +196,7 @@ func TestQuerier(t *testing.T) {
 			space:  domain.EmbeddingSpace{Model: "other", Dimensions: 5},
 			byText: map[string][]float32{"q": {1, 0, 0, 0, 0}},
 		}
-		q := newQuerier(&fakeIndex{}, &fakeDocs{}, emb)
+		q := newQuerier(&fakeIndex{}, &fakeDocs{}, emb, &fakeLexical{})
 		if _, err := q.Query(ctx, "docs", "q", 5, "", domain.Predicate{}); !errors.Is(err, domain.ErrSpaceMismatch) {
 			t.Errorf("want ErrSpaceMismatch, got %v", err)
 		}
@@ -210,7 +210,7 @@ func TestQuerier(t *testing.T) {
 		}}
 		docs := &fakeDocs{chunks: map[domain.ChunkID]domain.Chunk{c0.ID: c0, c1.ID: c1, c2.ID: c2}}
 		emb := &fakeEmbedder{space: space, byText: map[string][]float32{"q": {1, 0, 0}}}
-		q := newQuerier(idx, docs, emb)
+		q := newQuerier(idx, docs, emb, &fakeLexical{})
 
 		ret, err := q.Explain(ctx, "docs", "q", 2, "", domain.Predicate{})
 		if err != nil {
@@ -233,7 +233,7 @@ func TestQuerier(t *testing.T) {
 		}}
 		docs := &fakeDocs{chunks: map[domain.ChunkID]domain.Chunk{c0.ID: c0, c1.ID: c1}}
 		emb := &fakeEmbedder{space: space, byText: map[string][]float32{"q": {1, 0, 0}}}
-		q := newQuerier(idx, docs, emb)
+		q := newQuerier(idx, docs, emb, &fakeLexical{})
 
 		ret, err := q.Explain(ctx, "docs", "q", 2, "", domain.Predicate{})
 		if err != nil {
@@ -246,6 +246,56 @@ func TestQuerier(t *testing.T) {
 			t.Errorf("want no runner-up, got NextScore=%v", ret.NextScore)
 		}
 	})
+}
+
+func TestQuerierHybrid(t *testing.T) {
+	ctx := context.Background()
+	space := testSpace()
+	docID := domain.DeriveDocumentID("docs", "file:///a.md")
+	cv := mustChunk(t, docID, 0, "vector hit")  // returned by the vector index
+	cl := mustChunk(t, docID, 1, "lexical hit") // returned only by the lexical index
+	coll := mustCollection(t, "docs", space)
+
+	idx := &fakeIndex{matches: map[string][]domain.VectorMatch{
+		"docs": {{ChunkID: cv.ID, Score: 0.8}},
+	}}
+	lex := &fakeLexical{results: map[string][]domain.ChunkID{
+		"docs": {cl.ID, cv.ID}, // cl ranks first lexically; cv also appears
+	}}
+	docs := &fakeDocs{chunks: map[domain.ChunkID]domain.Chunk{cv.ID: cv, cl.ID: cl}}
+	emb := &fakeEmbedder{space: space, byText: map[string][]float32{"q": {1, 0, 0}}}
+	q := app.NewQuerier(newFakeCollections(coll), idx, docs, emb, lex)
+
+	hits, err := q.QueryHybrid(ctx, "docs", "q", 10, "", domain.Predicate{})
+	if err != nil {
+		t.Fatalf("QueryHybrid: %v", err)
+	}
+	if len(hits) != 2 {
+		t.Fatalf("want 2 fused hits, got %d: %+v", len(hits), hits)
+	}
+	// cv is in both lists, so RRF ranks it above the lexical-only cl.
+	if hits[0].Chunk.ID != cv.ID {
+		t.Errorf("a chunk in both lists should rank first, got %s", hits[0].Chunk.ID)
+	}
+	byID := map[domain.ChunkID]domain.ChunkHit{}
+	for _, h := range hits {
+		byID[h.Chunk.ID] = h
+	}
+	if byID[cv.ID].Score != 0.8 {
+		t.Errorf("a vector-found hit must keep its cosine score, got %v", byID[cv.ID].Score)
+	}
+	if byID[cl.ID].Score != 0 {
+		t.Errorf("a lexical-only hit has no cosine, want 0, got %v", byID[cl.ID].Score)
+	}
+
+	// The --where predicate must reach the lexical index too, not just the vector one.
+	where, _ := domain.ParseWhere([]string{"author=alice"})
+	if _, err := q.QueryHybrid(ctx, "docs", "q", 10, "", where); err != nil {
+		t.Fatalf("QueryHybrid with filter: %v", err)
+	}
+	if lex.gotFilter.IsZero() {
+		t.Error("the --where predicate was not passed to the lexical index")
+	}
 }
 
 func TestQuerierQueryFrom(t *testing.T) {
@@ -267,7 +317,7 @@ func TestQuerierQueryFrom(t *testing.T) {
 	newFrom := func(idx *fakeIndex, docs *fakeDocs, emb *fakeEmbedder, sourceSpace domain.EmbeddingSpace) *app.Querier {
 		v2 := mustCollection(t, "v2", space)
 		v1 := mustCollection(t, "v1", sourceSpace)
-		return app.NewQuerier(newFakeCollections(v1, v2), idx, docs, emb)
+		return app.NewQuerier(newFakeCollections(v1, v2), idx, docs, emb, &fakeLexical{})
 	}
 
 	setup := func() (*fakeIndex, *fakeDocs, *fakeEmbedder) {
@@ -377,7 +427,7 @@ func TestQuerierAcross(t *testing.T) {
 	newAcross := func(idx *fakeIndex, docs *fakeDocs, emb *fakeEmbedder, bSpace domain.EmbeddingSpace) *app.Querier {
 		a := mustCollection(t, "a", space)
 		b := mustCollection(t, "b", bSpace)
-		return app.NewQuerier(newFakeCollections(a, b), idx, docs, emb)
+		return app.NewQuerier(newFakeCollections(a, b), idx, docs, emb, &fakeLexical{})
 	}
 
 	setup := func() (*fakeIndex, *fakeDocs, *fakeEmbedder) {

@@ -149,22 +149,23 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		source := fs.NewSource()
 
 		catalog := app.NewCatalog(store.collections, store.docs, embedder, chunkers)
-		ingestor := app.NewIngestor(store.collections, store.docs, store.index, embedder, extractor, source, chunkers, app.WithConcurrency(cfg.Ingest.Concurrency))
-		querier := app.NewQuerier(store.collections, store.index, store.docs, embedder)
-		remover := app.NewRemover(store.collections, store.docs, store.index)
+		ingestor := app.NewIngestor(store.collections, store.docs, store.index, embedder, extractor, source, chunkers, store.lexical, app.WithConcurrency(cfg.Ingest.Concurrency))
+		querier := app.NewQuerier(store.collections, store.index, store.docs, embedder, store.lexical)
+		remover := app.NewRemover(store.collections, store.docs, store.index, store.lexical)
 		return cli.Deps{
-			Catalog: catalog,
-			Ingest:  ingestor,
-			Sync:    app.NewSyncer(catalog, ingestor, remover, source),
-			Query:   querier,
-			Ask:     app.NewAsker(querier, generator),
-			Rerank:  reranker,
-			Remove:  remover,
-			Tokens:  counter,
-			Export:  app.NewExporter(store.collections, store.docs, store.index),
-			Import:  app.NewImporter(store.collections, store.docs, store.index, remover),
-			Index:   store.index,
-			Log:     logger,
+			Catalog:         catalog,
+			Ingest:          ingestor,
+			Sync:            app.NewSyncer(catalog, ingestor, remover, source),
+			Query:           querier,
+			Ask:             app.NewAsker(querier, generator),
+			Rerank:          reranker,
+			Remove:          remover,
+			Tokens:          counter,
+			Export:          app.NewExporter(store.collections, store.docs, store.index),
+			Import:          app.NewImporter(store.collections, store.docs, store.index, remover, store.lexical),
+			Index:           store.index,
+			Log:             logger,
+			RetrievalHybrid: cfg.Retrieval.Hybrid,
 		}, nil
 	}
 
@@ -194,6 +195,7 @@ type storage struct {
 	collections app.CollectionRepository
 	docs        app.DocumentRepository
 	index       app.VectorIndex
+	lexical     app.LexicalIndex
 	cache       app.AnswerCache
 	close       func() error
 }
@@ -209,6 +211,7 @@ func openStorage(cfg config.Storage) (storage, error) {
 			collections: memstore.NewCollectionRepository(),
 			docs:        memstore.NewDocumentRepository(),
 			index:       memstore.NewVectorIndex(),
+			lexical:     memstore.NewLexicalIndex(),
 			cache:       memstore.NewAnswerCache(),
 			close:       func() error { return nil },
 		}, nil
@@ -232,6 +235,7 @@ func openStorage(cfg config.Storage) (storage, error) {
 			collections: s.Collections(),
 			docs:        s.Documents(),
 			index:       s.Vectors(),
+			lexical:     s.Lexical(),
 			cache:       s.Cache(),
 			close:       s.Close,
 		}, nil

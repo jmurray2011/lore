@@ -19,6 +19,7 @@ var (
 	_ app.CollectionRepository = (*fakeCollections)(nil)
 	_ app.DocumentRepository   = (*fakeDocs)(nil)
 	_ app.VectorIndex          = (*fakeIndex)(nil)
+	_ app.LexicalIndex         = (*fakeLexical)(nil)
 	_ app.Embedder             = (*fakeEmbedder)(nil)
 	_ app.Generator            = (*fakeGenerator)(nil)
 	_ app.Source               = (*fakeSource)(nil)
@@ -197,6 +198,41 @@ func (f *fakeIndex) count(collection string) int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return len(f.upserted[collection])
+}
+
+// fakeLexical is a hand fake of the LexicalIndex port: it records what it was
+// asked to index/delete and returns canned ranked results per collection.
+type fakeLexical struct {
+	mu        sync.Mutex
+	results   map[string][]domain.ChunkID // canned Search results per collection
+	indexed   []app.LexicalDoc
+	deleted   []domain.ChunkID
+	gotFilter domain.Predicate
+}
+
+func (f *fakeLexical) Upsert(_ context.Context, _ string, docs []app.LexicalDoc) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.indexed = append(f.indexed, docs...)
+	return nil
+}
+
+func (f *fakeLexical) Search(_ context.Context, collection, _ string, k int, filter domain.Predicate) ([]domain.ChunkID, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.gotFilter = filter
+	ids := f.results[collection]
+	if k > 0 && len(ids) > k {
+		ids = ids[:k]
+	}
+	return ids, nil
+}
+
+func (f *fakeLexical) Delete(_ context.Context, _ string, ids []domain.ChunkID) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.deleted = append(f.deleted, ids...)
+	return nil
 }
 
 type fakeDocs struct {

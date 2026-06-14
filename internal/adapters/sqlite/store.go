@@ -61,6 +61,13 @@ var schemaStmts = []string{
 		metadata TEXT NOT NULL DEFAULT '{}'
 	)`,
 	`CREATE INDEX IF NOT EXISTS vectors_by_collection ON vectors(collection)`,
+	// Lexical (BM25) index for hybrid retrieval. A standalone FTS5 table (not
+	// external-content) so it satisfies the LexicalIndex port's Upsert/Search/Delete
+	// contract in isolation; chunk_id/collection/metadata are stored UNINDEXED
+	// (filtered, not tokenized), only content is full-text indexed. Created on open,
+	// so an existing database gains an empty index that ingestion fills going
+	// forward (pre-existing chunks degrade to vector-only under --hybrid).
+	`CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(chunk_id UNINDEXED, collection UNINDEXED, content, metadata UNINDEXED)`,
 	`CREATE TABLE IF NOT EXISTS answer_cache (
 		key TEXT PRIMARY KEY,
 		answer TEXT NOT NULL,
@@ -172,6 +179,9 @@ func (s *Store) Documents() *DocumentRepository { return &DocumentRepository{db:
 
 // Vectors returns the VectorIndex view of the store.
 func (s *Store) Vectors() *VectorIndex { return &VectorIndex{db: s.db} }
+
+// Lexical returns the LexicalIndex (FTS5) view of the store.
+func (s *Store) Lexical() *LexicalIndex { return &LexicalIndex{db: s.db} }
 
 // Cache returns the AnswerCache view of the store.
 func (s *Store) Cache() *AnswerCache { return &AnswerCache{db: s.db} }

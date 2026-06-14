@@ -31,6 +31,7 @@ type Ingestor struct {
 	collections CollectionRepository
 	docs        DocumentRepository
 	index       VectorIndex
+	lexical     LexicalIndex
 	embedder    Embedder
 	extractor   Extractor
 	source      Source
@@ -81,11 +82,12 @@ func newIngestCall(opts []IngestCallOption) ingestCall {
 
 // NewIngestor wires an Ingestor from the ports and domain services it needs. The
 // chunker Registry selects a per-format chunking strategy by content type.
-func NewIngestor(collections CollectionRepository, docs DocumentRepository, index VectorIndex, embedder Embedder, extractor Extractor, source Source, chunkers domain.Registry, opts ...IngestOption) *Ingestor {
+func NewIngestor(collections CollectionRepository, docs DocumentRepository, index VectorIndex, embedder Embedder, extractor Extractor, source Source, chunkers domain.Registry, lexical LexicalIndex, opts ...IngestOption) *Ingestor {
 	ing := &Ingestor{
 		collections: collections,
 		docs:        docs,
 		index:       index,
+		lexical:     lexical,
 		embedder:    embedder,
 		extractor:   extractor,
 		source:      source,
@@ -336,10 +338,20 @@ func (i *Ingestor) ingestItem(ctx context.Context, coll *domain.Collection, item
 		if err := i.index.Delete(ctx, coll.Name, stale); err != nil {
 			return ingestOutcome{}, fmt.Errorf("replace %q: %w", item.URI, err)
 		}
+		if i.lexical != nil {
+			if err := i.lexical.Delete(ctx, coll.Name, stale); err != nil {
+				return ingestOutcome{}, fmt.Errorf("replace %q: %w", item.URI, err)
+			}
+		}
 	}
 
 	if err := i.index.Upsert(ctx, coll.Name, entries); err != nil {
 		return ingestOutcome{}, fmt.Errorf("index %q: %w", item.URI, err)
+	}
+	if i.lexical != nil {
+		if err := i.lexical.Upsert(ctx, coll.Name, lexicalDocs(chunks, docMeta)); err != nil {
+			return ingestOutcome{}, fmt.Errorf("lexical index %q: %w", item.URI, err)
+		}
 	}
 	if err := i.docs.Upsert(ctx, doc, chunks); err != nil {
 		return ingestOutcome{}, fmt.Errorf("store %q: %w", item.URI, err)
@@ -387,6 +399,17 @@ func mergeMeta(a, b domain.Metadata) domain.Metadata {
 		out[k] = v
 	}
 	return out
+}
+
+// lexicalDocs builds the lexical-index documents for a set of chunks, indexing
+// each chunk's stored text under the document's metadata (so --where filters the
+// lexical side identically to the vector side).
+func lexicalDocs(chunks []domain.Chunk, meta domain.Metadata) []LexicalDoc {
+	docs := make([]LexicalDoc, len(chunks))
+	for i, c := range chunks {
+		docs[i] = LexicalDoc{ChunkID: c.ID, Text: c.Text, Metadata: meta}
+	}
+	return docs
 }
 
 // embedTexts pulls the text to embed from each chunk result, in order. A chunk
