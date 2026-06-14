@@ -190,6 +190,7 @@ func newDeps(emb app.Embedder, gen app.Generator) (cli.Deps, *memstore.Collectio
 		Tokens:  wordTokenCounter{},
 		Export:  app.NewExporter(colls, docs, index),
 		Import:  app.NewImporter(colls, docs, index, remover, lexical),
+		Index:   index,
 	}
 	return deps, colls, docs, index
 }
@@ -1588,6 +1589,90 @@ func TestCLIHybridRetrieval(t *testing.T) {
 	t.Run("--hybrid with multiple collections is a usage error", func(t *testing.T) {
 		if _, code := exec(deps, "query", "docs", "-c", "notes", "fox", "--hybrid"); code != 2 {
 			t.Errorf("--hybrid + -c should exit 2, got %d", code)
+		}
+	})
+}
+
+func TestCLIDiversity(t *testing.T) {
+	qvec := []float32{1, 0, 0}
+	deps, _, docs, index := newDeps(stubEmbedder{space: testSpace(), vec: qvec}, stubGenerator{})
+	if _, code := exec(deps, "init", "docs"); code != 0 {
+		t.Fatal("init failed")
+	}
+	ctx := context.Background()
+	// One document with three chunks (same source) plus a second document.
+	seedDoc := func(uri string, nChunks int) {
+		did := domain.DeriveDocumentID("docs", uri)
+		doc, err := domain.NewDocument("docs", uri, domain.HashContent([]byte(uri)), time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		var chunks []domain.Chunk
+		var entries []app.VectorEntry
+		for i := 0; i < nChunks; i++ {
+			ch, err := domain.NewChunk(did, i, uri+" chunk")
+			if err != nil {
+				t.Fatal(err)
+			}
+			chunks = append(chunks, ch)
+			entries = append(entries, app.VectorEntry{ChunkID: ch.ID, Vector: qvec})
+		}
+		if err := docs.Upsert(ctx, doc, chunks); err != nil {
+			t.Fatal(err)
+		}
+		if err := index.Upsert(ctx, "docs", entries); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seedDoc("file:///a.md", 3)
+	seedDoc("file:///b.md", 1)
+
+	t.Run("--max-per-source caps hits per document", func(t *testing.T) {
+		out, code := exec(deps, "query", "docs", "anything", "-k", "8", "--max-per-source", "1", "--json")
+		if code != 0 {
+			t.Fatalf("query exit %d, out %q", code, out)
+		}
+		var hits []hitViewJSON
+		if err := json.Unmarshal([]byte(out), &hits); err != nil {
+			t.Fatalf("bad JSON: %v", err)
+		}
+		perSource := map[string]int{}
+		for _, h := range hits {
+			perSource[h.Source]++
+		}
+		for src, n := range perSource {
+			if n > 1 {
+				t.Errorf("--max-per-source 1 should cap %s at 1, got %d", src, n)
+			}
+		}
+		if len(hits) != 2 {
+			t.Errorf("want 2 hits (1 per source), got %d", len(hits))
+		}
+	})
+
+	t.Run("--mmr runs and returns diversified hits", func(t *testing.T) {
+		out, code := exec(deps, "query", "docs", "anything", "--mmr", "--json")
+		if code != 0 {
+			t.Fatalf("query --mmr exit %d, out %q", code, out)
+		}
+		var hits []hitViewJSON
+		if err := json.Unmarshal([]byte(out), &hits); err != nil {
+			t.Fatalf("bad JSON: %v", err)
+		}
+		if len(hits) == 0 {
+			t.Error("--mmr should return hits")
+		}
+	})
+
+	t.Run("--mmr with --rerank is a usage error", func(t *testing.T) {
+		if _, code := exec(deps, "query", "docs", "anything", "--mmr", "--rerank"); code != 2 {
+			t.Errorf("--mmr + --rerank should exit 2, got %d", code)
+		}
+	})
+
+	t.Run("--mmr with multiple collections is a usage error", func(t *testing.T) {
+		if _, code := exec(deps, "query", "docs", "-c", "notes", "anything", "--mmr"); code != 2 {
+			t.Errorf("--mmr + -c should exit 2, got %d", code)
 		}
 	})
 }
