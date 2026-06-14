@@ -14,10 +14,17 @@ import (
 	"strings"
 
 	"github.com/jmurray2011/lore/internal/app"
+	"github.com/jmurray2011/lore/internal/limitio"
 )
 
 // ContentType is the OOXML WordprocessingML media type for .docx files.
 const ContentType = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+// maxDocumentBytes caps the decompressed size of word/document.xml. A .docx is
+// untrusted input that may come from a third party, and a small archive can
+// expand to gigabytes (a zip bomb); this bounds the work an extractor will do
+// before giving up. It is a var, not a const, only so tests can lower it.
+var maxDocumentBytes int64 = 256 << 20
 
 // Extractor extracts plain text from .docx content. Its zero value is ready.
 type Extractor struct{}
@@ -45,12 +52,17 @@ func (e Extractor) Extract(contentType string, raw []byte) (string, error) {
 		return "", err
 	}
 	defer func() { _ = doc.Close() }()
-	return parseDocument(doc)
+	return parseDocument(limitio.Reader(doc, maxDocumentBytes))
 }
 
 func openDocumentXML(zr *zip.Reader) (io.ReadCloser, error) {
 	for _, f := range zr.File {
 		if f.Name == "word/document.xml" {
+			// Fast-fail on an honestly-declared bomb before decompressing; the
+			// streaming limit in Extract is the hard bound for a lying header.
+			if f.UncompressedSize64 > uint64(maxDocumentBytes) {
+				return nil, fmt.Errorf("docx: document.xml: %w", limitio.ErrTooLarge)
+			}
 			rc, err := f.Open()
 			if err != nil {
 				return nil, fmt.Errorf("docx: open document.xml: %w", err)

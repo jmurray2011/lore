@@ -87,6 +87,26 @@ func (b bearerInjector) RoundTrip(req *http.Request) (*http.Response, error) {
 	return b.base.RoundTrip(req)
 }
 
+func TestHTTP_CrossOriginProtection(t *testing.T) {
+	ts := httptest.NewServer(newHarness(t, nil, false).srv.httpHandler(""))
+	defer ts.Close()
+
+	// A state-changing request a browser marks as cross-site must be rejected
+	// before reaching the MCP handler — defense against DNS-rebinding / CSRF
+	// from a malicious page. Non-browser MCP clients send no Sec-Fetch-Site and
+	// are unaffected (covered by TestHTTP_RoundTrip).
+	req, _ := http.NewRequest(http.MethodPost, ts.URL, http.NoBody)
+	req.Header.Set("Sec-Fetch-Site", "cross-site")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("cross-site POST: status = %d, want 403", resp.StatusCode)
+	}
+}
+
 func TestRequireTokenOffLoopback(t *testing.T) {
 	tests := []struct {
 		addr, token string

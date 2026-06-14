@@ -12,16 +12,28 @@ import (
 	"bytes"
 	"encoding/xml"
 	"fmt"
-	"io"
 	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/jmurray2011/lore/internal/app"
+	"github.com/jmurray2011/lore/internal/limitio"
 )
 
 // ContentType is the OOXML SpreadsheetML media type for .xlsx files.
 const ContentType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+// An .xlsx is untrusted input that may come from a third party. A small archive
+// can expand to gigabytes (a zip bomb), so decompression is bounded twice: each
+// OOXML part individually, and the running total of emitted text. Both are vars,
+// not consts, only so tests can lower them.
+var (
+	// maxPartBytes caps the decompressed size of any single OOXML part.
+	maxPartBytes int64 = 256 << 20
+	// maxWorkbookBytes caps the total text accumulated across all sheets, so
+	// many parts each under maxPartBytes cannot sum without bound.
+	maxWorkbookBytes int64 = 512 << 20
+)
 
 // Extractor extracts plain text from .xlsx content. Its zero value is ready.
 type Extractor struct{}
@@ -72,6 +84,9 @@ func (e Extractor) Extract(contentType string, raw []byte) (string, error) {
 			b.WriteString("\n\n")
 		}
 		b.WriteString(text)
+		if int64(b.Len()) > maxWorkbookBytes {
+			return "", fmt.Errorf("xlsx: workbook text: %w", limitio.ErrTooLarge)
+		}
 	}
 	return b.String(), nil
 }
@@ -165,12 +180,17 @@ func readSheet(zr *zip.Reader, name string, shared []string) (string, error) {
 func readFile(zr *zip.Reader, name string) ([]byte, bool, error) {
 	for _, f := range zr.File {
 		if f.Name == name {
+			// Fast-fail on an honestly-declared bomb before decompressing; the
+			// streaming limit below is the hard bound for a lying header.
+			if f.UncompressedSize64 > uint64(maxPartBytes) {
+				return nil, false, fmt.Errorf("xlsx: %s: %w", name, limitio.ErrTooLarge)
+			}
 			rc, err := f.Open()
 			if err != nil {
 				return nil, false, fmt.Errorf("xlsx: open %s: %w", name, err)
 			}
 			defer func() { _ = rc.Close() }()
-			data, err := io.ReadAll(rc)
+			data, err := limitio.ReadAll(rc, maxPartBytes)
 			if err != nil {
 				return nil, false, fmt.Errorf("xlsx: read %s: %w", name, err)
 			}
