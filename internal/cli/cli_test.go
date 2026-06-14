@@ -724,6 +724,86 @@ func TestCLIQuerySourceFilter(t *testing.T) {
 	}
 }
 
+func TestCLIMetadataWhereFilter(t *testing.T) {
+	qvec := []float32{1, 0, 0}
+	deps, _, docs, index := newDeps(stubEmbedder{space: testSpace(), vec: qvec}, stubGenerator{})
+	if _, code := exec(deps, "init", "docs"); code != 0 {
+		t.Fatal("init failed")
+	}
+	ctx := context.Background()
+	seed := func(uri string, meta domain.Metadata) {
+		did := domain.DeriveDocumentID("docs", uri)
+		doc, err := domain.NewDocument("docs", uri, domain.HashContent([]byte(uri)), time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		doc.Metadata = meta
+		ch, err := domain.NewChunk(did, 0, "content of "+uri)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := docs.Upsert(ctx, doc, []domain.Chunk{ch}); err != nil {
+			t.Fatal(err)
+		}
+		if err := index.Upsert(ctx, "docs", []app.VectorEntry{{ChunkID: ch.ID, Vector: qvec, Metadata: meta}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seed("file:///a.md", domain.Metadata{"author": "alice", "date": "2025-06-01"})
+	seed("file:///b.md", domain.Metadata{"author": "bob", "date": "2024-01-01"})
+
+	t.Run("query --where filters by metadata and exposes it in --json", func(t *testing.T) {
+		out, code := exec(deps, "query", "docs", "anything", "--where", "author=alice", "--json")
+		if code != 0 {
+			t.Fatalf("query exit %d, out %q", code, out)
+		}
+		var hits []hitViewJSON
+		if err := json.Unmarshal([]byte(out), &hits); err != nil {
+			t.Fatalf("bad JSON %q: %v", out, err)
+		}
+		if len(hits) != 1 || !strings.Contains(hits[0].Source, "a.md") {
+			t.Fatalf("--where author=alice should keep only alice's hit, got %+v", hits)
+		}
+		if hits[0].Metadata["author"] != "alice" {
+			t.Errorf("hit JSON should expose metadata, got %v", hits[0].Metadata)
+		}
+	})
+
+	t.Run("query --where with a date predicate", func(t *testing.T) {
+		out, code := exec(deps, "query", "docs", "anything", "--where", "date>=2025-01-01", "--json")
+		if code != 0 {
+			t.Fatalf("query exit %d", code)
+		}
+		var hits []hitViewJSON
+		if err := json.Unmarshal([]byte(out), &hits); err != nil {
+			t.Fatalf("bad JSON: %v", err)
+		}
+		if len(hits) != 1 || !strings.Contains(hits[0].Source, "a.md") {
+			t.Errorf("date>=2025-01-01 should keep only a.md, got %+v", hits)
+		}
+	})
+
+	t.Run("docs --where filters the document listing", func(t *testing.T) {
+		out, code := exec(deps, "docs", "docs", "--where", "author=bob", "--json")
+		if code != 0 {
+			t.Fatalf("docs exit %d", code)
+		}
+		var list []docViewJSON
+		if err := json.Unmarshal([]byte(out), &list); err != nil {
+			t.Fatalf("bad JSON: %v", err)
+		}
+		if len(list) != 1 || !strings.Contains(list[0].Source, "b.md") || list[0].Metadata["author"] != "bob" {
+			t.Errorf("docs --where author=bob should list only b.md with metadata, got %+v", list)
+		}
+	})
+
+	t.Run("a malformed --where is a usage error (exit 2)", func(t *testing.T) {
+		if _, code := exec(deps, "query", "docs", "anything", "--where", "author"); code != 2 {
+			t.Errorf("malformed --where should exit 2, got %d", code)
+		}
+	})
+}
+
 func TestCLISpaceMismatchExits4(t *testing.T) {
 	// Collection pinned to one space; embedder reports a different one.
 	deps, colls, _, _ := newDeps(stubEmbedder{space: domain.EmbeddingSpace{Model: "other", Dimensions: 9}}, stubGenerator{})
@@ -2453,9 +2533,10 @@ type collectionViewJSON struct {
 }
 
 type docViewJSON struct {
-	Source     string `json:"source"`
-	Hash       string `json:"hash"`
-	IngestedAt string `json:"ingested_at"`
+	Source     string            `json:"source"`
+	Hash       string            `json:"hash"`
+	IngestedAt string            `json:"ingested_at"`
+	Metadata   map[string]string `json:"metadata"`
 }
 
 type statusViewJSON struct {
@@ -2483,13 +2564,14 @@ type chunkViewJSON struct {
 }
 
 type hitViewJSON struct {
-	ChunkID     string   `json:"chunk_id"`
-	Source      string   `json:"source"`
-	Seq         int      `json:"seq"`
-	Score       float64  `json:"score"`
-	RerankScore *float64 `json:"rerank_score"`
-	Collection  string   `json:"collection"`
-	Text        string   `json:"text"`
+	ChunkID     string            `json:"chunk_id"`
+	Source      string            `json:"source"`
+	Seq         int               `json:"seq"`
+	Score       float64           `json:"score"`
+	RerankScore *float64          `json:"rerank_score"`
+	Collection  string            `json:"collection"`
+	Metadata    map[string]string `json:"metadata"`
+	Text        string            `json:"text"`
 }
 
 type fromGroupViewJSON struct {

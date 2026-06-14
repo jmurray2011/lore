@@ -76,6 +76,34 @@ func RunDocumentRepositorySuite(t *testing.T, factory func(t *testing.T) app.Doc
 		}
 	})
 
+	t.Run("upsert round-trips document metadata as an independent copy", func(t *testing.T) {
+		repo := factory(t)
+		doc, chunks := newDoc(t, "docs", "file:///a.md", "alpha", 1)
+		doc.Metadata = domain.Metadata{"author": "alice", "tags": "security,compliance"}
+		mustUpsert(t, repo, doc, chunks)
+
+		// Mutating the caller's map after Upsert must not reach the store.
+		doc.Metadata["author"] = "eve"
+
+		got, err := repo.GetBySource(ctx, "docs", "file:///a.md")
+		if err != nil {
+			t.Fatalf("GetBySource: %v", err)
+		}
+		if got.Metadata["author"] != "alice" || got.Metadata["tags"] != "security,compliance" {
+			t.Fatalf("metadata not persisted independently: got %v", got.Metadata)
+		}
+
+		// Mutating the returned map must not corrupt the store either.
+		got.Metadata["author"] = "mallory"
+		again, err := repo.GetDocuments(ctx, []domain.DocumentID{doc.ID})
+		if err != nil || len(again) != 1 {
+			t.Fatalf("GetDocuments: %v, %v", again, err)
+		}
+		if again[0].Metadata["author"] != "alice" {
+			t.Errorf("repository must return an independent metadata copy; got %v", again[0].Metadata)
+		}
+	})
+
 	t.Run("get by source unknown returns ErrNotFound", func(t *testing.T) {
 		repo := factory(t)
 		if _, err := repo.GetBySource(ctx, "docs", "file:///missing.md"); !errors.Is(err, app.ErrNotFound) {

@@ -105,7 +105,7 @@ func TestAsker(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		ans, err := a.Ask(ctx, "docs", "why", 1, []domain.Attachment{att}, false, "")
+		ans, err := a.Ask(ctx, "docs", "why", 1, []domain.Attachment{att}, false, "", domain.Predicate{})
 		if err != nil {
 			t.Fatalf("Ask: %v", err)
 		}
@@ -131,7 +131,7 @@ func TestAsker(t *testing.T) {
 		q := app.NewQuerier(newFakeCollections(), &fakeIndex{}, &fakeDocs{}, &fakeEmbedder{space: space})
 		a := app.NewAsker(q, gen)
 
-		if _, err := a.Ask(ctx, "missing", "why", 1, nil, false, ""); !errors.Is(err, app.ErrNotFound) {
+		if _, err := a.Ask(ctx, "missing", "why", 1, nil, false, "", domain.Predicate{}); !errors.Is(err, app.ErrNotFound) {
 			t.Errorf("want ErrNotFound, got %v", err)
 		}
 		if gen.gotQuestion != "" {
@@ -147,7 +147,7 @@ func TestAsker(t *testing.T) {
 		gen := &fakeGenerator{err: llmDown}
 		a := newAsker(gen, emb, idx, docs)
 
-		if _, err := a.Ask(ctx, "docs", "why", 1, nil, false, ""); !errors.Is(err, llmDown) {
+		if _, err := a.Ask(ctx, "docs", "why", 1, nil, false, "", domain.Predicate{}); !errors.Is(err, llmDown) {
 			t.Errorf("want wrapped llm error, got %v", err)
 		}
 	})
@@ -158,7 +158,7 @@ func TestAsker(t *testing.T) {
 		emb := &fakeEmbedder{space: space}
 		a := newAsker(gen, emb, &fakeIndex{}, &fakeDocs{})
 
-		if _, err := a.Ask(ctx, "docs", "why", 1, nil, true, ""); !errors.Is(err, app.ErrNoGrounding) {
+		if _, err := a.Ask(ctx, "docs", "why", 1, nil, true, "", domain.Predicate{}); !errors.Is(err, app.ErrNoGrounding) {
 			t.Errorf("want ErrNoGrounding, got %v", err)
 		}
 		if gen.gotQuestion != "" {
@@ -171,7 +171,7 @@ func TestAsker(t *testing.T) {
 		emb := &fakeEmbedder{space: space}
 		a := newAsker(gen, emb, &fakeIndex{}, &fakeDocs{})
 
-		ans, err := a.Ask(ctx, "docs", "why", 1, nil, false, "")
+		ans, err := a.Ask(ctx, "docs", "why", 1, nil, false, "", domain.Predicate{})
 		if err != nil {
 			t.Fatalf("Ask: %v", err)
 		}
@@ -192,7 +192,7 @@ func TestAsker(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		ans, err := a.Ask(ctx, "docs", "why", 0, []domain.Attachment{att}, true, "")
+		ans, err := a.Ask(ctx, "docs", "why", 0, []domain.Attachment{att}, true, "", domain.Predicate{})
 		if err != nil {
 			t.Fatalf("Ask: %v", err)
 		}
@@ -208,7 +208,7 @@ func TestAsker(t *testing.T) {
 		gen := &fakeGenerator{answer: app.Answer{Text: "because"}}
 		a := newAsker(gen, emb, idx, docs)
 
-		ans, ret, err := a.AskExplain(ctx, "docs", "why", 1, nil, false, "")
+		ans, ret, err := a.AskExplain(ctx, "docs", "why", 1, nil, false, "", domain.Predicate{})
 		if err != nil {
 			t.Fatalf("AskExplain: %v", err)
 		}
@@ -225,7 +225,7 @@ func TestAsker(t *testing.T) {
 		emb := &fakeEmbedder{space: space}
 		a := newAsker(gen, emb, &fakeIndex{}, &fakeDocs{})
 
-		ans, ret, err := a.AskExplain(ctx, "docs", "why", 1, nil, true, "")
+		ans, ret, err := a.AskExplain(ctx, "docs", "why", 1, nil, true, "", domain.Predicate{})
 		if !errors.Is(err, app.ErrNoGrounding) {
 			t.Errorf("want ErrNoGrounding, got %v", err)
 		}

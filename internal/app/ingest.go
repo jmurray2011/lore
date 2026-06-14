@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -52,6 +53,32 @@ func WithConcurrency(n int) IngestOption {
 	}
 }
 
+// ingestCall holds per-invocation ingest configuration.
+type ingestCall struct {
+	meta domain.Metadata
+}
+
+// IngestCallOption configures a single Ingest or IngestContent invocation (as
+// distinct from IngestOption, which configures the Ingestor at construction).
+type IngestCallOption func(*ingestCall)
+
+// WithMeta supplies base metadata applied to every document ingested in this
+// invocation (the `add --meta` pairs). A markdown document's own front matter is
+// merged under it, so an explicit key here overrides the same key from front
+// matter. Metadata is captured only when a document is ingested as new or
+// changed; re-ingesting unchanged content does not update it.
+func WithMeta(meta domain.Metadata) IngestCallOption {
+	return func(c *ingestCall) { c.meta = meta }
+}
+
+func newIngestCall(opts []IngestCallOption) ingestCall {
+	var c ingestCall
+	for _, o := range opts {
+		o(&c)
+	}
+	return c
+}
+
 // NewIngestor wires an Ingestor from the ports and domain services it needs. The
 // chunker Registry selects a per-format chunking strategy by content type.
 func NewIngestor(collections CollectionRepository, docs DocumentRepository, index VectorIndex, embedder Embedder, extractor Extractor, source Source, chunkers domain.Registry, opts ...IngestOption) *Ingestor {
@@ -77,7 +104,8 @@ func NewIngestor(collections CollectionRepository, docs DocumentRepository, inde
 // coherence up front and fails fast on the first error; because
 // ingestion is idempotent, re-running resumes safely over already-stored
 // documents.
-func (i *Ingestor) Ingest(ctx context.Context, collection, root string) (IngestSummary, error) {
+func (i *Ingestor) Ingest(ctx context.Context, collection, root string, opts ...IngestCallOption) (IngestSummary, error) {
+	call := newIngestCall(opts)
 	coll, err := i.collections.Get(ctx, collection)
 	if err != nil {
 		return IngestSummary{}, err
@@ -101,7 +129,7 @@ func (i *Ingestor) Ingest(ctx context.Context, collection, root string) (IngestS
 
 	walkErr := i.source.Walk(gctx, root, func(it SourceItem) error {
 		g.Go(func() error {
-			out, err := i.ingestItem(gctx, coll, it)
+			out, err := i.ingestItem(gctx, coll, it, call.meta)
 			if err != nil {
 				return err
 			}
@@ -153,7 +181,8 @@ const (
 // enforces space coherence and is idempotent by content hash. Unlike Ingest it
 // records no sync source — there is no path to
 // replay — and an unsupported content type is reported, not an error.
-func (i *Ingestor) IngestContent(ctx context.Context, collection, uri, contentType string, content []byte) (IngestSummary, error) {
+func (i *Ingestor) IngestContent(ctx context.Context, collection, uri, contentType string, content []byte, opts ...IngestCallOption) (IngestSummary, error) {
+	call := newIngestCall(opts)
 	coll, err := i.collections.Get(ctx, collection)
 	if err != nil {
 		return IngestSummary{}, err
@@ -176,7 +205,7 @@ func (i *Ingestor) IngestContent(ctx context.Context, collection, uri, contentTy
 		ContentType: contentType,
 		Open:        func() ([]byte, error) { return content, nil },
 	}
-	out, err := i.ingestItem(ctx, coll, item)
+	out, err := i.ingestItem(ctx, coll, item, call.meta)
 	if err != nil {
 		return IngestSummary{}, err
 	}
@@ -204,7 +233,7 @@ type ingestOutcome struct {
 // document absent (a re-run reprocesses), and any vectors written without a
 // document are harmless: queries skip chunk IDs the DocumentRepository can't
 // hydrate.
-func (i *Ingestor) ingestItem(ctx context.Context, coll *domain.Collection, item SourceItem) (ingestOutcome, error) {
+func (i *Ingestor) ingestItem(ctx context.Context, coll *domain.Collection, item SourceItem, baseMeta domain.Metadata) (ingestOutcome, error) {
 	if !i.extractor.Supports(item.ContentType) {
 		return ingestOutcome{kind: kindUnsupported}, nil
 	}
@@ -231,6 +260,14 @@ func (i *Ingestor) ingestItem(ctx context.Context, coll *domain.Collection, item
 	text, err := i.extractor.Extract(item.ContentType, raw)
 	if err != nil {
 		return ingestOutcome{}, fmt.Errorf("extract %q: %w", item.URI, err)
+	}
+	// Markdown front matter is metadata, not prose: parse it, merge the caller's
+	// base metadata over it (an explicit --meta key wins), and chunk only the body.
+	docMeta := baseMeta.Clone()
+	if isMarkdown(item.ContentType) {
+		var fm domain.Metadata
+		fm, text = domain.ParseFrontMatter(text)
+		docMeta = mergeMeta(fm, docMeta)
 	}
 	hash := domain.HashContent([]byte(text))
 	results, err := i.chunkers.Chunk(domain.ParsedDoc{Text: text, ContentType: item.ContentType, SourceURI: item.URI})
@@ -266,6 +303,7 @@ func (i *Ingestor) ingestItem(ctx context.Context, coll *domain.Collection, item
 		return ingestOutcome{}, fmt.Errorf("document %q: %w", item.URI, err)
 	}
 	doc.Fingerprint = item.Fingerprint
+	doc.Metadata = docMeta
 	chunks, err := chunksFor(doc.ID, results, item.URI)
 	if err != nil {
 		return ingestOutcome{}, err
@@ -278,9 +316,11 @@ func (i *Ingestor) ingestItem(ctx context.Context, coll *domain.Collection, item
 	if len(vectors) != len(chunks) {
 		return ingestOutcome{}, fmt.Errorf("embedder returned %d vectors for %d chunks of %q", len(vectors), len(chunks), item.URI)
 	}
+	// Each entry carries the document's metadata so the index can apply a --where
+	// filter without reaching into the DocumentRepository.
 	entries := make([]VectorEntry, len(chunks))
 	for j, ch := range chunks {
-		entries[j] = VectorEntry{ChunkID: ch.ID, Vector: vectors[j]}
+		entries[j] = VectorEntry{ChunkID: ch.ID, Vector: vectors[j], Metadata: docMeta}
 	}
 
 	// For a changed document, drop the prior version's chunks and vectors before
@@ -326,6 +366,27 @@ func (i *Ingestor) refreshFingerprint(ctx context.Context, coll *domain.Collecti
 		return fmt.Errorf("refresh %q: %w", existing.SourceURI, err)
 	}
 	return nil
+}
+
+// isMarkdown reports whether content of this type carries markdown front matter.
+func isMarkdown(contentType string) bool {
+	return strings.HasPrefix(contentType, "text/markdown")
+}
+
+// mergeMeta overlays b onto a (b wins on key conflict), returning a fresh map, or
+// nil when both are empty.
+func mergeMeta(a, b domain.Metadata) domain.Metadata {
+	if len(a) == 0 && len(b) == 0 {
+		return nil
+	}
+	out := make(domain.Metadata, len(a)+len(b))
+	for k, v := range a {
+		out[k] = v
+	}
+	for k, v := range b {
+		out[k] = v
+	}
+	return out
 }
 
 // embedTexts pulls the text to embed from each chunk result, in order. A chunk

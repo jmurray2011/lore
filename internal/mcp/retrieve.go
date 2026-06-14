@@ -43,10 +43,12 @@ func (s *Server) resolveHits(ctx context.Context, collections []string, query st
 // queryHits retrieves the top-k hits for one collection (the single-collection
 // path) or merges across several same-space collections.
 func (s *Server) queryHits(ctx context.Context, collections []string, query string, k int, source string) ([]domain.ChunkHit, error) {
+	// The MCP tools do not yet expose a --where metadata filter, so pass the zero
+	// predicate (matches everything). Adding a `where` tool param is a follow-up.
 	if len(collections) > 1 {
-		return s.deps.Query.QueryAcross(ctx, collections, query, k, source)
+		return s.deps.Query.QueryAcross(ctx, collections, query, k, source, domain.Predicate{})
 	}
-	return s.deps.Query.Query(ctx, collections[0], query, k, source)
+	return s.deps.Query.Query(ctx, collections[0], query, k, source, domain.Predicate{})
 }
 
 // budgetTrim limits ranked hits to a cumulative token budget, applied after

@@ -86,6 +86,7 @@ func (e *Exporter) Export(ctx context.Context, collection string, w io.Writer) (
 			Hash:        string(d.Hash),
 			IngestedAt:  d.IngestedAt,
 			Fingerprint: d.Fingerprint,
+			Metadata:    map[string]string(d.Metadata),
 		}
 		for _, c := range chunks {
 			vec, ok := vecByID[c.ID]
@@ -197,6 +198,7 @@ func (im *Importer) Import(ctx context.Context, r io.Reader, name string, force 
 	chunkCount := 0
 	for _, d := range b.Documents {
 		docID := domain.DeriveDocumentID(target, d.SourceURI)
+		meta := domain.Metadata(d.Metadata)
 		doc := &domain.Document{
 			ID:          docID,
 			Collection:  target,
@@ -204,13 +206,14 @@ func (im *Importer) Import(ctx context.Context, r io.Reader, name string, force 
 			Hash:        domain.ContentHash(d.Hash),
 			IngestedAt:  d.IngestedAt,
 			Fingerprint: d.Fingerprint,
+			Metadata:    meta,
 		}
 		chunks := make([]domain.Chunk, len(d.Chunks))
 		entries := make([]VectorEntry, len(d.Chunks))
 		for i, c := range d.Chunks {
 			cid := domain.DeriveChunkID(docID, c.Seq)
 			chunks[i] = domain.Chunk{ID: cid, DocumentID: docID, Seq: c.Seq, Text: c.Text, HeadingPath: c.HeadingPath}
-			entries[i] = VectorEntry{ChunkID: cid, Vector: c.Vector}
+			entries[i] = VectorEntry{ChunkID: cid, Vector: c.Vector, Metadata: meta}
 		}
 		if err := im.docs.Upsert(ctx, doc, chunks); err != nil {
 			return TransferSummary{}, fmt.Errorf("import document %q: %w", d.SourceURI, err)

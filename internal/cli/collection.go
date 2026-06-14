@@ -137,12 +137,17 @@ func rmByChunk(cmd *cobra.Command, deps *Deps, collection string, ids []string) 
 }
 
 func newDocsCmd(deps *Deps) *cobra.Command {
-	return &cobra.Command{
+	var where []string
+	cmd := &cobra.Command{
 		Use:   "docs <collection>",
 		Short: "List the documents ingested into a collection",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) != 1 {
 				return fmt.Errorf("%w: docs takes exactly one collection name", domain.ErrInvalidArgument)
+			}
+			filter, err := domain.ParseWhere(where)
+			if err != nil {
+				return err
 			}
 			list, err := deps.Catalog.ListDocuments(cmd.Context(), args[0])
 			if err != nil {
@@ -151,12 +156,15 @@ func newDocsCmd(deps *Deps) *cobra.Command {
 			// Sort by source URI so output is stable regardless of backend.
 			sort.Slice(list, func(i, j int) bool { return list[i].SourceURI < list[j].SourceURI })
 
-			views := make([]docView, len(list))
-			rows := make([][]string, len(list))
-			for i, d := range list {
+			views := make([]docView, 0, len(list))
+			rows := make([][]string, 0, len(list))
+			for _, d := range list {
+				if !filter.Match(d.Metadata) {
+					continue
+				}
 				ingested := d.IngestedAt.UTC().Format(time.RFC3339)
-				views[i] = docView{Source: d.SourceURI, Hash: string(d.Hash), IngestedAt: ingested}
-				rows[i] = []string{shortLabel(d.SourceURI), humanTime(ingested)}
+				views = append(views, docView{Source: d.SourceURI, Hash: string(d.Hash), IngestedAt: ingested, Metadata: d.Metadata})
+				rows = append(rows, []string{shortLabel(d.SourceURI), humanTime(ingested)})
 			}
 			var human string
 			if len(rows) > 0 {
@@ -166,6 +174,8 @@ func newDocsCmd(deps *Deps) *cobra.Command {
 			return render(cmd, views, human)
 		},
 	}
+	cmd.Flags().StringArrayVar(&where, "where", nil, "list only documents whose metadata matches this predicate, e.g. 'author=alice' (repeatable; ANDed)")
+	return cmd
 }
 
 func newCatCmd(deps *Deps) *cobra.Command {

@@ -22,6 +22,11 @@ type Document struct {
 	// hash) used to skip re-reading unchanged files before extraction. Unlike
 	// Hash it is a heuristic, not an identity; empty means "unknown".
 	Fingerprint string
+	// Metadata holds the document's structured attributes (user-supplied --meta
+	// pairs, extracted front-matter, path/mtime-derived fields). It is provenance
+	// for display and the substrate for --where filtering; it is not part of the
+	// document's identity (Hash) and may change without re-chunking.
+	Metadata Metadata
 }
 
 // NewDocument constructs a Document with its deterministic ID.

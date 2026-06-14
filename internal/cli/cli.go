@@ -223,7 +223,10 @@ type hitView struct {
 	// (multi-collection) queries; omitempty keeps single-collection output
 	// byte-for-byte unchanged.
 	Collection string `json:"collection,omitempty"`
-	Text       string `json:"text"`
+	// Metadata is the chunk's document-level attributes; omitempty keeps output
+	// unchanged for documents ingested without metadata.
+	Metadata domain.Metadata `json:"metadata,omitempty"`
+	Text     string          `json:"text"`
 }
 
 // fromRef identifies the source chunk a query --from-collection group was driven
@@ -308,9 +311,10 @@ type explainStats struct {
 }
 
 type docView struct {
-	Source     string `json:"source"`
-	Hash       string `json:"hash"`
-	IngestedAt string `json:"ingested_at"`
+	Source     string          `json:"source"`
+	Hash       string          `json:"hash"`
+	IngestedAt string          `json:"ingested_at"`
+	Metadata   domain.Metadata `json:"metadata,omitempty"`
 }
 
 // transferView is the export/import summary. Encrypted reports whether the

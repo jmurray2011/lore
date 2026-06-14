@@ -87,10 +87,14 @@ type DocumentRepository interface {
 	DeleteCollection(ctx context.Context, collection string) ([]domain.ChunkID, error)
 }
 
-// VectorEntry pairs a chunk identity with its vector for indexing.
+// VectorEntry pairs a chunk identity with its vector for indexing. Metadata is
+// the chunk's document-level attributes, carried on the entry so the index can
+// apply a --where filter during Search without reaching into the
+// DocumentRepository (the two are separate ports, possibly separate engines).
 type VectorEntry struct {
-	ChunkID domain.ChunkID
-	Vector  []float32
+	ChunkID  domain.ChunkID
+	Vector   []float32
+	Metadata domain.Metadata
 }
 
 // VectorIndex stores and searches vectors. It is deliberately dumb: space
@@ -100,11 +104,14 @@ type VectorEntry struct {
 // Semantics:
 //   - Upsert replaces entries with the same ChunkID.
 //   - Search returns up to k matches, best first (higher score = more
-//     similar). Unknown collection or k <= 0 yields no matches, no error.
+//     similar), considering only entries whose Metadata satisfies filter; the
+//     filter is applied before the top-k cut, so the result is exact (no
+//     over-fetch). The zero Predicate matches every entry, i.e. no filtering.
+//     Unknown collection or k <= 0 yields no matches, no error.
 //   - Delete of absent IDs is a no-op.
 type VectorIndex interface {
 	Upsert(ctx context.Context, collection string, entries []VectorEntry) error
-	Search(ctx context.Context, collection string, query []float32, k int) ([]domain.VectorMatch, error)
+	Search(ctx context.Context, collection string, query []float32, k int, filter domain.Predicate) ([]domain.VectorMatch, error)
 	// Entries returns every stored (ChunkID, Vector) for the collection, in
 	// unspecified order, as copies the caller may retain. An unknown collection
 	// yields no entries and no error (mirrors Search). It feeds a collection's

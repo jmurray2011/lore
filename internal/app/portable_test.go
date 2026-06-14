@@ -28,6 +28,7 @@ func seedExportable(t *testing.T, colls *fakeCollections, docs *fakeDocs, idx *f
 		t.Fatal(err)
 	}
 	doc.Fingerprint = "fp-a"
+	doc.Metadata = domain.Metadata{"author": "alice", "tags": "security,compliance"}
 	c0 := domain.Chunk{ID: domain.DeriveChunkID(doc.ID, 0), DocumentID: doc.ID, Seq: 0, Text: "alpha", HeadingPath: "Intro"}
 	c1 := domain.Chunk{ID: domain.DeriveChunkID(doc.ID, 1), DocumentID: doc.ID, Seq: 1, Text: "beta"}
 	if err := docs.Upsert(ctx, doc, []domain.Chunk{c0, c1}); err != nil {
@@ -100,6 +101,26 @@ func TestExportImportRoundTrip(t *testing.T) {
 	}
 	if !slices.Equal(byID[chunks[0].ID], []float32{1, 0, 0}) || !slices.Equal(byID[chunks[1].ID], []float32{0, 1, 0}) {
 		t.Errorf("vectors not preserved: %v", byID)
+	}
+
+	// Metadata round-trips on the document...
+	gotDoc, err := dstDocs.GetBySource(ctx, "kb", "file:///docs/a.md")
+	if err != nil {
+		t.Fatalf("GetBySource imported: %v", err)
+	}
+	if gotDoc.Metadata["author"] != "alice" || gotDoc.Metadata["tags"] != "security,compliance" {
+		t.Errorf("document metadata not preserved: %v", gotDoc.Metadata)
+	}
+	// ...and on the imported vector entries, so --where works against the import.
+	// (gotEntries records the entries as upserted, including metadata, which the
+	// fake's Entries reconstruction does not retain.)
+	if len(dstIdx.gotEntries) != 2 {
+		t.Fatalf("want 2 upserted entries, got %d", len(dstIdx.gotEntries))
+	}
+	for _, e := range dstIdx.gotEntries {
+		if e.Metadata["author"] != "alice" {
+			t.Errorf("vector entry %s lost metadata on import: %v", e.ChunkID, e.Metadata)
+		}
 	}
 }
 

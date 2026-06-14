@@ -28,6 +28,7 @@ func newQueryCmd(deps *Deps) *cobra.Command {
 	var (
 		k          int
 		source     string
+		where      []string
 		explain    bool
 		rerank     bool
 		candidates int
@@ -45,8 +46,12 @@ func newQueryCmd(deps *Deps) *cobra.Command {
 			"queries (no re-embedding) and results are grouped by source chunk — for finding where " +
 			"two collections overlap or diverge.",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			filter, err := domain.ParseWhere(where)
+			if err != nil {
+				return err
+			}
 			if fromColl != "" {
-				return runQueryFrom(cmd, deps, args, fromColl, collFlags, k, source)
+				return runQueryFrom(cmd, deps, args, fromColl, collFlags, k, source, filter)
 			}
 
 			collections, queryText, err := resolveCollectionArgs(args, collFlags, "query", "query string")
@@ -58,7 +63,7 @@ func newQueryCmd(deps *Deps) *cobra.Command {
 				return err
 			}
 
-			hits, runnerUp, err := resolveHits(cmd, deps, collections, queryText, k, candidates, source, rerank, explain)
+			hits, runnerUp, err := resolveHits(cmd, deps, collections, queryText, k, candidates, source, filter, rerank, explain)
 			if err != nil {
 				return err
 			}
@@ -81,6 +86,7 @@ func newQueryCmd(deps *Deps) *cobra.Command {
 	}
 	cmd.Flags().IntVarP(&k, "top-k", "k", 8, "number of chunks to retrieve (the final count after --rerank)")
 	cmd.Flags().StringVar(&source, "source", "", "restrict to documents whose source matches this glob (e.g. '*.pdf')")
+	cmd.Flags().StringArrayVar(&where, "where", nil, "filter to documents whose metadata matches this predicate, e.g. 'author=alice' or 'date>=2025-01-01' (repeatable; ANDed)")
 	cmd.Flags().BoolVar(&explain, "explain", false, "print the score distribution (top-k + the best rejected candidate) to stderr")
 	cmd.Flags().BoolVar(&rerank, "rerank", false, "two-stage retrieval: vector-search a wide pool, then rerank to the top -k")
 	cmd.Flags().IntVar(&candidates, "rerank-candidates", 50, "size of the pre-rerank vector candidate pool (must be >= -k)")
@@ -93,14 +99,14 @@ func newQueryCmd(deps *Deps) *cobra.Command {
 // runQueryFrom handles `query <target> --from-collection <source>`: the target
 // is the sole positional, there is no query text (and no stdin), and -c is not
 // allowed — the source collection's stored vectors are the queries.
-func runQueryFrom(cmd *cobra.Command, deps *Deps, args []string, fromColl string, collFlags []string, k int, source string) error {
+func runQueryFrom(cmd *cobra.Command, deps *Deps, args []string, fromColl string, collFlags []string, k int, source string, filter domain.Predicate) error {
 	if len(collFlags) > 0 {
 		return fmt.Errorf("%w: --from-collection cannot be combined with -c/--collection", domain.ErrInvalidArgument)
 	}
 	if len(args) != 1 {
 		return fmt.Errorf("%w: query --from-collection takes the target <collection> and no query text", domain.ErrInvalidArgument)
 	}
-	groups, err := deps.Query.QueryFrom(cmd.Context(), args[0], fromColl, k, source)
+	groups, err := deps.Query.QueryFrom(cmd.Context(), args[0], fromColl, k, source, filter)
 	if err != nil {
 		return err
 	}
@@ -137,7 +143,7 @@ func budgetTrim(hits []domain.ChunkHit, budget int, counter app.TokenCounter) ([
 // origin collection). It returns the hits plus, for --explain, the runner-up
 // score (the best candidate just outside the returned set, by whichever ordering
 // is in effect — rerank score when reranking, similarity otherwise).
-func resolveHits(cmd *cobra.Command, deps *Deps, collections []string, queryText string, k, candidates int, source string, rerank, explain bool) ([]domain.ChunkHit, *float64, error) {
+func resolveHits(cmd *cobra.Command, deps *Deps, collections []string, queryText string, k, candidates int, source string, filter domain.Predicate, rerank, explain bool) ([]domain.ChunkHit, *float64, error) {
 	if rerank {
 		if deps.Rerank == nil {
 			return nil, nil, errRerankUnconfigured()
@@ -145,7 +151,7 @@ func resolveHits(cmd *cobra.Command, deps *Deps, collections []string, queryText
 		if candidates < k {
 			return nil, nil, fmt.Errorf("%w: --rerank-candidates (%d) must be >= -k (%d)", domain.ErrInvalidArgument, candidates, k)
 		}
-		pool, err := queryHits(cmd, deps, collections, queryText, candidates, source)
+		pool, err := queryHits(cmd, deps, collections, queryText, candidates, source, filter)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -170,32 +176,32 @@ func resolveHits(cmd *cobra.Command, deps *Deps, collections []string, queryText
 		return reranked, runnerUp, nil
 	}
 	if explain {
-		ret, err := explainHits(cmd, deps, collections, queryText, k, source)
+		ret, err := explainHits(cmd, deps, collections, queryText, k, source, filter)
 		if err != nil {
 			return nil, nil, err
 		}
 		return ret.Hits, nextScorePtr(ret), nil
 	}
-	hits, err := queryHits(cmd, deps, collections, queryText, k, source)
+	hits, err := queryHits(cmd, deps, collections, queryText, k, source, filter)
 	return hits, nil, err
 }
 
 // queryHits retrieves the top-k hits for one collection (the byte-for-byte
 // legacy path) or merges across several same-space collections.
-func queryHits(cmd *cobra.Command, deps *Deps, collections []string, queryText string, k int, source string) ([]domain.ChunkHit, error) {
+func queryHits(cmd *cobra.Command, deps *Deps, collections []string, queryText string, k int, source string, filter domain.Predicate) ([]domain.ChunkHit, error) {
 	if len(collections) > 1 {
-		return deps.Query.QueryAcross(cmd.Context(), collections, queryText, k, source)
+		return deps.Query.QueryAcross(cmd.Context(), collections, queryText, k, source, filter)
 	}
-	return deps.Query.Query(cmd.Context(), collections[0], queryText, k, source)
+	return deps.Query.Query(cmd.Context(), collections[0], queryText, k, source, filter)
 }
 
 // explainHits is queryHits' --explain twin: it also surfaces the runner-up just
 // outside the returned top-k, single- or multi-collection.
-func explainHits(cmd *cobra.Command, deps *Deps, collections []string, queryText string, k int, source string) (app.Retrieval, error) {
+func explainHits(cmd *cobra.Command, deps *Deps, collections []string, queryText string, k int, source string, filter domain.Predicate) (app.Retrieval, error) {
 	if len(collections) > 1 {
-		return deps.Query.ExplainAcross(cmd.Context(), collections, queryText, k, source)
+		return deps.Query.ExplainAcross(cmd.Context(), collections, queryText, k, source, filter)
 	}
-	return deps.Query.Explain(cmd.Context(), collections[0], queryText, k, source)
+	return deps.Query.Explain(cmd.Context(), collections[0], queryText, k, source, filter)
 }
 
 // resolveCollectionArgs derives the target collection set and the query/question
@@ -246,7 +252,7 @@ func hitViews(hits []domain.ChunkHit) ([]hitView, string) {
 	views := make([]hitView, len(hits))
 	var b strings.Builder
 	for i, h := range hits {
-		views[i] = hitView{ChunkID: string(h.Chunk.ID), Source: h.Source, Seq: h.Chunk.Seq, Score: h.Score, RerankScore: h.RerankScore, Collection: h.Collection, Text: h.Chunk.Text}
+		views[i] = hitView{ChunkID: string(h.Chunk.ID), Source: h.Source, Seq: h.Chunk.Seq, Score: h.Score, RerankScore: h.RerankScore, Collection: h.Collection, Metadata: h.Metadata, Text: h.Chunk.Text}
 		if i > 0 {
 			b.WriteString("\n---\n\n")
 		}
@@ -316,6 +322,7 @@ func newAskCmd(deps *Deps) *cobra.Command {
 		attach       []string
 		strict       bool
 		source       string
+		where        []string
 		expand       bool
 		explain      bool
 		rerank       bool
@@ -334,6 +341,10 @@ func newAskCmd(deps *Deps) *cobra.Command {
 			"collection. Composes with --rerank, --budget, and --explain over the merged set.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			attachments, err := loadAttachments(attach)
+			if err != nil {
+				return err
+			}
+			filter, err := domain.ParseWhere(where)
 			if err != nil {
 				return err
 			}
@@ -366,7 +377,7 @@ func newAskCmd(deps *Deps) *cobra.Command {
 				// --budget, then synthesize — streaming the prose when enabled. Uses
 				// the Synthesize seam and replicates Ask's strict guard, which it lacks.
 				var hits []domain.ChunkHit
-				hits, runnerUp, err = resolveHits(cmd, deps, collections, question, k, candidates, source, rerank, explain)
+				hits, runnerUp, err = resolveHits(cmd, deps, collections, question, k, candidates, source, filter, rerank, explain)
 				if err != nil {
 					return err
 				}
@@ -392,10 +403,10 @@ func newAskCmd(deps *Deps) *cobra.Command {
 				}
 				ret.Hits = hits
 			case explain:
-				ans, ret, err = deps.Ask.AskExplain(cmd.Context(), collections[0], question, k, attachments, strict, source)
+				ans, ret, err = deps.Ask.AskExplain(cmd.Context(), collections[0], question, k, attachments, strict, source, filter)
 				runnerUp = nextScorePtr(ret)
 			default:
-				ans, err = deps.Ask.Ask(cmd.Context(), collections[0], question, k, attachments, strict, source)
+				ans, err = deps.Ask.Ask(cmd.Context(), collections[0], question, k, attachments, strict, source, filter)
 			}
 			if err != nil {
 				return err // strict's ErrNoGrounding short-circuits here, before any expansion or explain output
@@ -466,6 +477,7 @@ func newAskCmd(deps *Deps) *cobra.Command {
 	cmd.Flags().StringArrayVar(&attach, "attach", nil, "file to send to the model as an attachment (repeatable)")
 	cmd.Flags().BoolVar(&strict, "strict", false, "fail (exit 1) instead of answering when nothing grounds the question")
 	cmd.Flags().StringVar(&source, "source", "", "restrict grounding to documents whose source matches this glob (e.g. '*.pdf')")
+	cmd.Flags().StringArrayVar(&where, "where", nil, "restrict grounding to documents whose metadata matches this predicate, e.g. 'author=alice' (repeatable; ANDed)")
 	cmd.Flags().BoolVar(&expand, "expand", false, "append the full text of each cited chunk after the answer")
 	cmd.Flags().BoolVar(&explain, "explain", false, "print the retrieval score distribution to stderr (the answer's explain key under --json)")
 	cmd.Flags().BoolVar(&rerank, "rerank", false, "two-stage retrieval: vector-search a wide pool, then rerank to the top -k before synthesis")
