@@ -11,7 +11,7 @@ import (
 type DocumentID string
 
 // Document is source content with identity. Whether its content *changed*
-// is decided by Hash (invariant 2: hash equality => ingestion is a no-op).
+// is decided by Hash (hash equality => ingestion is a no-op).
 type Document struct {
 	ID         DocumentID
 	Collection string

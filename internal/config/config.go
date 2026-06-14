@@ -1,7 +1,7 @@
 // Package config loads lore's typed configuration with the precedence
 // flags > env (LORE_*) > file (TOML) > defaults, and builds the slog logger.
 // It is loaded once in the composition root and passed down as values; nothing
-// reads configuration globally (DESIGN.md).
+// reads configuration globally.
 package config
 
 import (
@@ -88,7 +88,7 @@ type Storage struct {
 // Provider configures the OpenAI-compatible backend. The bare connection fields
 // (BaseURL/APIKey/Auth/Timeout) are the shared default for both the embed and
 // chat roles; the Embed*/Chat* fields optionally override them per role so one
-// process can embed against one endpoint and chat against another (decision 60).
+// process can embed against one endpoint and chat against another.
 // Resolve a role's effective connection with EmbedConnection / ChatConnection.
 type Provider struct {
 	BaseURL    string
@@ -97,12 +97,12 @@ type Provider struct {
 	Dimensions int
 	ChatModel  string
 	// Auth selects how the API key is sent: "bearer" (OpenAI default) or
-	// "api-key" (Azure OpenAI's header, decision 21).
+	// "api-key" (Azure OpenAI's header).
 	Auth string
 	// Timeout bounds each HTTP request to the provider (per attempt, so retries
 	// each get the full budget). Zero disables it. Guards against a hung
 	// provider blocking forever in non-interactive use (CI, scripts), where
-	// there is no SIGINT to cancel the request context (decision 36).
+	// there is no SIGINT to cancel the request context.
 	Timeout time.Duration
 	// EmbedBaseURL/EmbedAPIKey/EmbedAuth/EmbedTimeout override the shared
 	// connection for the embedding role only; an empty (zero) field inherits the
@@ -120,11 +120,11 @@ type Provider struct {
 	ChatTimeout time.Duration
 	// StructuredOutput declares that the provider supports JSON-schema
 	// (response_format) output. Off by default so lore works against any
-	// OpenAI-compatible endpoint; enable it for providers that support it
-	// (decision 19). A chat-role property.
+	// OpenAI-compatible endpoint; enable it for providers that support it.
+	// A chat-role property.
 	StructuredOutput bool
 	// ImageInput / DocumentInput declare that the provider accepts image /
-	// document attachments (decision 20). Off by default; `ask --attach`
+	// document attachments. Off by default; `ask --attach`
 	// errors for an attachment whose capability is off. Chat-role properties.
 	ImageInput    bool
 	DocumentInput bool

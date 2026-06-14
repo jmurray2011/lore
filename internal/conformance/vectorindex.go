@@ -1,7 +1,7 @@
 // Package conformance contains executable contracts for the ports defined in
 // internal/app. Every adapter must pass the suite for each port it
 // implements; behavior questions are settled by adding cases here, never by
-// adapter-specific convention (DESIGN.md).
+// adapter-specific convention.
 package conformance
 
 import (

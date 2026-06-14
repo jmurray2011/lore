@@ -18,7 +18,18 @@ import (
 	"fmt"
 	"io"
 	"time"
+
+	"github.com/jmurray2011/lore/internal/limitio"
 )
+
+// maxArtifactBytes caps how many bytes Read will pull from an untrusted artifact
+// stream. Importing an artifact crosses a trust boundary (it may be handed off
+// or shipped), and encoding/gob is explicitly not hardened against adversarial
+// input. gob reads incrementally (saferio), so bounding the reader keeps decode
+// memory proportional to the bytes actually consumed rather than to an
+// attacker-declared length. It is a var, not a const, only so tests can lower
+// it.
+var maxArtifactBytes int64 = 1 << 30
 
 const (
 	// Magic prefixes every artifact, distinguishing it from random bytes and from
@@ -122,7 +133,7 @@ func Read(r io.Reader) (Bundle, error) {
 		return Bundle{}, fmt.Errorf("%w: artifact is version %d, this lore understands up to %d", ErrUnsupportedVersion, v, FormatVersion)
 	}
 	var b Bundle
-	if err := gob.NewDecoder(r).Decode(&b); err != nil {
+	if err := gob.NewDecoder(limitio.Reader(r, maxArtifactBytes)).Decode(&b); err != nil {
 		return Bundle{}, fmt.Errorf("artifact: decode: %w", err)
 	}
 	return b, nil

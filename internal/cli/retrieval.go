@@ -15,7 +15,14 @@ import (
 
 	"github.com/jmurray2011/lore/internal/app"
 	"github.com/jmurray2011/lore/internal/domain"
+	"github.com/jmurray2011/lore/internal/limitio"
 )
+
+// maxAttachmentBytes caps a single attachment read. An attachment is base64-
+// inflated into a provider request, so an oversized file is refused up front
+// rather than ballooning memory and the request body. It is a var, not a const,
+// only so tests can lower it.
+var maxAttachmentBytes int64 = 64 << 20
 
 func newQueryCmd(deps *Deps) *cobra.Command {
 	var (
@@ -629,7 +636,7 @@ func loadAttachments(paths []string) ([]domain.Attachment, error) {
 		if mediaType == "" {
 			return nil, fmt.Errorf("%w: cannot determine media type of %q from its extension", domain.ErrInvalidArgument, path)
 		}
-		data, err := os.ReadFile(path)
+		data, err := readCappedFile(path, maxAttachmentBytes)
 		if err != nil {
 			return nil, fmt.Errorf("read attachment %q: %w", path, err)
 		}
@@ -640,4 +647,14 @@ func loadAttachments(paths []string) ([]domain.Attachment, error) {
 		attachments = append(attachments, a)
 	}
 	return attachments, nil
+}
+
+// readCappedFile reads the whole file at path, failing if it exceeds max bytes.
+func readCappedFile(path string, max int64) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	return limitio.ReadAll(f, max)
 }

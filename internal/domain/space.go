@@ -4,7 +4,7 @@ import "fmt"
 
 // EmbeddingSpace identifies the vector space a Collection is bound to:
 // the embedding model plus its output dimensionality. Two vectors are
-// comparable only if they come from the same space (invariant 1, DESIGN.md).
+// comparable only if they come from the same space.
 type EmbeddingSpace struct {
 	Model      string
 	Dimensions int

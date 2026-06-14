@@ -19,7 +19,7 @@ import (
 func TestEmbedderHonorsClientTimeout(t *testing.T) {
 	// The handler hangs until the test ends, so the only way Embed returns is
 	// the http.Client's timeout firing — the protection against a provider that
-	// accepts a connection then never responds (decision 36).
+	// accepts a connection then never responds.
 	release := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		<-release

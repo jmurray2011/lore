@@ -13,7 +13,7 @@ import (
 // DocumentRepository is a thread-safe, in-memory store of Documents and their
 // Chunks. Chunk data lives in byChunkID (the source of truth for GetChunks);
 // docChunks tracks each document's chunk IDs so Upsert can replace and Delete
-// can cascade (invariant 3). Values are stored and returned by copy.
+// can cascade. Values are stored and returned by copy.
 type DocumentRepository struct {
 	mu        sync.RWMutex
 	docs      map[domain.DocumentID]domain.Document

@@ -19,7 +19,7 @@ type SyncSummary struct {
 }
 
 // Syncer brings a collection into line with its source(s). It re-ingests
-// (add/update, idempotently — invariant 2) and, when prune is set, removes
+// (add/update, idempotently) and, when prune is set, removes
 // documents whose source files no longer exist. With no paths it replays the
 // sources the collection remembers from prior add/sync runs.
 type Syncer struct {

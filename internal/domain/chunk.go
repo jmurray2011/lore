@@ -6,7 +6,7 @@ import (
 )
 
 // ChunkID is deterministic, derived from (DocumentID, Seq), so re-chunking an
-// unchanged document yields identical identities (supports invariant 2).
+// unchanged document yields identical identities, keeping ingestion idempotent.
 type ChunkID string
 
 // Valid reports whether id has the canonical shape produced by DeriveChunkID: a
@@ -32,7 +32,7 @@ func (id ChunkID) Valid() bool {
 }
 
 // Chunk is the unit of retrieval. It belongs to exactly one Document
-// (invariant 3: deleting the Document deletes its Chunks).
+// (deleting the Document deletes its Chunks).
 type Chunk struct {
 	ID         ChunkID
 	DocumentID DocumentID

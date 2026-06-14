@@ -11,7 +11,7 @@ import (
 // embedded. Any of these changing alters chunk output (boundaries, count, or
 // embedded text) for the same input, so a Collection records its spec at
 // creation and refuses re-ingestion under a different one — the chunker
-// analogue of space coherence (invariant 1). It is comparable with ==.
+// analogue of space coherence. It is comparable with ==.
 type ChunkerSpec struct {
 	Strategy      string // "structure" | "fixed"
 	Version       int    // strategy algorithm version; bump when output could change for the same input

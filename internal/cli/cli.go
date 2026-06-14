@@ -1,6 +1,6 @@
 // Package cli is lore's driving adapter: it translates cobra commands into use
 // case calls and renders results. stdout carries data (human text, or JSON with
-// --json); logs and errors go to stderr (DESIGN.md). It holds no business logic
+// --json); logs and errors go to stderr. It holds no business logic
 // and imports no storage/provider adapters — the composition root wires those
 // into Deps.
 package cli
@@ -134,7 +134,7 @@ func flagBool(cmd *cobra.Command, name string) bool {
 	return v
 }
 
-// ExitCode maps a command error to a lore exit code (DESIGN.md): 0 ok,
+// ExitCode maps a command error to a lore exit code: 0 ok,
 // 1 runtime, 2 usage, 3 not found, 4 invariant violation.
 func ExitCode(err error) int {
 	switch {

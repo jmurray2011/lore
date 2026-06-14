@@ -6,12 +6,11 @@ import (
 	"time"
 )
 
-// collectionNameRE: non-empty, filesystem- and shell-safe, max 64 chars
-// (invariant 4, DESIGN.md).
+// collectionNameRE: non-empty, filesystem- and shell-safe, max 64 chars.
 var collectionNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 
-// ValidateCollectionName reports whether name satisfies invariant 4 (non-empty,
-// filesystem- and shell-safe, max 64 chars). It is the shared rule behind
+// ValidateCollectionName reports whether name is non-empty,
+// filesystem- and shell-safe, and at most 64 chars. It is the shared rule behind
 // NewCollection and the import path, which reconstructs a (possibly renamed)
 // collection from an artifact and must validate the target name without building
 // a full collection.
@@ -52,7 +51,7 @@ func NewCollection(name string, space EmbeddingSpace, chunker ChunkerSpec, now t
 	return &Collection{Name: name, Space: space, Chunker: chunker, CreatedAt: now}, nil
 }
 
-// SameSpace enforces invariant 1 across a set of collections: their vectors are
+// SameSpace enforces space coherence across a set of collections: their vectors are
 // directly comparable only if every collection shares one EmbeddingSpace. It is
 // the precondition for any cross-collection retrieval — feeding one collection's
 // vectors into another (query --from-collection) or merging hits from several
@@ -73,7 +72,7 @@ func SameSpace(colls []*Collection) error {
 	return nil
 }
 
-// AcceptsSpace enforces invariant 1 (space coherence): vectors may enter the
+// AcceptsSpace enforces space coherence: vectors may enter the
 // collection only if they were produced in the collection's own space.
 func (c *Collection) AcceptsSpace(s EmbeddingSpace) error {
 	if !c.Space.Equal(s) {

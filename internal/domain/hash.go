@@ -6,7 +6,7 @@ import (
 )
 
 // ContentHash is the SHA-256 of document content, hex-encoded.
-// Hash equality is what makes ingestion idempotent (invariant 2, DESIGN.md).
+// Hash equality is what makes ingestion idempotent.
 type ContentHash string
 
 // HashContent computes the ContentHash of raw content.

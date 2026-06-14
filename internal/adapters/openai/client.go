@@ -1,7 +1,7 @@
 // Package openai adapts the Embedder and Generator ports to any
 // OpenAI-compatible HTTP API (OpenAI, Ollama's /v1, vLLM, LM Studio,
 // OpenRouter). Configuration is a base URL, an optional API key, and model
-// names (DESIGN.md, decision 3). The HTTP plumbing (POST, retry, auth) lives in
+// names. The HTTP plumbing (POST, retry, auth) lives in
 // the shared internal/adapters/httpjson package.
 package openai
 

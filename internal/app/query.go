@@ -48,7 +48,7 @@ type FromQuery struct {
 }
 
 // Query embeds the question and returns up to k ChunkHits from the collection,
-// best match first. It enforces space coherence (invariant 1): the embedder
+// best match first. It enforces space coherence: the embedder
 // must produce vectors in the collection's space, or it fails with
 // ErrSpaceMismatch before touching the index.
 //
@@ -254,7 +254,7 @@ func (q *Querier) retrieveAcross(ctx context.Context, names []string, query stri
 	return splitTopK(hits, k), nil
 }
 
-// embedQuery enforces space coherence (invariant 1) then embeds the query in the
+// embedQuery enforces space coherence then embeds the query in the
 // collection's space, returning the single query vector. It fails with
 // ErrSpaceMismatch before embedding if the embedder's space differs.
 func (q *Querier) embedQuery(ctx context.Context, query string, coll *domain.Collection) ([]float32, error) {

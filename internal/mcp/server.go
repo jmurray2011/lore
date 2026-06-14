@@ -172,7 +172,12 @@ func (s *Server) ServeHTTP(ctx context.Context, addr, token string) error {
 // bearer-token check when token is non-empty. The same getServer closure serves
 // every request from the one warm server.
 func (s *Server) httpHandler(token string) http.Handler {
-	handler := mcpsdk.NewStreamableHTTPHandler(func(*http.Request) *mcpsdk.Server { return s.mcp }, nil)
+	var handler http.Handler = mcpsdk.NewStreamableHTTPHandler(func(*http.Request) *mcpsdk.Server { return s.mcp }, nil)
+	// Defense-in-depth CSRF / DNS-rebinding guard: reject state-changing
+	// requests a browser marks as cross-origin. Non-browser MCP clients send no
+	// Sec-Fetch-Site/Origin and pass through; the SDK's own localhost
+	// (Host-header) protection stays in force independently.
+	handler = http.NewCrossOriginProtection().Handler(handler)
 	if token == "" {
 		return handler
 	}
