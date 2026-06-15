@@ -485,6 +485,142 @@ func TestCLIStatusDocCount(t *testing.T) {
 	}
 }
 
+// TestCLIDocSelectorResolution exercises the human-friendly --doc selector end to
+// end through the cat and rm commands: a basename resolves to its full URI, an
+// ambiguous selector is a usage error, and an unmatched one is not-found.
+func TestCLIDocSelectorResolution(t *testing.T) {
+	seed := func(t *testing.T) cli.Deps {
+		t.Helper()
+		deps, _, docs, _ := newDeps(stubEmbedder{space: testSpace()}, stubGenerator{})
+		if _, code := exec(deps, "init", "docs"); code != 0 {
+			t.Fatal("init failed")
+		}
+		ctx := context.Background()
+		for _, uri := range []string{"file:///corpus/ssp-v1.md", "file:///corpus/ssp-v2.md", "file:///corpus/notes/readme.md"} {
+			doc, err := domain.NewDocument("docs", uri, domain.HashContent([]byte(uri)), time.Now())
+			if err != nil {
+				t.Fatal(err)
+			}
+			c, _ := domain.NewChunk(domain.DeriveDocumentID("docs", uri), 0, "body of "+uri)
+			if err := docs.Upsert(ctx, doc, []domain.Chunk{c}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return deps
+	}
+
+	t.Run("cat resolves a unique basename to the full URI", func(t *testing.T) {
+		out, code := exec(seed(t), "cat", "docs", "--doc", "readme.md", "--json")
+		if code != 0 {
+			t.Fatalf("cat --doc readme.md exit %d, out %q", code, out)
+		}
+		var got []chunkViewJSON
+		if err := json.Unmarshal([]byte(out), &got); err != nil {
+			t.Fatalf("bad JSON %q: %v", out, err)
+		}
+		if len(got) != 1 || got[0].Text != "body of file:///corpus/notes/readme.md" {
+			t.Errorf("resolved to the wrong document: %+v", got)
+		}
+	})
+
+	t.Run("cat with an ambiguous selector is a usage error", func(t *testing.T) {
+		if _, code := exec(seed(t), "cat", "docs", "--doc", "ssp"); code != 2 {
+			t.Errorf("ambiguous --doc should exit 2, got %d", code)
+		}
+	})
+
+	t.Run("cat with an unmatched selector is not-found", func(t *testing.T) {
+		if _, code := exec(seed(t), "cat", "docs", "--doc", "nonesuch.md"); code != 3 {
+			t.Errorf("unmatched --doc should exit 3, got %d", code)
+		}
+	})
+
+	t.Run("rm resolves a basename and removes that document", func(t *testing.T) {
+		deps := seed(t)
+		if _, code := exec(deps, "rm", "docs", "--doc", "readme.md"); code != 0 {
+			t.Fatalf("rm --doc readme.md exit %d", code)
+		}
+		// Gone: the same selector no longer resolves.
+		if _, code := exec(deps, "cat", "docs", "--doc", "readme.md"); code != 3 {
+			t.Errorf("removed document should be not-found, got exit %d", code)
+		}
+		// Siblings survive.
+		if _, code := exec(deps, "cat", "docs", "--doc", "ssp-v1.md"); code != 0 {
+			t.Errorf("sibling document should remain, got exit %d", code)
+		}
+	})
+}
+
+func TestCLIDiff(t *testing.T) {
+	deps, _, docs, _ := newDeps(stubEmbedder{space: testSpace()}, stubGenerator{})
+	ctx := context.Background()
+	for _, code := range []string{"old", "new"} {
+		if _, c := exec(deps, "init", code); c != 0 {
+			t.Fatalf("init %s failed", code)
+		}
+	}
+	seed := func(collection, uri, content string) {
+		doc, err := domain.NewDocument(collection, uri, domain.HashContent([]byte(content)), time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		c, _ := domain.NewChunk(domain.DeriveDocumentID(collection, uri), 0, content)
+		if err := docs.Upsert(ctx, doc, []domain.Chunk{c}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seed("old", "file:///a.md", "a1")
+	seed("old", "file:///shared.md", "v1")
+	seed("old", "file:///gone.md", "g")
+	seed("new", "file:///a.md", "a1")
+	seed("new", "file:///shared.md", "v2")
+	seed("new", "file:///added.md", "x")
+
+	t.Run("reports added/removed/changed as JSON", func(t *testing.T) {
+		out, code := exec(deps, "diff", "old", "new", "--json")
+		if code != 0 {
+			t.Fatalf("diff exit %d, out %q", code, out)
+		}
+		var got diffViewJSON
+		if err := json.Unmarshal([]byte(out), &got); err != nil {
+			t.Fatalf("bad JSON %q: %v", out, err)
+		}
+		if len(got.Added) != 1 || got.Added[0].Source != "file:///added.md" {
+			t.Errorf("Added = %+v", got.Added)
+		}
+		if len(got.Removed) != 1 || got.Removed[0].Source != "file:///gone.md" {
+			t.Errorf("Removed = %+v", got.Removed)
+		}
+		if len(got.Changed) != 1 || got.Changed[0].Source != "file:///shared.md" {
+			t.Errorf("Changed = %+v", got.Changed)
+		}
+	})
+
+	t.Run("human output names the changed documents", func(t *testing.T) {
+		out, code := exec(deps, "diff", "old", "new")
+		if code != 0 {
+			t.Fatalf("diff exit %d", code)
+		}
+		for _, want := range []string{"added.md", "gone.md", "shared.md"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("human output missing %q: %q", want, out)
+			}
+		}
+	})
+
+	t.Run("an unknown collection exits 3", func(t *testing.T) {
+		if _, code := exec(deps, "diff", "old", "ghost"); code != 3 {
+			t.Errorf("want exit 3, got %d", code)
+		}
+	})
+
+	t.Run("wrong arity is a usage error", func(t *testing.T) {
+		if _, code := exec(deps, "diff", "old"); code != 2 {
+			t.Errorf("want exit 2, got %d", code)
+		}
+	})
+}
+
 func TestCLIDocs(t *testing.T) {
 	deps, _, docs, _ := newDeps(stubEmbedder{space: testSpace()}, stubGenerator{})
 	if _, code := exec(deps, "init", "docs"); code != 0 {
@@ -1985,6 +2121,52 @@ func TestCLIAddCountsUnsupportedSeparately(t *testing.T) {
 	}
 }
 
+func TestCLIAddExclude(t *testing.T) {
+	setup := func(t *testing.T) (cli.Deps, string) {
+		t.Helper()
+		deps, _, _, _ := newDeps(stubEmbedder{space: testSpace(), vec: []float32{1, 0, 0}}, stubGenerator{})
+		dir := t.TempDir()
+		for _, name := range []string{"keep.txt", "also-keep.txt", "Tenant2 (1).txt"} {
+			if err := os.WriteFile(filepath.Join(dir, name), []byte("hello grounded world"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, code := exec(deps, "init", "docs"); code != 0 {
+			t.Fatal("init failed")
+		}
+		return deps, dir
+	}
+
+	t.Run("excludes matching files and reports the count", func(t *testing.T) {
+		deps, dir := setup(t)
+		out, code := exec(deps, "add", "docs", dir, "--exclude", "*(1)*", "--json")
+		if code != 0 {
+			t.Fatalf("add --exclude exit %d, out %q", code, out)
+		}
+		var sum ingestViewJSON
+		if err := json.Unmarshal([]byte(out), &sum); err != nil {
+			t.Fatalf("bad JSON %q: %v", out, err)
+		}
+		if sum.Added != 2 || sum.Excluded != 1 {
+			t.Errorf("want Added 2 Excluded 1, got %+v", sum)
+		}
+	})
+
+	t.Run("a malformed glob is a usage error", func(t *testing.T) {
+		deps, dir := setup(t)
+		if _, code := exec(deps, "add", "docs", dir, "--exclude", "[bad"); code != 2 {
+			t.Errorf("malformed --exclude should exit 2, got %d", code)
+		}
+	})
+
+	t.Run("--exclude with --stdin is a usage error", func(t *testing.T) {
+		deps, _ := setup(t)
+		if _, code := execStdin(deps, "piped", "add", "docs", "--stdin", "--exclude", "*.tmp"); code != 2 {
+			t.Errorf("--exclude with --stdin should exit 2, got %d", code)
+		}
+	})
+}
+
 func TestCLIStdinInput(t *testing.T) {
 	qvec := []float32{1, 0, 0}
 
@@ -2991,6 +3173,24 @@ type fromGroupViewJSON struct {
 	Hits []hitViewJSON `json:"hits"`
 }
 
+type diffViewJSON struct {
+	From  string `json:"from"`
+	To    string `json:"to"`
+	Added []struct {
+		Source string `json:"source"`
+		Hash   string `json:"hash"`
+	} `json:"added"`
+	Removed []struct {
+		Source string `json:"source"`
+		Hash   string `json:"hash"`
+	} `json:"removed"`
+	Changed []struct {
+		Source string `json:"source"`
+		From   string `json:"from"`
+		To     string `json:"to"`
+	} `json:"changed"`
+}
+
 type answerViewJSON struct {
 	Text      string `json:"text"`
 	Citations []struct {
@@ -3025,6 +3225,7 @@ type ingestViewJSON struct {
 	Added       int `json:"added"`
 	Skipped     int `json:"skipped"`
 	Unsupported int `json:"unsupported"`
+	Excluded    int `json:"excluded"`
 	Chunks      int `json:"chunks"`
 }
 

@@ -266,6 +266,31 @@ func TestIngestor(t *testing.T) {
 		}
 	})
 
+	t.Run("WithExclude skips matching documents and counts them", func(t *testing.T) {
+		coll := mustCollection(t, "docs", space)
+		src := &fakeSource{items: []app.SourceItem{
+			textItem("file:///a.txt", "single chunk a"),
+			textItem("file:///b.txt", "single chunk b"),
+			textItem("file:///scratch (1).txt", "stray copy"),
+		}}
+		docs := &fakeDocs{}
+		ing := newIngestor(coll, src, &fakeExtractor{}, &fakeEmbedder{space: space}, docs, &fakeIndex{})
+
+		sum, err := ing.Ingest(ctx, "docs", "/root", app.WithExclude("*(1)*"))
+		if err != nil {
+			t.Fatalf("Ingest: %v", err)
+		}
+		if sum.Added != 2 || sum.Excluded != 1 {
+			t.Errorf("summary = %+v, want Added 2 Excluded 1", sum)
+		}
+		if _, err := docs.GetBySource(ctx, "docs", "file:///scratch (1).txt"); !errors.Is(err, app.ErrNotFound) {
+			t.Errorf("excluded document must not be stored, got %v", err)
+		}
+		if _, err := docs.GetBySource(ctx, "docs", "file:///a.txt"); err != nil {
+			t.Errorf("non-excluded document a should be stored: %v", err)
+		}
+	})
+
 	t.Run("records the source root on the collection", func(t *testing.T) {
 		coll := mustCollection(t, "docs", space)
 		colls := newFakeCollections(coll)

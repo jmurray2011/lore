@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"io"
+	"path"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -15,6 +16,7 @@ type ingestView struct {
 	Added       int `json:"added"`
 	Skipped     int `json:"skipped"`
 	Unsupported int `json:"unsupported"`
+	Excluded    int `json:"excluded"`
 	Chunks      int `json:"chunks"`
 }
 
@@ -39,10 +41,11 @@ func unsupportedClause(n int) string {
 
 func newAddCmd(deps *Deps) *cobra.Command {
 	var (
-		stdin bool
-		name  string
-		ctype string
-		meta  []string
+		stdin   bool
+		name    string
+		ctype   string
+		meta    []string
+		exclude []string
 	)
 	cmd := &cobra.Command{
 		Use:   "add <collection> <path>...  |  add <collection> --stdin",
@@ -57,10 +60,16 @@ func newAddCmd(deps *Deps) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if err := validateGlobs(exclude); err != nil {
+				return err
+			}
 
 			if stdin {
 				if len(paths) > 0 {
 					return fmt.Errorf("%w: --stdin takes no path arguments", domain.ErrInvalidArgument)
+				}
+				if len(exclude) > 0 {
+					return fmt.Errorf("%w: --exclude filters a path walk and has no effect with --stdin", domain.ErrInvalidArgument)
 				}
 				content, err := io.ReadAll(cmd.InOrStdin())
 				if err != nil {
@@ -77,14 +86,15 @@ func newAddCmd(deps *Deps) *cobra.Command {
 				return fmt.Errorf("%w: add takes at least one path (or --stdin)", domain.ErrInvalidArgument)
 			}
 			var total app.IngestSummary
-			for _, path := range paths {
-				sum, err := deps.Ingest.Ingest(cmd.Context(), collection, path, app.WithMeta(md))
+			for _, root := range paths {
+				sum, err := deps.Ingest.Ingest(cmd.Context(), collection, root, app.WithMeta(md), app.WithExclude(exclude...))
 				if err != nil {
 					return err
 				}
 				total.Added += sum.Added
 				total.Skipped += sum.Skipped
 				total.Unsupported += sum.Unsupported
+				total.Excluded += sum.Excluded
 				total.Chunks += sum.Chunks
 			}
 			return renderIngest(cmd, total)
@@ -94,7 +104,19 @@ func newAddCmd(deps *Deps) *cobra.Command {
 	cmd.Flags().StringVar(&name, "name", "stdin", "source name/URI to record for --stdin content")
 	cmd.Flags().StringVar(&ctype, "type", "text/markdown", "content type of --stdin content")
 	cmd.Flags().StringArrayVar(&meta, "meta", nil, "attach metadata key=value to ingested documents (repeatable); filter later with --where")
+	cmd.Flags().StringArrayVar(&exclude, "exclude", nil, "skip files whose name (or path) matches this glob, before reading them (repeatable); applies to path walks, not --stdin. Note: sync does not remember exclusions")
 	return cmd
+}
+
+// validateGlobs rejects a malformed --exclude pattern as a usage error, so the
+// failure is reported up front rather than silently never matching at walk time.
+func validateGlobs(globs []string) error {
+	for _, g := range globs {
+		if _, err := path.Match(g, "probe"); err != nil {
+			return fmt.Errorf("%w: bad --exclude glob %q: %v", domain.ErrInvalidArgument, g, err)
+		}
+	}
+	return nil
 }
 
 // parseMetaPairs parses repeatable --meta key=value flags into Metadata. A pair
@@ -118,10 +140,19 @@ func parseMetaPairs(pairs []string) (domain.Metadata, error) {
 
 // renderIngest renders an ingestion summary (shared by path and stdin add).
 func renderIngest(cmd *cobra.Command, sum app.IngestSummary) error {
-	view := ingestView{Added: sum.Added, Skipped: sum.Skipped, Unsupported: sum.Unsupported, Chunks: sum.Chunks}
-	human := fmt.Sprintf("Added **%d**, skipped **%d**%s — **%d** chunks.",
-		sum.Added, sum.Skipped, unsupportedClause(sum.Unsupported), sum.Chunks)
+	view := ingestView{Added: sum.Added, Skipped: sum.Skipped, Unsupported: sum.Unsupported, Excluded: sum.Excluded, Chunks: sum.Chunks}
+	human := fmt.Sprintf("Added **%d**, skipped **%d**%s%s — **%d** chunks.",
+		sum.Added, sum.Skipped, unsupportedClause(sum.Unsupported), excludedClause(sum.Excluded), sum.Chunks)
 	return render(cmd, view, human)
+}
+
+// excludedClause renders ", N excluded" only when an --exclude glob skipped
+// something, so the common (zero) case stays quiet.
+func excludedClause(n int) string {
+	if n == 0 {
+		return ""
+	}
+	return fmt.Sprintf(", **%d** excluded", n)
 }
 
 func newSyncCmd(deps *Deps) *cobra.Command {

@@ -122,6 +122,7 @@ func NewRootCommand(build Builder, version string, out, errOut io.Writer) *cobra
 		newStatusCmd(&deps),
 		newDocsCmd(&deps),
 		newCatCmd(&deps),
+		newDiffCmd(&deps),
 		newQueryCmd(&deps),
 		newAskCmd(&deps),
 		newEvalCmd(&deps),

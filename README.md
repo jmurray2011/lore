@@ -78,6 +78,7 @@ lore init notes
 
 # ingest files or directories — idempotent, safe to re-run
 lore add notes ./docs report.pdf
+lore add notes ./docs --exclude '*(1).pdf'                  # skip files by glob
 cat meeting.md | lore add notes --stdin --name meeting.md   # or pipe content in
 
 # re-ingest changed sources later; --prune also drops docs deleted at the source
@@ -97,8 +98,9 @@ lore ask notes "…" --verify-strict   # exit 5 if any answer claim isn't suppor
 lore ls                          # collections
 lore status notes                # one collection's metadata
 lore docs notes                  # documents in a collection
-lore cat notes --doc <uri>       # print a document's stored chunks
-lore rm  notes --doc <uri>       # delete a document (or `lore rm notes` for all)
+lore cat notes --doc report.md   # print a document's chunks (--doc takes a basename, glob, or full URI)
+lore rm  notes --doc report.md   # delete a document (or `lore rm notes` for all)
+lore diff old new                # document-level diff: added / removed / changed by source
 ```
 
 Every command takes `--json`; human output is colorized on a TTY and plain
@@ -113,6 +115,7 @@ are tagged `source#chunk`, so every result traces back to its document.
 - **Streaming answers** — tokens stream on a TTY, buffer cleanly in pipes. [docs →](docs/retrieval.md#streaming-answers)
 - **Cross-collection retrieval** — merge several corpora, or semantically diff two. [docs →](docs/retrieval.md#cross-collection-retrieval)
 - **Portable & encrypted corpora** — `export` a whole indexed corpus to one file; ship or `age`-encrypt it. [docs →](docs/corpora.md)
+- **Collection diff** — see which documents were added, removed, or changed between two collections or a snapshot. [docs →](docs/corpora.md#diffing-collections)
 - **Read-only MCP server** — expose your corpora as grounded, cited tools to any MCP client. [docs →](docs/mcp.md)
 - **Structure-aware chunking** — heading/paragraph-aware, code-fence-safe, pinned per collection. [docs →](docs/retrieval.md#chunking)
 - **Provider-agnostic** — any OpenAI-compatible endpoint, with independent embed/chat/rerank endpoints. [docs →](docs/configuration.md#split-embedchat-endpoints)

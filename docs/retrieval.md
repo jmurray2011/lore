@@ -77,6 +77,22 @@ source (`add`/`sync`) re-chunks it and brings the text back. For permanent
 redaction, also remove or edit the source, or drop the whole document with
 `rm --doc`.
 
+Both `cat --doc` and `rm --doc` resolve their `--doc` selector against the
+collection's documents, so you can pass the basename `lore docs` prints — or a
+glob/substring — instead of the full `file://` URI:
+
+```bash
+lore cat notes --doc report.md          # basename
+lore cat notes --doc 'ssp-*'            # glob on the basename
+lore rm  notes --doc 'Tenant2 (1)'      # unique substring of the URI
+```
+
+Resolution is tiered (exact URI, then exact basename, then glob, then
+case-insensitive substring); the first tier with a match wins. A selector that
+matches more than one document is a usage error (exit 2) listing the candidates;
+one that matches none is not-found (exit 3). A full source URI still resolves
+to itself, so existing scripts are unaffected.
+
 ## Retrieval diagnostics
 
 When an answer is bad, `--explain` tells you *whose* fault it is — retrieval or

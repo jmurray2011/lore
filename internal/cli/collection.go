@@ -74,11 +74,15 @@ func newRmCmd(deps *Deps) *cobra.Command {
 			case len(chunkIDs) > 0:
 				return rmByChunk(cmd, deps, collection, chunkIDs)
 			case docURI != "":
-				if err := deps.Remove.RemoveDocument(cmd.Context(), collection, docURI); err != nil {
+				uri, err := resolveDocSelector(cmd, deps, collection, docURI)
+				if err != nil {
 					return err
 				}
-				view := rmView{Removed: "document", Collection: collection, Document: docURI}
-				return render(cmd, view, fmt.Sprintf("Removed document `%s` from **%s**.", docURI, collection))
+				if err := deps.Remove.RemoveDocument(cmd.Context(), collection, uri); err != nil {
+					return err
+				}
+				view := rmView{Removed: "document", Collection: collection, Document: uri}
+				return render(cmd, view, fmt.Sprintf("Removed document `%s` from **%s**.", uri, collection))
 			default:
 				if err := deps.Remove.RemoveCollection(cmd.Context(), collection); err != nil {
 					return err
@@ -211,14 +215,31 @@ func newCatCmd(deps *Deps) *cobra.Command {
 	return cmd
 }
 
-// catByDoc prints every chunk of one document, headed by the document name.
-func catByDoc(cmd *cobra.Command, deps *Deps, collection, docURI string) error {
-	chunks, err := deps.Catalog.DocumentChunks(cmd.Context(), collection, docURI)
+// catByDoc prints every chunk of one document, headed by the document name. The
+// selector may be a basename/glob/substring (resolved against the collection) or
+// a full source URI.
+func catByDoc(cmd *cobra.Command, deps *Deps, collection, selector string) error {
+	uri, err := resolveDocSelector(cmd, deps, collection, selector)
+	if err != nil {
+		return err
+	}
+	chunks, err := deps.Catalog.DocumentChunks(cmd.Context(), collection, uri)
 	if err != nil {
 		return err
 	}
 	views, body := chunkViews(chunks)
-	return render(cmd, views, fmt.Sprintf("## %s\n\n%s", shortLabel(docURI), body))
+	return render(cmd, views, fmt.Sprintf("## %s\n\n%s", shortLabel(uri), body))
+}
+
+// resolveDocSelector loads the collection's documents and resolves a --doc
+// selector to one source URI. It is the shared front door for cat --doc and
+// rm --doc, so both accept the basenames `lore docs` prints, not just full URIs.
+func resolveDocSelector(cmd *cobra.Command, deps *Deps, collection, selector string) (string, error) {
+	docs, err := deps.Catalog.ListDocuments(cmd.Context(), collection)
+	if err != nil {
+		return "", err
+	}
+	return resolveDocURI(docs, selector)
 }
 
 // catByChunk prints specific chunks by ID. Malformed IDs are a usage error (exit
@@ -274,6 +295,99 @@ func chunkViews(chunks []domain.Chunk) ([]chunkView, string) {
 		}
 	}
 	return views, strings.TrimRight(b.String(), "\n")
+}
+
+type docRefView struct {
+	Source string `json:"source"`
+	Hash   string `json:"hash"`
+}
+
+type docChangeView struct {
+	Source string `json:"source"`
+	From   string `json:"from"`
+	To     string `json:"to"`
+}
+
+type diffView struct {
+	From    string          `json:"from"`
+	To      string          `json:"to"`
+	Added   []docRefView    `json:"added"`
+	Removed []docRefView    `json:"removed"`
+	Changed []docChangeView `json:"changed"`
+}
+
+func newDiffCmd(deps *Deps) *cobra.Command {
+	return &cobra.Command{
+		Use:   "diff <from-collection> <to-collection>",
+		Short: "Show the document-level difference between two collections (added/removed/changed by source)",
+		Long: "Compare two collections by source URI and per-document content hash, reporting which " +
+			"documents were added, removed, or changed. It compares what was ingested, not how it was " +
+			"embedded, so collections pinned to different embedding spaces (e.g. a collection and a " +
+			"re-imported snapshot) can still be diffed. Exit status is 0 whether or not they differ.",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) != 2 {
+				return fmt.Errorf("%w: diff takes exactly two collection names", domain.ErrInvalidArgument)
+			}
+			from, to := args[0], args[1]
+			d, err := deps.Catalog.Diff(cmd.Context(), from, to)
+			if err != nil {
+				return err
+			}
+			return render(cmd, viewDiff(from, to, d), diffMarkdown(from, to, d))
+		},
+	}
+}
+
+// viewDiff maps a domain diff to its JSON view, keeping the slices non-nil so
+// the output is `[]`, not `null`, for an empty bucket.
+func viewDiff(from, to string, d app.CollectionDiff) diffView {
+	v := diffView{From: from, To: to, Added: []docRefView{}, Removed: []docRefView{}, Changed: []docChangeView{}}
+	for _, r := range d.Added {
+		v.Added = append(v.Added, docRefView{Source: r.SourceURI, Hash: r.Hash})
+	}
+	for _, r := range d.Removed {
+		v.Removed = append(v.Removed, docRefView{Source: r.SourceURI, Hash: r.Hash})
+	}
+	for _, ch := range d.Changed {
+		v.Changed = append(v.Changed, docChangeView{Source: ch.SourceURI, From: ch.From, To: ch.To})
+	}
+	return v
+}
+
+// diffMarkdown renders a human diff: a one-line summary, then a section per
+// non-empty bucket listing the documents by their short label.
+func diffMarkdown(from, to string, d app.CollectionDiff) string {
+	if d.Empty() {
+		return fmt.Sprintf("Collections **%s** and **%s** hold the same documents.", from, to)
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "## diff: %s -> %s\n\n", from, to)
+	fmt.Fprintf(&b, "**%d** added, **%d** removed, **%d** changed.\n", len(d.Added), len(d.Removed), len(d.Changed))
+	section := func(title string, uris []string) {
+		if len(uris) == 0 {
+			return
+		}
+		fmt.Fprintf(&b, "\n### %s\n\n", title)
+		for _, uri := range uris {
+			fmt.Fprintf(&b, "- %s\n", shortLabel(uri))
+		}
+	}
+	added := make([]string, len(d.Added))
+	for i, r := range d.Added {
+		added[i] = r.SourceURI
+	}
+	removed := make([]string, len(d.Removed))
+	for i, r := range d.Removed {
+		removed[i] = r.SourceURI
+	}
+	changed := make([]string, len(d.Changed))
+	for i, ch := range d.Changed {
+		changed[i] = ch.SourceURI
+	}
+	section("Added", added)
+	section("Removed", removed)
+	section("Changed", changed)
+	return b.String()
 }
 
 func newStatusCmd(deps *Deps) *cobra.Command {

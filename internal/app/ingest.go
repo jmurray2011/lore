@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -21,6 +22,7 @@ type IngestSummary struct {
 	Added       int // documents ingested (new or changed)
 	Skipped     int // unchanged or empty documents (idempotent no-ops)
 	Unsupported int // documents whose content type no extractor handles
+	Excluded    int // documents skipped by an --exclude glob (never read)
 	Chunks      int // chunks embedded and stored
 }
 
@@ -56,7 +58,25 @@ func WithConcurrency(n int) IngestOption {
 
 // ingestCall holds per-invocation ingest configuration.
 type ingestCall struct {
-	meta domain.Metadata
+	meta    domain.Metadata
+	exclude []string // glob patterns; a matching source is skipped before it is read
+}
+
+// isExcluded reports whether a source URI matches any --exclude glob. A glob is
+// matched against both the document's basename (the common case, e.g. "*(1).pdf")
+// and the full URI (so path-shaped globs like "*/drafts/*" work). A malformed
+// pattern never matches here; the CLI rejects those up front as a usage error.
+func (c ingestCall) isExcluded(uri string) bool {
+	base := path.Base(uri)
+	for _, g := range c.exclude {
+		if ok, err := path.Match(g, base); err == nil && ok {
+			return true
+		}
+		if ok, err := path.Match(g, uri); err == nil && ok {
+			return true
+		}
+	}
+	return false
 }
 
 // IngestCallOption configures a single Ingest or IngestContent invocation (as
@@ -70,6 +90,21 @@ type IngestCallOption func(*ingestCall)
 // changed; re-ingesting unchanged content does not update it.
 func WithMeta(meta domain.Metadata) IngestCallOption {
 	return func(c *ingestCall) { c.meta = meta }
+}
+
+// WithExclude skips any source whose URI matches one of the given globs, before
+// it is read, extracted, or embedded. Excluded sources are reported in the
+// summary's Excluded count, never silently dropped. It applies to walking a path
+// (add <dir>); it has no effect on IngestContent (stdin yields a single named
+// document with nothing to filter). Empty patterns are ignored.
+func WithExclude(globs ...string) IngestCallOption {
+	return func(c *ingestCall) {
+		for _, g := range globs {
+			if g != "" {
+				c.exclude = append(c.exclude, g)
+			}
+		}
+	}
 }
 
 func newIngestCall(opts []IngestCallOption) ingestCall {
@@ -124,12 +159,16 @@ func (i *Ingestor) Ingest(ctx context.Context, collection, root string, opts ...
 		return IngestSummary{}, err
 	}
 
-	var added, skipped, unsupported, chunks atomic.Int64
+	var added, skipped, unsupported, excluded, chunks atomic.Int64
 
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(i.concurrency)
 
 	walkErr := i.source.Walk(gctx, root, func(it SourceItem) error {
+		if call.isExcluded(it.URI) {
+			excluded.Add(1)
+			return gctx.Err()
+		}
 		g.Go(func() error {
 			out, err := i.ingestItem(gctx, coll, it, call.meta)
 			if err != nil {
@@ -165,6 +204,7 @@ func (i *Ingestor) Ingest(ctx context.Context, collection, root string, opts ...
 		Added:       int(added.Load()),
 		Skipped:     int(skipped.Load()),
 		Unsupported: int(unsupported.Load()),
+		Excluded:    int(excluded.Load()),
 		Chunks:      int(chunks.Load()),
 	}, nil
 }

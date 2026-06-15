@@ -27,6 +27,34 @@ This is what you commit to a repo, attach to a release, or hand a teammate ("the
 docs, pre-indexed — ask it anything"), and it is the natural unit to point an
 agent or [MCP server](mcp.md) at: a portable corpus, no re-indexing required.
 
+## Diffing collections
+
+`lore diff <from> <to>` reports the document-level difference between two
+collections — which sources were **added**, **removed**, or **changed** —
+comparing by source URI and per-document content hash:
+
+```bash
+lore diff kb kb-staging                    # human: added / removed / changed sections
+lore diff kb kb-staging --json             # {from, to, added[], removed[], changed[]}
+```
+
+It compares *what was ingested*, not how it was embedded, so it works across
+collections pinned to different embedding spaces. That makes "snapshot before you
+mutate" a two-step workflow: export the collection under a snapshot name, re-ingest
+or edit sources, then diff against the snapshot to see exactly what moved.
+
+```bash
+lore export kb -o kb.lore && lore import kb.lore --name kb-snapshot
+# …re-ingest / edit sources…
+lore diff kb-snapshot kb
+```
+
+Because the comparison keys on source URI, a renamed file shows as a paired
+removal + addition — the silent-orphan case `add` alone can't surface. The
+`changed` bucket carries both content hashes (`from`/`to`) in `--json`. Exit
+status is `0` whether or not the collections differ (a difference is data, not an
+error).
+
 ## Encrypted corpora
 
 `lore export --encrypt` wraps the artifact in an [age](https://age-encryption.org)

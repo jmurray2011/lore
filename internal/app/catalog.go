@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/jmurray2011/lore/internal/domain"
@@ -62,6 +63,96 @@ func (c *Catalog) ListDocuments(ctx context.Context, collection string) ([]*doma
 		return nil, err
 	}
 	return c.docs.ListDocuments(ctx, collection)
+}
+
+// CollectionDiff is the document-level difference between two collections,
+// compared by source URI and content hash. It is space-independent: it compares
+// what was ingested, not how it was embedded, so two collections pinned to
+// different embedding spaces (e.g. a collection and a re-imported snapshot) can
+// still be diffed. Each slice is ordered by source URI.
+type CollectionDiff struct {
+	Added   []DocRef    // present in `to`, absent from `from`
+	Removed []DocRef    // present in `from`, absent from `to`
+	Changed []DocChange // same source URI, different content hash
+}
+
+// Empty reports whether the two collections hold the same documents at the same
+// content (no additions, removals, or changes).
+func (d CollectionDiff) Empty() bool {
+	return len(d.Added) == 0 && len(d.Removed) == 0 && len(d.Changed) == 0
+}
+
+// DocRef identifies one document by its source URI and content hash.
+type DocRef struct {
+	SourceURI string
+	Hash      string
+}
+
+// DocChange is one document whose content hash differs between the two
+// collections (From in `from`, To in `to`).
+type DocChange struct {
+	SourceURI string
+	From      string
+	To        string
+}
+
+// Diff reports the document-level difference between two collections, comparing
+// by source URI and content hash. It fails with ErrNotFound if either collection
+// does not exist.
+func (c *Catalog) Diff(ctx context.Context, from, to string) (CollectionDiff, error) {
+	fromDocs, err := c.ListDocuments(ctx, from)
+	if err != nil {
+		return CollectionDiff{}, fmt.Errorf("from-collection %q: %w", from, err)
+	}
+	toDocs, err := c.ListDocuments(ctx, to)
+	if err != nil {
+		return CollectionDiff{}, fmt.Errorf("to-collection %q: %w", to, err)
+	}
+
+	fromHash := hashByURI(fromDocs)
+	toHash := hashByURI(toDocs)
+
+	var diff CollectionDiff
+	for _, uri := range sortedURIs(fromHash, toHash) {
+		f, inFrom := fromHash[uri]
+		t, inTo := toHash[uri]
+		switch {
+		case inFrom && !inTo:
+			diff.Removed = append(diff.Removed, DocRef{SourceURI: uri, Hash: string(f)})
+		case !inFrom && inTo:
+			diff.Added = append(diff.Added, DocRef{SourceURI: uri, Hash: string(t)})
+		case f != t:
+			diff.Changed = append(diff.Changed, DocChange{SourceURI: uri, From: string(f), To: string(t)})
+		}
+	}
+	return diff, nil
+}
+
+// hashByURI indexes documents by source URI to their content hash.
+func hashByURI(docs []*domain.Document) map[string]domain.ContentHash {
+	m := make(map[string]domain.ContentHash, len(docs))
+	for _, d := range docs {
+		m[d.SourceURI] = d.Hash
+	}
+	return m
+}
+
+// sortedURIs returns the sorted union of keys across two URI-keyed maps, so the
+// diff is deterministic regardless of repository iteration order.
+func sortedURIs(a, b map[string]domain.ContentHash) []string {
+	seen := make(map[string]struct{}, len(a)+len(b))
+	for uri := range a {
+		seen[uri] = struct{}{}
+	}
+	for uri := range b {
+		seen[uri] = struct{}{}
+	}
+	uris := make([]string, 0, len(seen))
+	for uri := range seen {
+		uris = append(uris, uri)
+	}
+	sort.Strings(uris)
+	return uris
 }
 
 // DocumentChunks returns the stored chunks of one document (by source URI) in
