@@ -214,6 +214,14 @@ type statusView struct {
 	collectionView
 	Documents int    `json:"documents"`
 	Chunker   string `json:"chunker"`
+	// LastIngest is the most recent document ingestion time (max IngestedAt):
+	// the content-derived "as of when" that advances on any re-ingest, unlike
+	// CreatedAt. Omitted for an empty collection.
+	LastIngest string `json:"last_ingest_at,omitempty"`
+	// Digest is the corpus content identity (hex sha256 over the document set);
+	// it flips on any add, removal, or edit. The field a provenance snapshot
+	// should stamp instead of created_at.
+	Digest string `json:"corpus_digest"`
 }
 
 // chunkerLabel renders a collection's pinned chunker for display, naming the

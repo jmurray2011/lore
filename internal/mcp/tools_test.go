@@ -270,6 +270,12 @@ func TestCollectionStatus_IncludesChunkCount(t *testing.T) {
 	if out.Chunks != 3 {
 		t.Errorf("chunks = %d, want 3 (seeded chunk count)", out.Chunks)
 	}
+	if out.CorpusDigest == "" {
+		t.Error("corpus_digest is empty, want the content identity of the document set")
+	}
+	if out.LastIngestAt == "" {
+		t.Error("last_ingest_at is empty, want the most recent ingestion time")
+	}
 }
 
 func TestCollectionStatus_UnknownIsToolError(t *testing.T) {
