@@ -34,6 +34,8 @@ type Deps struct {
 	// (rerank, query/ask --rerank) report a usage error in that case.
 	Rerank *app.Reranker
 	Remove *app.Remover
+	// Replay re-runs an ask manifest to verify the answer reproduces (lore replay).
+	Replay *app.Replayer
 	// Tokens counts tokens for --budget token-bounded retrieval (query/ask).
 	Tokens app.TokenCounter
 	// Export and Import move a collection to/from a single portable artifact file.
@@ -52,6 +54,9 @@ type Deps struct {
 	// RetrievalHybrid is the configured default for hybrid retrieval; it sets the
 	// default value of query/ask --hybrid (overridable per command).
 	RetrievalHybrid bool
+	// ChatModel is the configured chat model name, recorded in an ask manifest's
+	// generation identity. Empty is tolerated (manifest records what it knows).
+	ChatModel string
 }
 
 // GlobalOptions are the resolved global flags the composition root needs to
@@ -125,6 +130,7 @@ func NewRootCommand(build Builder, version string, out, errOut io.Writer) *cobra
 		newDiffCmd(&deps),
 		newQueryCmd(&deps),
 		newAskCmd(&deps),
+		newReplayCmd(&deps),
 		newEvalCmd(&deps),
 		newSynthesizeCmd(&deps),
 		newRerankCmd(&deps),
@@ -152,7 +158,7 @@ func ExitCode(err error) int {
 	switch {
 	case err == nil:
 		return 0
-	case errors.Is(err, domain.ErrInvalidArgument):
+	case errors.Is(err, domain.ErrInvalidArgument), errors.Is(err, app.ErrReproducibleUnsupported):
 		return 2
 	case errors.Is(err, app.ErrNotFound):
 		return 3
@@ -307,6 +313,11 @@ type answerView struct {
 	// unchanged without --verify.
 	Verification []verificationClaimView `json:"verification,omitempty"`
 	SupportRate  *float64                `json:"support_rate,omitempty"`
+	// Manifest is the reproducible provenance record of the ask: corpus digests,
+	// retrieval config, generation identity, cited chunks, and an answer digest.
+	// Present on --json so `lore replay` can re-run the exhibit. omitempty keeps
+	// human and streamed output unaffected.
+	Manifest *app.Manifest `json:"manifest,omitempty"`
 }
 
 // verificationClaimView is one claim's faithfulness verdict in --json output.

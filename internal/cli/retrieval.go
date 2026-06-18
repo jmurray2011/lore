@@ -344,6 +344,7 @@ func newAskCmd(deps *Deps) *cobra.Command {
 		collFlags    []string
 		streamFlag   bool
 		noStreamFlag bool
+		reproducible bool
 	)
 	cmd := &cobra.Command{
 		Use:   "ask [collection] <question>",
@@ -382,6 +383,9 @@ func newAskCmd(deps *Deps) *cobra.Command {
 				}
 				stream = false // verification needs the whole answer; cannot verify a token stream
 			}
+			if reproducible {
+				stream = false // a reproducible exhibit needs the whole pinned answer, not a token stream
+			}
 			multi := len(collections) > 1
 			collLabel := strings.Join(collections, ", ")
 			var (
@@ -393,7 +397,7 @@ func newAskCmd(deps *Deps) *cobra.Command {
 				streamedRaw string
 			)
 			switch {
-			case rerank || budget > 0 || multi || stream || hybrid || mmr || recency || maxPerSource > 0:
+			case rerank || budget > 0 || multi || stream || hybrid || mmr || recency || maxPerSource > 0 || reproducible:
 				// Interpose between retrieval and synthesis: resolve hits (across
 				// collections, two-stage via --rerank, and/or --hybrid fusion), cap
 				// them to the token --budget, then synthesize — streaming the prose
@@ -421,6 +425,8 @@ func newAskCmd(deps *Deps) *cobra.Command {
 					})
 					streamed = true
 					streamedRaw = raw.String()
+				} else if reproducible {
+					ans, err = deps.Ask.SynthesizeReproducible(cmd.Context(), question, hits, attachments)
 				} else {
 					ans, err = deps.Ask.Synthesize(cmd.Context(), question, hits, attachments)
 				}
@@ -494,6 +500,41 @@ func newAskCmd(deps *Deps) *cobra.Command {
 				}
 			}
 
+			// On --json, attach the reproducible provenance manifest (corpus digests,
+			// retrieval config, generation identity, cited chunks, answer digest).
+			// Gated on --json so human runs do not pay the per-collection snapshot
+			// cost; the streamed path returned earlier and never emits JSON.
+			if asJSON, _ := cmd.Flags().GetBool("json"); asJSON {
+				rm := app.RetrievalManifest{
+					K:            k,
+					Source:       source,
+					Where:        where,
+					Rerank:       rerank,
+					Hybrid:       hybrid,
+					MMR:          mmr,
+					Recency:      recency,
+					MaxPerSource: maxPerSource,
+					Budget:       budget,
+				}
+				// Record a sub-lever only when its mode engaged, so the manifest
+				// never claims a default (rerank-candidates 50, mmr-lambda 0.5,
+				// half-life 90) that did not shape this retrieval.
+				if rerank {
+					rm.Candidates = candidates
+				}
+				if mmr {
+					rm.MMRLambda = mmrLambda
+				}
+				if recency {
+					rm.HalfLifeDays = halfLifeDays
+				}
+				m, err := buildAskManifest(cmd.Context(), deps, collections, question, rm, ans)
+				if err != nil {
+					return err
+				}
+				view.Manifest = m
+			}
+
 			// --explain: report the score distribution of the chunks that grounded
 			// the answer, plus the runner-up, annotated with which were cited.
 			// Orthogonal to --expand and --source. JSON carries it inside the
@@ -539,6 +580,7 @@ func newAskCmd(deps *Deps) *cobra.Command {
 	cmd.Flags().IntVar(&maxPerSource, "max-per-source", 0, "cap the number of grounding chunks per source document (0 = no cap)")
 	cmd.Flags().BoolVar(&mmr, "mmr", false, "diversify grounding with Maximal Marginal Relevance (single-collection; not with --rerank)")
 	cmd.Flags().Float64Var(&mmrLambda, "mmr-lambda", 0.5, "MMR relevance/diversity trade-off in [0,1] (1=pure relevance, 0=pure diversity)")
+	cmd.Flags().BoolVar(&reproducible, "reproducible", false, "pin generation (temperature 0 + seed) and capture model/fingerprint for a reproducible exhibit; pair with --json to emit the replayable manifest")
 	cmd.Flags().BoolVar(&recency, "recency", false, "recency-aware grounding: re-rank a wider pool by relevance with a time decay (not with --rerank/--mmr)")
 	cmd.Flags().Float64Var(&halfLifeDays, "half-life-days", 90, "recency half-life in days: a chunk this old keeps half its score (used with --recency)")
 	cmd.Flags().StringArrayVarP(&collFlags, "collection", "c", nil, "additional collection to ground on; repeatable (merges across same-space collections)")

@@ -80,6 +80,24 @@ func (a *Asker) Synthesize(ctx context.Context, question string, hits []domain.C
 	return answer, nil
 }
 
+// SynthesizeReproducible is Synthesize pinned for reproducibility: it requires
+// the generator to implement DeterministicGenerator (temperature 0 + fixed seed,
+// recorded in the answer's Provenance) and fails with ErrReproducibleUnsupported
+// otherwise — an audited exhibit must not silently rest on a non-deterministic
+// generation. It backs ask --reproducible.
+func (a *Asker) SynthesizeReproducible(ctx context.Context, question string, hits []domain.ChunkHit, attachments []domain.Attachment) (Answer, error) {
+	dg, ok := a.generator.(DeterministicGenerator)
+	if !ok {
+		return Answer{}, ErrReproducibleUnsupported
+	}
+	answer, err := dg.SynthesizeDeterministic(ctx, question, hits, attachments)
+	if err != nil {
+		return Answer{}, fmt.Errorf("synthesize (reproducible): %w", err)
+	}
+	answer.Grounded = len(hits) > 0 || len(attachments) > 0
+	return answer, nil
+}
+
 // SynthesizeStream is Synthesize with incremental delivery: when the underlying
 // generator implements StreamingGenerator it emits prose via onDelta as it
 // arrives; otherwise it falls back to a single Synthesize and emits the whole
