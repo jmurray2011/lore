@@ -25,6 +25,12 @@ var (
 	// distinct from a runtime error so CI can tell "the answer/retrieval did not
 	// meet the bar" (an actionable, expected signal) from "the tool broke" (exit 1).
 	ErrGateUnmet = errors.New("quality gate not met")
+	// ErrReproducibleUnsupported is returned for ask --reproducible when the
+	// configured generator cannot pin generation for reproducibility (no
+	// DeterministicGenerator capability) — an audited exhibit cannot promise a
+	// literal re-run, so the run fails rather than silently producing a
+	// non-deterministic answer it claims is reproducible.
+	ErrReproducibleUnsupported = errors.New("reproducible generation unsupported")
 )
 
 // CollectionRepository persists Collection aggregates.
@@ -170,6 +176,23 @@ type Answer struct {
 	// retrieved chunk or attachment. False means the model answered from its own
 	// knowledge alone (only possible in non-strict mode).
 	Grounded bool
+	// Provenance records the generation identity and determinism settings the
+	// generator used, when it captured them. The openai adapter fills it; in-
+	// memory fakes leave it nil. It backs an ask manifest's generation block and
+	// is nil-safe everywhere.
+	Provenance *Provenance
+}
+
+// Provenance records how an answer was generated: the model the provider
+// actually served (ResolvedModel) and its SystemFingerprint, plus whether the
+// request was pinned for reproducibility (Deterministic, with the Temperature
+// and Seed used). It is the generation half of a reproducible ask manifest.
+type Provenance struct {
+	ResolvedModel     string
+	SystemFingerprint string
+	Deterministic     bool
+	Temperature       float64
+	Seed              int
 }
 
 // Generator synthesizes an answer grounded in retrieved chunks, optionally with
@@ -188,6 +211,17 @@ type Generator interface {
 // with a type assertion; the CLI uses it only for interactive streaming.
 type StreamingGenerator interface {
 	SynthesizeStream(ctx context.Context, question string, hits []domain.ChunkHit, attachments []domain.Attachment, onDelta func(string)) (Answer, error)
+}
+
+// DeterministicGenerator is an optional capability a Generator may implement: it
+// synthesizes with the generation pinned for reproducibility (temperature 0 and
+// a fixed seed) and records the pinned values in the returned Answer's
+// Provenance. The audited ask --reproducible path requires it; callers detect
+// support with a type assertion (see Asker.SynthesizeReproducible) and fail with
+// ErrReproducibleUnsupported when it is absent rather than silently producing a
+// non-deterministic answer.
+type DeterministicGenerator interface {
+	SynthesizeDeterministic(ctx context.Context, question string, hits []domain.ChunkHit, attachments []domain.Attachment) (Answer, error)
 }
 
 // AnswerCache stores synthesized answers keyed by an opaque content hash, for

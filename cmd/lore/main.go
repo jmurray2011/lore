@@ -172,6 +172,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			Retriever:       retriever,
 			Rerank:          reranker,
 			Remove:          remover,
+			Replay:          app.NewReplayer(catalog, retriever, asker, store.docs),
 			Tokens:          counter,
 			Export:          app.NewExporter(store.collections, store.docs, store.index),
 			Import:          app.NewImporter(store.collections, store.docs, store.index, remover, store.lexical),
@@ -180,6 +181,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			Index:           store.index,
 			Log:             logger,
 			RetrievalHybrid: cfg.Retrieval.Hybrid,
+			ChatModel:       cfg.Provider.ChatModel,
 		}, nil
 	}
 

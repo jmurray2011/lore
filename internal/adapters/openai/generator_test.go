@@ -393,3 +393,84 @@ func jsonStr(s string) string {
 	b, _ := json.Marshal(s)
 	return string(b)
 }
+
+func TestGeneratorCapturesProvenance(t *testing.T) {
+	ctx := context.Background()
+	chunk, err := domain.NewChunk(domain.DeriveDocumentID("docs", "file:///a.md"), 0, "the sky is blue")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hits := []domain.ChunkHit{{Chunk: chunk, Score: 0.9, Source: "file:///a.md"}}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"model":"gpt-test-2026-01-01","system_fingerprint":"fp_abc","choices":[{"message":{"role":"assistant","content":"blue [1]"}}]}`)
+	}))
+	defer srv.Close()
+
+	g, err := openai.NewGenerator(srv.URL, "k", "gpt-test", openai.Capabilities{}, openai.AuthBearer, srv.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ans, err := g.Synthesize(ctx, "q", hits, nil)
+	if err != nil {
+		t.Fatalf("Synthesize: %v", err)
+	}
+	if ans.Provenance == nil {
+		t.Fatal("Synthesize must capture generation provenance (resolved model + fingerprint)")
+	}
+	if ans.Provenance.ResolvedModel != "gpt-test-2026-01-01" {
+		t.Errorf("resolved model = %q, want gpt-test-2026-01-01", ans.Provenance.ResolvedModel)
+	}
+	if ans.Provenance.SystemFingerprint != "fp_abc" {
+		t.Errorf("system fingerprint = %q, want fp_abc", ans.Provenance.SystemFingerprint)
+	}
+	if ans.Provenance.Deterministic {
+		t.Error("a default (non-reproducible) synthesize must not claim determinism")
+	}
+}
+
+func TestGeneratorSynthesizeDeterministic(t *testing.T) {
+	ctx := context.Background()
+	chunk, err := domain.NewChunk(domain.DeriveDocumentID("docs", "file:///a.md"), 0, "the sky is blue")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hits := []domain.ChunkHit{{Chunk: chunk, Score: 0.9, Source: "file:///a.md"}}
+
+	var gotReq struct {
+		Temperature *float64 `json:"temperature"`
+		Seed        *int     `json:"seed"`
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotReq)
+		_, _ = io.WriteString(w, `{"model":"m","system_fingerprint":"fp","choices":[{"message":{"content":"blue [1]"}}]}`)
+	}))
+	defer srv.Close()
+
+	g, err := openai.NewGenerator(srv.URL, "k", "m", openai.Capabilities{}, openai.AuthBearer, srv.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ans, err := g.SynthesizeDeterministic(ctx, "q", hits, nil)
+	if err != nil {
+		t.Fatalf("SynthesizeDeterministic: %v", err)
+	}
+	// The request pins temperature 0 and a seed so the provider's sampling is
+	// fixed — what makes "reproducible" literal rather than aspirational.
+	if gotReq.Temperature == nil || *gotReq.Temperature != 0 {
+		t.Errorf("request temperature = %v, want 0 pinned", gotReq.Temperature)
+	}
+	if gotReq.Seed == nil {
+		t.Fatal("request must pin a seed for reproducibility")
+	}
+	// Provenance records exactly what was pinned, so the manifest is self-contained.
+	if ans.Provenance == nil || !ans.Provenance.Deterministic {
+		t.Fatalf("provenance must mark the run deterministic: %+v", ans.Provenance)
+	}
+	if ans.Provenance.Temperature != 0 {
+		t.Errorf("provenance temperature = %v, want 0", ans.Provenance.Temperature)
+	}
+	if ans.Provenance.Seed != *gotReq.Seed {
+		t.Errorf("provenance seed %d != request seed %d", ans.Provenance.Seed, *gotReq.Seed)
+	}
+}
