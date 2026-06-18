@@ -408,10 +408,25 @@ func newStatusCmd(deps *Deps) *cobra.Command {
 			}
 			n := len(docs)
 			chunker := chunkerLabel(coll)
+			snap := domain.SnapshotOf(docs)
+			lastIngest := ""
+			if !snap.LastIngest.IsZero() {
+				lastIngest = snap.LastIngest.UTC().Format(time.RFC3339)
+			}
 			human := fmt.Sprintf("## %s\n\n- **model** — %s\n- **dimensions** — %d\n- **chunker** — %s\n- **documents** — %d\n- **created** — %s\n",
 				coll.Name, coll.Space.Model, coll.Space.Dimensions, chunker, n,
 				humanTime(coll.CreatedAt.UTC().Format(time.RFC3339)))
-			return render(cmd, statusView{collectionView: viewCollection(coll), Documents: n, Chunker: chunker}, human)
+			if lastIngest != "" {
+				human += fmt.Sprintf("- **last ingest** — %s\n", humanTime(lastIngest))
+			}
+			human += fmt.Sprintf("- **digest** — `%s`\n", snap.Digest)
+			return render(cmd, statusView{
+				collectionView: viewCollection(coll),
+				Documents:      n,
+				Chunker:        chunker,
+				LastIngest:     lastIngest,
+				Digest:         string(snap.Digest),
+			}, human)
 		},
 	}
 }

@@ -82,6 +82,11 @@ func collectionsText(colls []CollectionInfo) string {
 
 // statusText renders one collection's detailed status.
 func statusText(s CollectionStatusOutput) string {
-	return fmt.Sprintf("%s\n  model: %s\n  dimensions: %d\n  documents: %d\n  chunks: %d\n  chunker: %s",
+	text := fmt.Sprintf("%s\n  model: %s\n  dimensions: %d\n  documents: %d\n  chunks: %d\n  chunker: %s",
 		s.Name, s.Model, s.Dimensions, s.Documents, s.Chunks, s.Chunker)
+	if s.LastIngestAt != "" {
+		text += "\n  last ingest: " + s.LastIngestAt
+	}
+	text += "\n  digest: " + s.CorpusDigest
+	return text
 }

@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -334,6 +335,14 @@ type CollectionStatusOutput struct {
 	Documents  int    `json:"documents" jsonschema:"number of documents ingested"`
 	Chunks     int    `json:"chunks" jsonschema:"number of indexed chunks"`
 	Chunker    string `json:"chunker" jsonschema:"the pinned chunker spec"`
+	// LastIngestAt is the most recent document ingestion time (RFC3339); it
+	// advances on any re-ingest, unlike a collection's birth timestamp. Empty
+	// for a collection with no documents.
+	LastIngestAt string `json:"last_ingest_at,omitempty" jsonschema:"timestamp of the most recently ingested document; advances on any re-ingest"`
+	// CorpusDigest is the corpus content identity (hex sha256 over the document
+	// set); it changes on any add, removal, or edit and is the stable handle for
+	// a provenance snapshot.
+	CorpusDigest string `json:"corpus_digest" jsonschema:"content digest of the document set; changes on any add, removal, or edit"`
 }
 
 func (s *Server) collectionStatus(ctx context.Context, _ *mcpsdk.CallToolRequest, in CollectionStatusInput) (*mcpsdk.CallToolResult, CollectionStatusOutput, error) {
@@ -356,13 +365,20 @@ func (s *Server) collectionStatus(ctx context.Context, _ *mcpsdk.CallToolRequest
 		return nil, CollectionStatusOutput{}, err
 	}
 	info := collectionInfo(coll, len(docs))
+	snap := domain.SnapshotOf(docs)
+	lastIngest := ""
+	if !snap.LastIngest.IsZero() {
+		lastIngest = snap.LastIngest.UTC().Format(time.RFC3339)
+	}
 	out := CollectionStatusOutput{
-		Name:       info.Name,
-		Model:      info.Model,
-		Dimensions: info.Dimensions,
-		Documents:  info.Documents,
-		Chunks:     len(entries),
-		Chunker:    info.Chunker,
+		Name:         info.Name,
+		Model:        info.Model,
+		Dimensions:   info.Dimensions,
+		Documents:    info.Documents,
+		Chunks:       len(entries),
+		Chunker:      info.Chunker,
+		LastIngestAt: lastIngest,
+		CorpusDigest: string(snap.Digest),
 	}
 	return textResult(statusText(out)), out, nil
 }

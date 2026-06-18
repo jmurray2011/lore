@@ -483,6 +483,18 @@ func TestCLIStatusDocCount(t *testing.T) {
 	if v.Model != "test-embed" {
 		t.Errorf("status still carries collection details: %+v", v)
 	}
+	// The corpus digest is a pure function of the (source, hash) set, so it is
+	// deterministic regardless of the ingest clock.
+	wantDigest := domain.SnapshotOf([]*domain.Document{
+		{SourceURI: "file:///a.md", Hash: domain.HashContent([]byte("file:///a.md"))},
+		{SourceURI: "file:///b.md", Hash: domain.HashContent([]byte("file:///b.md"))},
+	}).Digest
+	if v.Digest != string(wantDigest) {
+		t.Errorf("corpus_digest = %q, want %q", v.Digest, wantDigest)
+	}
+	if v.LastIngest == "" {
+		t.Error("last_ingest_at is empty, want the most recent ingestion time")
+	}
 }
 
 // TestCLIDocSelectorResolution exercises the human-friendly --doc selector end to
@@ -3135,6 +3147,8 @@ type statusViewJSON struct {
 	Dimensions int    `json:"dimensions"`
 	CreatedAt  string `json:"created_at"`
 	Documents  int    `json:"documents"`
+	LastIngest string `json:"last_ingest_at"`
+	Digest     string `json:"corpus_digest"`
 }
 
 type syncViewJSON struct {
