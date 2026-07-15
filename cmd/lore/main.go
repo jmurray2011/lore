@@ -50,8 +50,14 @@ func main() {
 }
 
 func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	defaultPath, _ := config.DefaultPath()
+
 	fail := func(err error) int {
-		_, _ = fmt.Fprintf(stderr, "lore: %v\n", err)
+		if msg, ok := authGuidance(err, defaultPath); ok {
+			_, _ = fmt.Fprintf(stderr, "lore: %s\n", msg)
+		} else {
+			_, _ = fmt.Fprintf(stderr, "lore: %v\n", err)
+		}
 		return cli.ExitCode(err)
 	}
 
@@ -67,8 +73,6 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			_ = cleanup()
 		}
 	}()
-
-	defaultPath, _ := config.DefaultPath()
 
 	build := func(_ context.Context, opts cli.GlobalOptions) (cli.Deps, error) {
 		path := defaultPath
@@ -212,6 +216,22 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return fail(err)
 	}
 	return 0
+}
+
+// authGuidance turns a provider authentication rejection (HTTP 401/403) into an
+// actionable message that names where to set the key, replacing the raw upstream
+// error body a user would otherwise see. It returns ok=false for any other error
+// so the caller prints the default form. configPath is the resolved default
+// config location, named so a layman knows which file to edit.
+func authGuidance(err error, configPath string) (string, bool) {
+	var se *httpjson.StatusError
+	if !errors.As(err, &se) || (se.Code != http.StatusUnauthorized && se.Code != http.StatusForbidden) {
+		return "", false
+	}
+	return fmt.Sprintf("provider authentication failed (HTTP %d from %s).\n"+
+		"  Set an API key:  export LORE_API_KEY=<key>   (or add api_key under [provider] in %s)\n"+
+		"  Provider setup and auth styles (OpenAI, Azure, Ollama, local): see docs/configuration.md",
+		se.Code, se.Path, configPath), true
 }
 
 // authStyle maps a resolved connection's auth string to the openai/httpjson

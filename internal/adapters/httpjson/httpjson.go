@@ -23,6 +23,21 @@ const (
 	maxRetryWait = 60 * time.Second
 )
 
+// StatusError is a non-2xx response from the endpoint. It carries the status
+// code separately from the message so callers can recognize a class of failure
+// — notably an authentication rejection (401/403) — and replace the raw upstream
+// body with actionable guidance instead of surfacing a provider-specific JSON
+// blob. Error() keeps the original one-line form for logs and pipes.
+type StatusError struct {
+	Path string // request path, e.g. "/embeddings"
+	Code int    // HTTP status code
+	Body string // trimmed response-body snippet
+}
+
+func (e *StatusError) Error() string {
+	return fmt.Sprintf("httpjson: %s: status %d: %s", e.Path, e.Code, e.Body)
+}
+
 // Auth selects how the API key is presented. AuthBearer
 // (Authorization: Bearer <key>) is the OpenAI/Cohere default; AuthAPIKey
 // (api-key: <key>) is Azure OpenAI's scheme.
@@ -116,7 +131,7 @@ func (c *Client) PostStream(ctx context.Context, path string, in any) (io.ReadCl
 		if resp.StatusCode/100 != 2 {
 			snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
 			_ = resp.Body.Close()
-			return nil, fmt.Errorf("httpjson: %s: status %d: %s", path, resp.StatusCode, bytes.TrimSpace(snippet))
+			return nil, &StatusError{Path: path, Code: resp.StatusCode, Body: string(bytes.TrimSpace(snippet))}
 		}
 		return resp.Body, nil
 	}
@@ -147,7 +162,7 @@ func decode(resp *http.Response, path string, out any) error {
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode/100 != 2 {
 		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		return fmt.Errorf("httpjson: %s: status %d: %s", path, resp.StatusCode, bytes.TrimSpace(snippet))
+		return &StatusError{Path: path, Code: resp.StatusCode, Body: string(bytes.TrimSpace(snippet))}
 	}
 	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
 		return fmt.Errorf("httpjson: decode %s response: %w", path, err)
