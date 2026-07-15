@@ -5,8 +5,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	iofs "io/fs"
 	"log/slog"
 	"net/http"
 	"os"
@@ -72,6 +74,16 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		path := defaultPath
 		if opts.ConfigPath != "" {
 			path = opts.ConfigPath
+			// An explicitly requested config file that is not there is a mistake,
+			// not a cue to fall back to defaults: fail loudly so the user does not
+			// run against the wrong endpoint/DB believing their config was loaded.
+			// (The default path staying absent is still fine — that is defaults+env.)
+			if _, statErr := os.Stat(path); statErr != nil {
+				if errors.Is(statErr, iofs.ErrNotExist) {
+					return cli.Deps{}, fmt.Errorf("%w: --config %s: file does not exist", domain.ErrInvalidArgument, path)
+				}
+				return cli.Deps{}, fmt.Errorf("config: %s: %w", path, statErr)
+			}
 		}
 		cfg, err := config.Resolve(path, os.Getenv, config.FlagOverrides{
 			LogLevel:  opts.LogLevel,
@@ -82,6 +94,12 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			return cli.Deps{}, err
 		}
 		logger = config.NewLogger(cfg.Log, stderr)
+		// Surface silently-ignored config keys (typos, misplaced keys) now that the
+		// logger exists; without this a misspelled setting reads exactly like an
+		// unset one and the user never learns why their config had no effect.
+		if unknown := config.UndecodedKeys(path); len(unknown) > 0 {
+			logger.Warn("ignoring unrecognized config keys", "path", path, "keys", unknown)
+		}
 
 		store, err := openStorage(cfg.Storage)
 		if err != nil {
