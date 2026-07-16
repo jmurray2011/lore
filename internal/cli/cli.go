@@ -86,8 +86,23 @@ func NewRootCommand(build Builder, version string, out, errOut io.Writer) *cobra
 	var deps Deps
 
 	root := &cobra.Command{
-		Use:           "lore",
-		Short:         "Fast, scriptable RAG and LLM operations over specific document sets",
+		Use:   "lore",
+		Short: "Fast, scriptable RAG and LLM operations over specific document sets",
+		Long: `lore indexes your documents and answers questions about them, citing the exact
+passages it used. Retrieval and answering run over an OpenAI-compatible API
+(OpenAI, Azure, Ollama, or any local server).
+
+Getting started:
+  export LORE_API_KEY=<key>              # or set api_key under [provider] in the config file
+  lore init notes                        # create a collection (pinned to your embedding model)
+  lore add notes ./docs                  # index a folder of documents
+  lore ask notes "how does auth work?"   # ask, grounded in those documents
+
+Configure your provider before 'lore init' — a collection is permanently pinned
+to the embedding model configured when it is created. See docs/configuration.md.`,
+		Example: `  lore init notes
+  lore add notes ./docs
+  lore ask notes "how does auth work?"`,
 		Version:       version,
 		SilenceUsage:  true,
 		SilenceErrors: true,
