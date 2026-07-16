@@ -78,6 +78,7 @@ func newImportCmd(deps *Deps) *cobra.Command {
 	var (
 		name     string
 		force    bool
+		reEmbed  bool
 		passCmd  string
 		identity string
 	)
@@ -87,6 +88,10 @@ func newImportCmd(deps *Deps) *cobra.Command {
 		Long: "Reconstruct a collection from a `lore export` artifact into the local store, with its " +
 			"embedding-space and chunker pins intact. --name imports under a different name; --force " +
 			"overwrites an existing collection of that name.\n\n" +
+			"--re-embed rebuilds the vectors from the carried chunk text using your configured embedder " +
+			"and pins the collection to your embedding space instead of the artifact's — so you can query " +
+			"a corpus that was indexed with a model you cannot serve. It calls the embedder (cost/time " +
+			"proportional to the corpus) and needs a working embedder endpoint.\n\n" +
 			"Encryption is detected from the artifact itself (not the file name): an age-wrapped artifact " +
 			"is decrypted with --passphrase-cmd (or " + envExportKeyCmd + "), --identity <age-key-file>, or an " +
 			"interactive prompt. Use '-' to read the artifact from stdin.",
@@ -102,7 +107,7 @@ func newImportCmd(deps *Deps) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			sum, err := deps.Import.Import(cmd.Context(), bytes.NewReader(plaintext), name, force)
+			sum, err := deps.Import.Import(cmd.Context(), bytes.NewReader(plaintext), name, force, reEmbed)
 			if err != nil {
 				return err
 			}
@@ -121,6 +126,7 @@ func newImportCmd(deps *Deps) *cobra.Command {
 	}
 	cmd.Flags().StringVar(&name, "name", "", "import under this name instead of the artifact's original")
 	cmd.Flags().BoolVar(&force, "force", false, "overwrite an existing collection of the same name")
+	cmd.Flags().BoolVar(&reEmbed, "re-embed", false, "rebuild vectors from the chunk text with your configured embedder, pinning the collection to your embedding space (needs a working embedder)")
 	cmd.Flags().StringVar(&passCmd, "passphrase-cmd", "", "command whose stdout is the decryption passphrase (or set "+envExportKeyCmd+")")
 	cmd.Flags().StringVar(&identity, "identity", "", "age identity file to decrypt with (mutually exclusive with a passphrase)")
 	return cmd

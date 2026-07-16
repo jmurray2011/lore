@@ -197,7 +197,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			Replay:          app.NewReplayer(catalog, retriever, asker, store.docs),
 			Tokens:          counter,
 			Export:          app.NewExporter(store.collections, store.docs, store.index),
-			Import:          app.NewImporter(store.collections, store.docs, store.index, remover, store.lexical),
+			Import:          app.NewImporter(store.collections, store.docs, store.index, remover, store.lexical, embedder),
 			Verify:          checker,
 			Eval:            app.NewEvaluator(asker, checker),
 			Index:           store.index,

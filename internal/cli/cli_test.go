@@ -419,7 +419,7 @@ func newDeps(emb app.Embedder, gen app.Generator) (cli.Deps, *memstore.Collectio
 		Replay:    app.NewReplayer(catalog, retriever, asker, docs),
 		Tokens:    wordTokenCounter{},
 		Export:    app.NewExporter(colls, docs, index),
-		Import:    app.NewImporter(colls, docs, index, remover, lexical),
+		Import:    app.NewImporter(colls, docs, index, remover, lexical, emb),
 		Verify:    checker,
 		Eval:      app.NewEvaluator(asker, checker),
 		Index:     index,
