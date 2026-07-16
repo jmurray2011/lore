@@ -207,7 +207,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		}, nil
 	}
 
-	root := cli.NewRootCommand(build, fmt.Sprintf("%s (commit %s, built %s)", version, commit, date), stdout, stderr)
+	root := cli.NewRootCommand(build, fmt.Sprintf("%s (commit %s, built %s)", version, commit, date), defaultPath, stdout, stderr)
 	// Show the real resolved config path in --config help instead of the abstract
 	// "<user-config-dir>/..." placeholder, so a user knows exactly which file to
 	// create or edit.

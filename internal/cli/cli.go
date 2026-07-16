@@ -80,7 +80,7 @@ type Builder func(context.Context, GlobalOptions) (Deps, error)
 // errOut. The build function is invoked once before any subcommand runs to
 // produce the dependencies the commands share. Errors returned from Execute map
 // to process exit codes via ExitCode.
-func NewRootCommand(build Builder, version string, out, errOut io.Writer) *cobra.Command {
+func NewRootCommand(build Builder, version, defaultConfigPath string, out, errOut io.Writer) *cobra.Command {
 	// deps is populated by PersistentPreRunE before any subcommand's RunE; the
 	// subcommands capture &deps so they see the built value at run time.
 	var deps Deps
@@ -153,6 +153,7 @@ to the embedding model configured when it is created. See docs/configuration.md.
 		newImportCmd(&deps),
 		newRmCmd(&deps),
 		newMCPCmd(&deps),
+		newConfigCmd(defaultConfigPath),
 	)
 	return root
 }

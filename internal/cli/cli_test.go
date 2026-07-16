@@ -388,6 +388,11 @@ func withReranker(deps cli.Deps, prov app.RerankProvider) cli.Deps {
 	return deps
 }
 
+// testConfigPath is a stand-in default config path handed to NewRootCommand in
+// tests. It need not exist: config subcommands that write a file take an explicit
+// temp-dir path, and everything else only reads it for --config help / display.
+const testConfigPath = "/test/home/.config/lore/config.toml"
+
 func newDeps(emb app.Embedder, gen app.Generator) (cli.Deps, *memstore.CollectionRepository, *memstore.DocumentRepository, *memstore.VectorIndex) {
 	colls := memstore.NewCollectionRepository()
 	docs := memstore.NewDocumentRepository()
@@ -443,7 +448,7 @@ func (wordTokenCounter) Count(s string) int { return len(strings.Fields(s)) }
 // exec runs one command with a fresh root (clean flag state) over shared deps.
 func exec(deps cli.Deps, args ...string) (string, int) {
 	var out bytes.Buffer
-	root := cli.NewRootCommand(depsBuilder(deps), "test", &out, io.Discard)
+	root := cli.NewRootCommand(depsBuilder(deps), "test", testConfigPath, &out, io.Discard)
 	root.SetArgs(args)
 	code := cli.ExitCode(root.Execute())
 	return out.String(), code
@@ -452,7 +457,7 @@ func exec(deps cli.Deps, args ...string) (string, int) {
 // execErr is exec but also returns whatever the command wrote to stderr.
 func execErr(deps cli.Deps, args ...string) (stdout, stderr string, code int) {
 	var out, errb bytes.Buffer
-	root := cli.NewRootCommand(depsBuilder(deps), "test", &out, &errb)
+	root := cli.NewRootCommand(depsBuilder(deps), "test", testConfigPath, &out, &errb)
 	root.SetArgs(args)
 	code = cli.ExitCode(root.Execute())
 	return out.String(), errb.String(), code
@@ -461,7 +466,7 @@ func execErr(deps cli.Deps, args ...string) (stdout, stderr string, code int) {
 // execStdin is exec with the given string fed to the command on stdin.
 func execStdin(deps cli.Deps, stdin string, args ...string) (string, int) {
 	var out bytes.Buffer
-	root := cli.NewRootCommand(depsBuilder(deps), "test", &out, io.Discard)
+	root := cli.NewRootCommand(depsBuilder(deps), "test", testConfigPath, &out, io.Discard)
 	root.SetIn(strings.NewReader(stdin))
 	root.SetArgs(args)
 	code := cli.ExitCode(root.Execute())
@@ -489,7 +494,7 @@ func TestRootBuildsDepsFromGlobalFlags(t *testing.T) {
 		return deps, nil
 	}
 	var out bytes.Buffer
-	root := cli.NewRootCommand(build, "test", &out, io.Discard)
+	root := cli.NewRootCommand(build, "test", testConfigPath, &out, io.Discard)
 	root.SetArgs([]string{"--config", "/tmp/x.toml", "--log-level", "debug", "--log-format", "json", "-v", "ls"})
 	if err := root.Execute(); err != nil {
 		t.Fatalf("execute: %v", err)
@@ -510,7 +515,7 @@ func TestRootBuildErrorPropagates(t *testing.T) {
 		return cli.Deps{}, fmt.Errorf("%w: bad config", domain.ErrInvalidArgument)
 	}
 	var out bytes.Buffer
-	root := cli.NewRootCommand(build, "test", &out, io.Discard)
+	root := cli.NewRootCommand(build, "test", testConfigPath, &out, io.Discard)
 	root.SetArgs([]string{"ls"})
 	if code := cli.ExitCode(root.Execute()); code != 2 {
 		t.Errorf("build error should surface as exit 2, got %d", code)

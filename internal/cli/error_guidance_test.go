@@ -16,7 +16,7 @@ import (
 // SilenceErrors mode), so tests can assert on the guidance text, not just the
 // exit code.
 func execE(deps cli.Deps, args ...string) error {
-	root := cli.NewRootCommand(depsBuilder(deps), "test", io.Discard, io.Discard)
+	root := cli.NewRootCommand(depsBuilder(deps), "test", testConfigPath, io.Discard, io.Discard)
 	root.SetArgs(args)
 	return root.Execute()
 }
