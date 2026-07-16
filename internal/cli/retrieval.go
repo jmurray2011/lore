@@ -36,6 +36,7 @@ func newQueryCmd(deps *Deps) *cobra.Command {
 		candidates   int
 		budget       int
 		hybrid       bool
+		lexical      bool
 		maxPerSource int
 		mmr          bool
 		mmrLambda    float64
@@ -74,7 +75,7 @@ func newQueryCmd(deps *Deps) *cobra.Command {
 				return err
 			}
 
-			hits, runnerUp, err := resolveHits(cmd, deps, collections, queryText, k, candidates, source, filter, rerank, explain, hybrid, mmr, mmrLambda, recency, halfLifeDays, maxPerSource)
+			hits, runnerUp, err := resolveHits(cmd, deps, collections, queryText, k, candidates, source, filter, rerank, explain, hybrid, lexical, mmr, mmrLambda, recency, halfLifeDays, maxPerSource)
 			if err != nil {
 				return err
 			}
@@ -103,6 +104,7 @@ func newQueryCmd(deps *Deps) *cobra.Command {
 	cmd.Flags().IntVar(&candidates, "rerank-candidates", 50, "size of the pre-rerank vector candidate pool (must be >= -k)")
 	cmd.Flags().IntVar(&budget, "budget", 0, "cap the returned set to this many tokens (after ranking; trims within -k)")
 	cmd.Flags().BoolVar(&hybrid, "hybrid", deps.RetrievalHybrid, "hybrid retrieval: fuse vector and BM25 keyword results (Reciprocal Rank Fusion)")
+	cmd.Flags().BoolVar(&lexical, "lexical", false, "BM25 keyword-only retrieval — no embedding, so it works with no API key (single-collection; not with --hybrid/--rerank/--mmr/--recency)")
 	cmd.Flags().IntVar(&maxPerSource, "max-per-source", 0, "cap the number of returned chunks per source document (0 = no cap)")
 	cmd.Flags().BoolVar(&mmr, "mmr", false, "diversify results with Maximal Marginal Relevance (single-collection; not with --rerank)")
 	cmd.Flags().Float64Var(&mmrLambda, "mmr-lambda", 0.5, "MMR relevance/diversity trade-off in [0,1] (1=pure relevance, 0=pure diversity)")
@@ -158,7 +160,7 @@ func budgetTrim(hits []domain.ChunkHit, budget int, counter app.TokenCounter) ([
 // (also used by the eval harness and the MCP server). It returns the ranked hits
 // plus, for --explain, the runner-up score (the best candidate just outside the
 // returned set).
-func resolveHits(cmd *cobra.Command, deps *Deps, collections []string, queryText string, k, candidates int, source string, filter domain.Predicate, rerank, explain, hybrid, mmr bool, mmrLambda float64, recency bool, halfLifeDays float64, maxPerSource int) ([]domain.ChunkHit, *float64, error) {
+func resolveHits(cmd *cobra.Command, deps *Deps, collections []string, queryText string, k, candidates int, source string, filter domain.Predicate, rerank, explain, hybrid, lexical, mmr bool, mmrLambda float64, recency bool, halfLifeDays float64, maxPerSource int) ([]domain.ChunkHit, *float64, error) {
 	// Preflight the same way the standalone rerank command does, so query/ask
 	// --rerank name the config keys instead of the app layer's key-less phrasing.
 	if rerank && deps.Rerank == nil {
@@ -174,6 +176,7 @@ func resolveHits(cmd *cobra.Command, deps *Deps, collections []string, queryText
 		Rerank:       rerank,
 		Explain:      explain,
 		Hybrid:       hybrid,
+		Lexical:      lexical,
 		MMR:          mmr,
 		MMRLambda:    mmrLambda,
 		Recency:      recency,
@@ -370,6 +373,7 @@ func newAskCmd(deps *Deps) *cobra.Command {
 		candidates   int
 		budget       int
 		hybrid       bool
+		lexical      bool
 		maxPerSource int
 		mmr          bool
 		mmrLambda    float64
@@ -433,14 +437,14 @@ func newAskCmd(deps *Deps) *cobra.Command {
 				streamedRaw string
 			)
 			switch {
-			case rerank || budget > 0 || multi || stream || hybrid || mmr || recency || maxPerSource > 0 || reproducible:
+			case rerank || budget > 0 || multi || stream || hybrid || lexical || mmr || recency || maxPerSource > 0 || reproducible:
 				// Interpose between retrieval and synthesis: resolve hits (across
 				// collections, two-stage via --rerank, and/or --hybrid fusion), cap
 				// them to the token --budget, then synthesize — streaming the prose
 				// when enabled. Uses the Synthesize seam and replicates Ask's strict
 				// guard, which it lacks.
 				var hits []domain.ChunkHit
-				hits, runnerUp, err = resolveHits(cmd, deps, collections, question, k, candidates, source, filter, rerank, explain, hybrid, mmr, mmrLambda, recency, halfLifeDays, maxPerSource)
+				hits, runnerUp, err = resolveHits(cmd, deps, collections, question, k, candidates, source, filter, rerank, explain, hybrid, lexical, mmr, mmrLambda, recency, halfLifeDays, maxPerSource)
 				if err != nil {
 					return err
 				}
@@ -613,6 +617,7 @@ func newAskCmd(deps *Deps) *cobra.Command {
 	cmd.Flags().IntVar(&candidates, "rerank-candidates", 50, "size of the pre-rerank vector candidate pool (must be >= -k)")
 	cmd.Flags().IntVar(&budget, "budget", 0, "cap grounding to this many tokens (after ranking/rerank; trims within -k)")
 	cmd.Flags().BoolVar(&hybrid, "hybrid", deps.RetrievalHybrid, "hybrid retrieval: fuse vector and BM25 keyword results (Reciprocal Rank Fusion) before grounding")
+	cmd.Flags().BoolVar(&lexical, "lexical", false, "ground on BM25 keyword-only retrieval — no embedding, so it works with no embedder API key (single-collection)")
 	cmd.Flags().IntVar(&maxPerSource, "max-per-source", 0, "cap the number of grounding chunks per source document (0 = no cap)")
 	cmd.Flags().BoolVar(&mmr, "mmr", false, "diversify grounding with Maximal Marginal Relevance (single-collection; not with --rerank)")
 	cmd.Flags().Float64Var(&mmrLambda, "mmr-lambda", 0.5, "MMR relevance/diversity trade-off in [0,1] (1=pure relevance, 0=pure diversity)")

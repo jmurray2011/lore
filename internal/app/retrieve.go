@@ -17,15 +17,19 @@ const poolMin = 50
 // Rerank, MMR, and Recency each reorder the candidate pool and are mutually
 // exclusive. Hybrid, Source, Filter, and MaxPerSource compose with any mode.
 type RetrieveOptions struct {
-	Collections  []string
-	Query        string
-	K            int
-	Candidates   int // rerank candidate pool (must be >= K when Rerank)
-	Source       string
-	Filter       domain.Predicate
-	Rerank       bool
-	Explain      bool // surface the runner-up just outside the top-k
-	Hybrid       bool
+	Collections []string
+	Query       string
+	K           int
+	Candidates  int // rerank candidate pool (must be >= K when Rerank)
+	Source      string
+	Filter      domain.Predicate
+	Rerank      bool
+	Explain     bool // surface the runner-up just outside the top-k
+	Hybrid      bool
+	// Lexical selects BM25-only retrieval (no query embedding), for querying with
+	// no usable embedder. It is a distinct mode, mutually exclusive with the
+	// vector-based reorderings (Hybrid/Rerank/MMR/Recency) and single-collection.
+	Lexical      bool
 	MMR          bool
 	MMRLambda    float64
 	Recency      bool
@@ -63,6 +67,8 @@ func (r *Retriever) Resolve(ctx context.Context, opts RetrieveOptions) ([]domain
 // rank selects and runs the appropriate reordering strategy.
 func (r *Retriever) rank(ctx context.Context, opts RetrieveOptions) ([]domain.ChunkHit, *float64, error) {
 	switch {
+	case opts.Lexical:
+		return r.lexical(ctx, opts)
 	case opts.Recency:
 		if opts.MMR {
 			return nil, nil, fmt.Errorf("%w: recency and MMR are mutually exclusive (both reorder the candidate pool)", domain.ErrInvalidArgument)
@@ -82,6 +88,28 @@ func (r *Retriever) rank(ctx context.Context, opts RetrieveOptions) ([]domain.Ch
 		hits, err := r.query(ctx, opts.Collections, opts.Query, opts.K, opts.Source, opts.Filter, opts.Hybrid)
 		return hits, nil, err
 	}
+}
+
+// lexical runs BM25-only retrieval (no query embedding), for querying a
+// collection with no usable embedder. It is mutually exclusive with the
+// vector-based reorderings and is single-collection (cross-collection lexical
+// fusion is not implemented).
+func (r *Retriever) lexical(ctx context.Context, opts RetrieveOptions) ([]domain.ChunkHit, *float64, error) {
+	if opts.Hybrid || opts.Rerank || opts.MMR || opts.Recency {
+		return nil, nil, fmt.Errorf("%w: --lexical is a vector-free mode and cannot be combined with --hybrid/--rerank/--mmr/--recency", domain.ErrInvalidArgument)
+	}
+	if len(opts.Collections) != 1 {
+		return nil, nil, fmt.Errorf("%w: --lexical is single-collection; query each collection separately", domain.ErrInvalidArgument)
+	}
+	if opts.Explain {
+		ret, err := r.querier.ExplainLexical(ctx, opts.Collections[0], opts.Query, opts.K, opts.Source, opts.Filter)
+		if err != nil {
+			return nil, nil, err
+		}
+		return ret.Hits, NextScorePtr(ret), nil
+	}
+	hits, err := r.querier.QueryLexical(ctx, opts.Collections[0], opts.Query, opts.K, opts.Source, opts.Filter)
+	return hits, nil, err
 }
 
 // reranked fetches a wide candidate pool and reorders it to the top-k with the

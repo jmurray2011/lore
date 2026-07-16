@@ -209,6 +209,52 @@ func (q *Querier) retrieve(ctx context.Context, collection, query string, k int,
 	return splitTopK(hits, k), nil
 }
 
+// QueryLexical retrieves by BM25 lexical match only — no query embedding, so it
+// works with no embedder or API key configured (e.g. an imported collection
+// whose embedding space you cannot serve). Results are ranked by FTS5 BM25; a
+// hit's Score is 0 (no vector similarity is computed). Unknown collection is
+// ErrNotFound; empty query is ErrInvalidArgument; a backend with no lexical index
+// is ErrInvalidArgument.
+func (q *Querier) QueryLexical(ctx context.Context, collection, query string, k int, source string, filter domain.Predicate) ([]domain.ChunkHit, error) {
+	r, err := q.retrieveLexical(ctx, collection, query, k, source, filter, false)
+	return r.Hits, err
+}
+
+// ExplainLexical is QueryLexical plus the runner-up just outside the top-k, for
+// --explain. Scores are 0 in this mode, so the runner-up marks position only.
+func (q *Querier) ExplainLexical(ctx context.Context, collection, query string, k int, source string, filter domain.Predicate) (Retrieval, error) {
+	return q.retrieveLexical(ctx, collection, query, k, source, filter, true)
+}
+
+func (q *Querier) retrieveLexical(ctx context.Context, collection, query string, k int, source string, filter domain.Predicate, withRunnerUp bool) (Retrieval, error) {
+	if strings.TrimSpace(query) == "" {
+		return Retrieval{}, fmt.Errorf("query: %w: text must not be empty", domain.ErrInvalidArgument)
+	}
+	if q.lexical == nil {
+		return Retrieval{}, fmt.Errorf("query: %w: lexical retrieval is not available on this backend", domain.ErrInvalidArgument)
+	}
+	coll, err := q.collections.Get(ctx, collection)
+	if err != nil {
+		return Retrieval{}, err
+	}
+	ids, err := q.lexical.Search(ctx, coll.Name, query, searchBudget(k, source, withRunnerUp), filter)
+	if err != nil {
+		return Retrieval{}, fmt.Errorf("lexical search %q: %w", coll.Name, err)
+	}
+	if len(ids) == 0 {
+		return Retrieval{}, nil
+	}
+	matches := make([]domain.VectorMatch, len(ids))
+	for i, id := range ids {
+		matches[i] = domain.VectorMatch{ChunkID: id, Score: 0}
+	}
+	hits, err := q.hydrate(ctx, matches, nil, source)
+	if err != nil {
+		return Retrieval{}, err
+	}
+	return splitTopK(hits, k), nil
+}
+
 // QueryHybrid retrieves with hybrid retrieval: a vector search and a BM25 lexical
 // search, each over a candidate pool, merged by Reciprocal Rank Fusion
 // (domain.FuseRRF) into the top-k. A hit's Score stays its cosine similarity (0.0
