@@ -306,6 +306,26 @@ Turn it on by default with `[retrieval] hybrid = true` (override per-command wit
 The lexical index is built as you ingest. A collection built before hybrid
 existed answers `--hybrid` queries vector-only until rebuilt (`init` + re-`add`).
 
+## Keyword-only retrieval (`--lexical`)
+
+`--lexical` retrieves by BM25 keyword match **only** — it never embeds the query,
+so it works with no embedder and no API key. Its purpose is querying a collection
+whose embedding space you cannot serve: an imported corpus built with a model you
+do not have, or any collection when the provider is unavailable.
+
+```console
+lore query notes "OAuth PKCE flow" --lexical        # BM25 only, no embedding call
+lore ask   notes "what is auth?"    --lexical        # grounds on BM25 hits, then synthesizes
+```
+
+Hits are ranked by BM25 and carry `score` `0` (no cosine is computed). It is a
+distinct retrieval mode: single-collection, and mutually exclusive with
+`--hybrid`/`--rerank`/`--mmr`/`--recency` (which all reorder a vector pool).
+`ask --lexical` still calls a chat model to synthesize — chat is not tied to the
+corpus's embedding space, so any chat endpoint works. For the full-quality path
+when you have a *different* embedder, `import --re-embed` rebuilds vectors in your
+space (see [Portable corpora](corpora.md)).
+
 ## Metadata filtering (`--where`)
 
 Attach structured metadata at ingest — `add --meta key=value` (repeatable) and
