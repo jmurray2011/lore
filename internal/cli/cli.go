@@ -57,6 +57,10 @@ type Deps struct {
 	// ChatModel is the configured chat model name, recorded in an ask manifest's
 	// generation identity. Empty is tolerated (manifest records what it knows).
 	ChatModel string
+	// EmbedSpace is the configured embedder's space (model + dimensions). Import
+	// compares it against an artifact's pinned space to warn when the local
+	// embedder cannot query the imported collection. Zero means "unknown".
+	EmbedSpace domain.EmbeddingSpace
 }
 
 // GlobalOptions are the resolved global flags the composition root needs to

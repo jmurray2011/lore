@@ -204,6 +204,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			Log:             logger,
 			RetrievalHybrid: cfg.Retrieval.Hybrid,
 			ChatModel:       cfg.Provider.ChatModel,
+			EmbedSpace:      domain.EmbeddingSpace{Model: cfg.Provider.EmbedModel, Dimensions: cfg.Provider.Dimensions},
 		}, nil
 	}
 

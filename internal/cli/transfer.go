@@ -106,6 +106,14 @@ func newImportCmd(deps *Deps) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// The artifact imports fine with no provider configured, but querying
+			// needs an embedder that serves the collection's pinned space. Warn now
+			// (on stderr) if the local embedder cannot, so the gap is not discovered
+			// only at the first query.
+			if note, ok := ImportQueryabilityNote(deps.EmbedSpace, sum.Model, sum.Dimensions); ok {
+				_, _ = fmt.Fprintln(cmd.ErrOrStderr(), note)
+			}
+
 			view := transferView{Collection: sum.Collection, Model: sum.Model, Dimensions: sum.Dimensions, Documents: sum.Documents, Chunks: sum.Chunks, Encrypted: encrypted}
 			human := fmt.Sprintf("Imported **%s** — %d documents, %d chunks (%s/%d)%s.", sum.Collection, sum.Documents, sum.Chunks, sum.Model, sum.Dimensions, encNote(encrypted))
 			return render(cmd, view, human)
@@ -281,6 +289,23 @@ func reportToStderr(cmd *cobra.Command, view transferView, human string) error {
 	}
 	_, err := fmt.Fprintln(w, human)
 	return err
+}
+
+// ImportQueryabilityNote returns a stderr note, and true, when the local
+// configured embedder (local) cannot query a just-imported collection because it
+// serves a different embedding space than the one the collection is pinned to
+// (model/dims). It returns ok=false when the spaces match, or when the local
+// space is unknown (zero) — in which case there is nothing useful to say.
+func ImportQueryabilityNote(local domain.EmbeddingSpace, model string, dims int) (string, bool) {
+	if local.Model == "" || local.Dimensions == 0 {
+		return "", false
+	}
+	if local.Model == model && local.Dimensions == dims {
+		return "", false
+	}
+	return fmt.Sprintf("note: this collection is pinned to %s/%d, but your configured embedder is %s/%d. "+
+		"To query it, configure an embedder that serves %s/%d (its exact model and dimensions).",
+		model, dims, local.Model, local.Dimensions, model, dims), true
 }
 
 // encNote is a human suffix marking an encrypted artifact.

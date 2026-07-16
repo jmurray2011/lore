@@ -424,6 +424,9 @@ func newDeps(emb app.Embedder, gen app.Generator) (cli.Deps, *memstore.Collectio
 		Eval:      app.NewEvaluator(asker, checker),
 		Index:     index,
 	}
+	if sp, err := emb.Space(context.Background()); err == nil {
+		deps.EmbedSpace = sp
+	}
 	return deps, colls, docs, index
 }
 
