@@ -400,7 +400,7 @@ func newStatusCmd(deps *Deps) *cobra.Command {
 			}
 			coll, err := deps.Catalog.Get(cmd.Context(), args[0])
 			if err != nil {
-				return err
+				return hintUnknownCollection(cmd.Context(), deps, err)
 			}
 			docs, err := deps.Catalog.ListDocuments(cmd.Context(), args[0])
 			if err != nil {
