@@ -4,6 +4,18 @@ All notable changes to lore are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); lore adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.1.1] — 2026-07-28
+
+### Security
+
+- Bumped two transitive dependencies carrying advisories, both reached through
+  `charmbracelet/glamour`:
+  - `golang.org/x/text` v0.31.0 → v0.39.0 ([GO-2026-5970](https://pkg.go.dev/vuln/GO-2026-5970))
+  - `github.com/yuin/goldmark` v1.7.13 → v1.7.17 ([GO-2026-5320](https://pkg.go.dev/vuln/GO-2026-5320))
+
+  `golang.org/x/sync` moved v0.19.0 → v0.21.0 as a consequence. No new
+  dependencies, no source changes, no behavior change.
+
 ## [1.1.0] — 2026-07-28 — "Spreadsheets that retrieve"
 
 ### Added
