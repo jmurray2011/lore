@@ -3,10 +3,15 @@ package domain
 import "strings"
 
 // StructureChunkerVersion is the algorithm version of the structure-aware
-// strategy (markdown sections + token sizing, plus the plain-text strategy that
-// shares its sizing), recorded in a ChunkerSpec. Bump it when any structure
-// chunker's output could change for the same input.
-const StructureChunkerVersion = 1
+// strategy (markdown sections + token sizing, plus the plain-text and tabular
+// strategies that share its sizing), recorded in a ChunkerSpec. Bump it when any
+// structure chunker's output could change for the same input.
+//
+// v2 added SheetChunker: tabular formats gained sheet names and repeated header
+// rows, so their chunk text changed. The spec is collection-wide, so this
+// invalidates collections that hold no spreadsheets either — they stay
+// queryable, but refuse further ingest until rebuilt.
+const StructureChunkerVersion = 2
 
 // MarkdownChunker splits markdown into token-sized chunks that respect the
 // document's heading hierarchy: each chunk is a section (the content under a
