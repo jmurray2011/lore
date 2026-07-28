@@ -513,7 +513,7 @@ func (q *Querier) hydrate(ctx context.Context, matches []domain.VectorMatch, col
 }
 
 // matchSource reports whether a source URI matches the user's glob. A pattern
-// without "/" matches the document basename (so "*.pdf" or "SSP*" work as
+// without "/" matches the document basename (so "*.pdf" or "spec*" work as
 // expected); a pattern containing "/" matches the URI's path. A malformed
 // pattern matches nothing.
 func matchSource(pattern, sourceURI string) bool {

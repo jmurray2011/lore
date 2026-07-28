@@ -19,7 +19,7 @@ import (
 //
 //  1. exact source URI (so existing full-URI callers keep working unchanged),
 //  2. exact basename (the label `lore docs` prints),
-//  3. glob against the basename (filepath.Match, e.g. "Tenant2*"),
+//  3. glob against the basename (filepath.Match, e.g. "Meeting*"),
 //  4. case-insensitive substring of the full URI.
 //
 // A tier that matches a single document resolves it. A tier that matches more

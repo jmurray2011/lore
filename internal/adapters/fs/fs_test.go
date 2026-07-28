@@ -29,7 +29,7 @@ func TestSourceWalk(t *testing.T) {
 	write("note.bin", "binary-ish")
 	write("doc.pdf", "%PDF-ish")
 	write("report.docx", "zip-ish")
-	write("poam.xlsx", "zip-ish")
+	write("sheet.xlsx", "zip-ish")
 	write(".secret.txt", "shh")
 	write(".git/config", "[core]")
 	write("sub/c.md", "cee")
@@ -76,8 +76,8 @@ func TestSourceWalk(t *testing.T) {
 	if got["report.docx"].ContentType != "application/vnd.openxmlformats-officedocument.wordprocessingml.document" {
 		t.Errorf("report.docx type = %q", got["report.docx"].ContentType)
 	}
-	if got["poam.xlsx"].ContentType != "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" {
-		t.Errorf("poam.xlsx type = %q", got["poam.xlsx"].ContentType)
+	if got["sheet.xlsx"].ContentType != "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" {
+		t.Errorf("sheet.xlsx type = %q", got["sheet.xlsx"].ContentType)
 	}
 	if !strings.HasPrefix(got["a.md"].URI, "file://") {
 		t.Errorf("URI = %q, want file:// scheme", got["a.md"].URI)

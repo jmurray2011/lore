@@ -736,7 +736,7 @@ func TestCLIDocSelectorResolution(t *testing.T) {
 			t.Fatal("init failed")
 		}
 		ctx := context.Background()
-		for _, uri := range []string{"file:///corpus/ssp-v1.md", "file:///corpus/ssp-v2.md", "file:///corpus/notes/readme.md"} {
+		for _, uri := range []string{"file:///corpus/spec-v1.md", "file:///corpus/spec-v2.md", "file:///corpus/notes/readme.md"} {
 			doc, err := domain.NewDocument("docs", uri, domain.HashContent([]byte(uri)), time.Now())
 			if err != nil {
 				t.Fatal(err)
@@ -764,7 +764,7 @@ func TestCLIDocSelectorResolution(t *testing.T) {
 	})
 
 	t.Run("cat with an ambiguous selector is a usage error", func(t *testing.T) {
-		if _, code := exec(seed(t), "cat", "docs", "--doc", "ssp"); code != 2 {
+		if _, code := exec(seed(t), "cat", "docs", "--doc", "spec"); code != 2 {
 			t.Errorf("ambiguous --doc should exit 2, got %d", code)
 		}
 	})
@@ -785,7 +785,7 @@ func TestCLIDocSelectorResolution(t *testing.T) {
 			t.Errorf("removed document should be not-found, got exit %d", code)
 		}
 		// Siblings survive.
-		if _, code := exec(deps, "cat", "docs", "--doc", "ssp-v1.md"); code != 0 {
+		if _, code := exec(deps, "cat", "docs", "--doc", "spec-v1.md"); code != 0 {
 			t.Errorf("sibling document should remain, got exit %d", code)
 		}
 	})
@@ -2388,7 +2388,7 @@ func TestCLIAddExclude(t *testing.T) {
 		t.Helper()
 		deps, _, _, _ := newDeps(stubEmbedder{space: testSpace(), vec: []float32{1, 0, 0}}, stubGenerator{})
 		dir := t.TempDir()
-		for _, name := range []string{"keep.txt", "also-keep.txt", "Tenant2 (1).txt"} {
+		for _, name := range []string{"keep.txt", "also-keep.txt", "Meeting Notes (1).txt"} {
 			if err := os.WriteFile(filepath.Join(dir, name), []byte("hello grounded world"), 0o600); err != nil {
 				t.Fatal(err)
 			}

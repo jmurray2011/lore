@@ -83,8 +83,8 @@ glob/substring — instead of the full `file://` URI:
 
 ```bash
 lore cat notes --doc report.md          # basename
-lore cat notes --doc 'ssp-*'            # glob on the basename
-lore rm  notes --doc 'Tenant2 (1)'      # unique substring of the URI
+lore cat notes --doc 'spec-*'           # glob on the basename
+lore rm  notes --doc 'Meeting Notes (1)' # unique substring of the URI
 ```
 
 Resolution is tiered (exact URI, then exact basename, then glob, then
