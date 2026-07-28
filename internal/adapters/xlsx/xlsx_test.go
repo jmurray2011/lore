@@ -126,6 +126,7 @@ func TestExtractSheetNames(t *testing.T) {
 	t.Run("names each sheet in workbook tab order", func(t *testing.T) {
 		got, err := e.Extract(xlsx.ContentType, makeWorkbook(t, shared, []sheetSpec{
 			{name: "Orders", data: header + body},
+			// Keeps an "&" so the tab name has to survive XML entity escaping.
 			{name: "Parts & Labor", data: header + body},
 		}, false))
 		if err != nil {
