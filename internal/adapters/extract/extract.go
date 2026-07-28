@@ -1,7 +1,9 @@
 // Package extract turns supported raw content into plain text for chunking. It
-// handles text/plain and text/markdown; markdown is currently embedded as-is
-// (heading-aware handling is a later refinement). Newlines are normalized to
-// "\n" so a file's content hash is stable across platforms.
+// handles text/plain, text/markdown, and text/csv; markdown is currently
+// embedded as-is (heading-aware handling is a later refinement), and csv is
+// passed through verbatim so the sheet chunker can treat its first line as a
+// header row. Newlines are normalized to "\n" so a file's content hash is stable
+// across platforms.
 package extract
 
 import (
@@ -37,7 +39,7 @@ func (Extractor) Extract(contentType string, raw []byte) (string, error) {
 
 func supported(contentType string) bool {
 	switch baseType(contentType) {
-	case "text/plain", "text/markdown":
+	case "text/plain", "text/markdown", "text/csv":
 		return true
 	default:
 		return false

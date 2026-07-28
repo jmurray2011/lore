@@ -8,7 +8,7 @@ import (
 
 func TestExtractorSupports(t *testing.T) {
 	e := extract.New()
-	for _, ct := range []string{"text/plain", "text/markdown", "text/plain; charset=utf-8", "TEXT/MARKDOWN"} {
+	for _, ct := range []string{"text/plain", "text/markdown", "text/csv", "text/csv; charset=utf-8", "text/plain; charset=utf-8", "TEXT/MARKDOWN"} {
 		if !e.Supports(ct) {
 			t.Errorf("want Supports(%q) = true", ct)
 		}
@@ -33,6 +33,13 @@ func TestExtractorExtract(t *testing.T) {
 	t.Run("markdown passes through", func(t *testing.T) {
 		got, err := e.Extract("text/markdown", []byte("# H\n\ntext"))
 		if err != nil || got != "# H\n\ntext" {
+			t.Errorf("got %q, %v", got, err)
+		}
+	})
+
+	t.Run("csv normalizes CRLF", func(t *testing.T) {
+		got, err := e.Extract("text/csv", []byte("id,status\r\n1,open\r\n"))
+		if err != nil || got != "id,status\n1,open\n" {
 			t.Errorf("got %q, %v", got, err)
 		}
 	})
