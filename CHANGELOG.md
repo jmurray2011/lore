@@ -4,6 +4,51 @@ All notable changes to lore are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); lore adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.1.0] — 2026-07-28 — "Spreadsheets that retrieve"
+
+### Added
+
+- **CSV ingest.** `.csv` files are ingested as text instead of being counted
+  `unsupported`. The extension maps to `text/csv` explicitly rather than through
+  the OS mime table, which on some machines resolves `.csv` to a spreadsheet type
+  and routes it to the wrong extractor. Content is passed through verbatim; csv
+  quoting and embedded newlines are not parsed.
+- **Sheet names in `.xlsx` extraction.** Each worksheet's rows are led by its
+  workbook **tab name**, resolved through `xl/workbook.xml` and its relationships
+  and emitted in tab order (previously sheets were unnamed and ordered by zip
+  part name). Workbooks written without those parts fall back to the part name.
+- **Sheet-aware chunking for `.xlsx` and `.csv`.** Every chunk cut from a table
+  repeats that table's **sheet name and header row**, so a row retrieved from the
+  middle of a workbook still names its own columns — previously it retrieved as
+  bare cells with no recoverable header. Rows are never split across chunks or
+  duplicated between them, and the sheet name is carried as the chunk's heading
+  path. The first line of each table is treated as its header.
+
+### Changed
+
+- **`StructureChunkerVersion` 1 → 2** (breaking for ingest; see *Migration*).
+
+### Migration
+
+Sheet-aware chunking changes the structure strategy's output, so collections
+record `structure/v2` from this release on. The chunker spec is pinned **per
+collection, not per format**, so every collection created before 1.1 is
+affected — including collections that contain no spreadsheets.
+
+Affected collections stay **fully queryable**: `query`, `ask`, `cat`, `docs`,
+and `export` are unchanged. Only `add` and `sync` refuse, with exit **4** and an
+`ErrChunkerMismatch` message naming both specs. Rebuild a collection when you
+next need to ingest into it:
+
+```bash
+lore status notes                          # check the pinned chunker
+lore rm notes
+lore init notes && lore add notes ./docs   # re-embeds from source
+```
+
+There is no in-place re-chunk; rebuilding re-embeds, so budget provider cost and
+time accordingly for large collections.
+
 ## [1.0.0] — 2026-07-28 — "The auditable knowledge base"
 
 **1.0 is a stability commitment.** The CLI surface, the `--json` contracts, the
