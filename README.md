@@ -10,7 +10,6 @@ lore makes faithfulness verification and retrieval evaluation **CI-gateable** an
 [![Release](https://img.shields.io/github/v/release/jmurray2011/lore)](https://github.com/jmurray2011/lore/releases/latest)
 [![Go](https://img.shields.io/github/go-mod/go-version/jmurray2011/lore)](go.mod)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
-[![Go Report Card](https://goreportcard.com/badge/github.com/jmurray2011/lore)](https://goreportcard.com/report/github.com/jmurray2011/lore)
 
 ```console
 $ export LORE_API_KEY=sk-...            # any OpenAI-compatible provider (or a local one; see below)
