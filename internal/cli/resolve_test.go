@@ -25,11 +25,12 @@ func docFixtures(t *testing.T, uris ...string) []*domain.Document {
 
 func TestResolveDocURI(t *testing.T) {
 	t.Parallel()
-	docs := docFixtures(t,
-		"file:///corpus/ssp-v1.md",
-		"file:///corpus/ssp-v2.md",
+	docs := docFixtures(
+		t,
+		"file:///corpus/spec-v1.md",
+		"file:///corpus/spec-v2.md",
 		"file:///corpus/notes/readme.md",
-		"file:///corpus/Tenant2 (1).pdf",
+		"file:///corpus/Meeting Notes (1).pdf",
 	)
 
 	tests := []struct {
@@ -37,10 +38,10 @@ func TestResolveDocURI(t *testing.T) {
 		selector string
 		want     string
 	}{
-		{"exact full URI is unchanged (backward compatible)", "file:///corpus/ssp-v1.md", "file:///corpus/ssp-v1.md"},
+		{"exact full URI is unchanged (backward compatible)", "file:///corpus/spec-v1.md", "file:///corpus/spec-v1.md"},
 		{"exact basename resolves to the full URI", "readme.md", "file:///corpus/notes/readme.md"},
-		{"glob on basename resolves a single match", "Tenant2*", "file:///corpus/Tenant2 (1).pdf"},
-		{"substring resolves a single match", "Tenant2 (1)", "file:///corpus/Tenant2 (1).pdf"},
+		{"glob on basename resolves a single match", "Meeting*", "file:///corpus/Meeting Notes (1).pdf"},
+		{"substring resolves a single match", "Meeting Notes (1)", "file:///corpus/Meeting Notes (1).pdf"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -58,7 +59,7 @@ func TestResolveDocURI(t *testing.T) {
 
 func TestResolveDocURINoMatch(t *testing.T) {
 	t.Parallel()
-	docs := docFixtures(t, "file:///corpus/ssp-v1.md")
+	docs := docFixtures(t, "file:///corpus/spec-v1.md")
 	_, err := resolveDocURI(docs, "nonesuch.md")
 	if !errors.Is(err, app.ErrNotFound) {
 		t.Fatalf("want ErrNotFound, got %v", err)
@@ -67,12 +68,13 @@ func TestResolveDocURINoMatch(t *testing.T) {
 
 func TestResolveDocURIAmbiguous(t *testing.T) {
 	t.Parallel()
-	docs := docFixtures(t,
-		"file:///corpus/ssp-v1.md",
-		"file:///corpus/ssp-v2.md",
+	docs := docFixtures(
+		t,
+		"file:///corpus/spec-v1.md",
+		"file:///corpus/spec-v2.md",
 	)
-	// "ssp" is a substring of two distinct documents: the selector must be refined.
-	_, err := resolveDocURI(docs, "ssp")
+	// "spec" is a substring of two distinct documents: the selector must be refined.
+	_, err := resolveDocURI(docs, "spec")
 	if !errors.Is(err, domain.ErrInvalidArgument) {
 		t.Fatalf("want ErrInvalidArgument (ambiguous), got %v", err)
 	}
@@ -80,7 +82,7 @@ func TestResolveDocURIAmbiguous(t *testing.T) {
 
 func TestResolveDocURIEmptySelector(t *testing.T) {
 	t.Parallel()
-	docs := docFixtures(t, "file:///corpus/ssp-v1.md")
+	docs := docFixtures(t, "file:///corpus/spec-v1.md")
 	if _, err := resolveDocURI(docs, ""); !errors.Is(err, domain.ErrInvalidArgument) {
 		t.Fatalf("want ErrInvalidArgument for empty selector, got %v", err)
 	}
@@ -90,7 +92,8 @@ func TestResolveDocURIEmptySelector(t *testing.T) {
 // be drowned out by other documents that share a substring.
 func TestResolveDocURITierPrecedence(t *testing.T) {
 	t.Parallel()
-	docs := docFixtures(t,
+	docs := docFixtures(
+		t,
 		"file:///a/report.md",
 		"file:///b/report-draft.md",
 	)

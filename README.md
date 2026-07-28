@@ -13,18 +13,15 @@ lore makes faithfulness verification and retrieval evaluation **CI-gateable** an
 [![Go Report Card](https://goreportcard.com/badge/github.com/jmurray2011/lore)](https://goreportcard.com/report/github.com/jmurray2011/lore)
 
 ```console
+$ export LORE_API_KEY=sk-...            # any OpenAI-compatible provider (or a local one; see below)
 $ lore init notes
 $ lore add notes ./docs
 $ lore ask notes "how does auth work?"
 ```
 
-<!-- TODO: record — demo placeholder; replace the link below with the cast/GIF.
-     Record script (~25s; the grounded, cited answer is the payoff):
-       lore init notes && lore add notes ./docs && lore ask notes "how does auth work?"
-     e.g. `asciinema rec lore-demo.cast -c 'bash demo.sh'`, then `asciinema upload`
-     and point the link at the result — or `agg lore-demo.cast docs/demo.gif` and
-     use ![lore demo](docs/demo.gif). -->
-[![asciinema demo (coming soon)](https://img.shields.io/badge/demo-asciinema-d35400?logo=asciinema)](https://github.com/jmurray2011/lore)
+lore embeds and answers over an OpenAI-compatible API, so it needs a provider
+(OpenAI, Azure, Ollama, vLLM, a local server, ...). Configure one before `init` —
+see [Quickstart](#quickstart) and [docs/configuration.md](docs/configuration.md).
 
 ## Why lore
 
@@ -66,6 +63,11 @@ tar -xzf lore_<version>_linux_amd64.tar.gz   # Windows ships a .zip
 sudo install lore /usr/local/bin/
 ```
 
+On macOS the binary is unsigned; if Gatekeeper blocks it, clear the quarantine
+flag once with `xattr -d com.apple.quarantine lore` (or right-click the binary
+in Finder and choose Open). On Windows, unzip the archive and add the folder
+containing `lore.exe` to your `PATH`.
+
 **With Go** (1.25+): `go install github.com/jmurray2011/lore/cmd/lore@latest`
 
 **From source:** `git clone https://github.com/jmurray2011/lore && cd lore && go build -o lore ./cmd/lore`
@@ -73,6 +75,16 @@ sudo install lore /usr/local/bin/
 ## Quickstart
 
 ```console
+# 0. Point lore at an OpenAI-compatible provider. Do this BEFORE `init`: a
+#    collection is permanently pinned to the embedding model configured when it
+#    is created. Prefer the env var for the key; other settings go in the config.
+export LORE_API_KEY=sk-...
+lore config init                 # optional: write a starter config.toml to edit
+lore config path                 # print the config file lore will read
+#    Fully local, no key (Ollama):
+#      export LORE_BASE_URL=http://localhost:11434/v1
+#      export LORE_EMBED_MODEL=nomic-embed-text  LORE_DIMENSIONS=768  LORE_CHAT_MODEL=llama3.1
+
 # create a collection (pinned to your embedding model's space)
 lore init notes
 
@@ -114,7 +126,7 @@ are tagged `source#chunk`, so every result traces back to its document.
 - **Token-budget retrieval** — fill *N* tokens of context instead of a fixed chunk count. [docs →](docs/retrieval.md#token-budget-retrieval)
 - **Streaming answers** — tokens stream on a TTY, buffer cleanly in pipes. [docs →](docs/retrieval.md#streaming-answers)
 - **Cross-collection retrieval** — merge several corpora, or semantically diff two. [docs →](docs/retrieval.md#cross-collection-retrieval)
-- **Portable & encrypted corpora** — `export` a whole indexed corpus to one file; ship or `age`-encrypt it. [docs →](docs/corpora.md)
+- **Portable & encrypted corpora** — `export` a whole indexed corpus to one file; ship or `age`-encrypt it. A recipient queries it with their own embedder (`import --re-embed`), or offline with no API key (`query --lexical`). [docs →](docs/corpora.md)
 - **Collection diff** — see which documents were added, removed, or changed between two collections or a snapshot. [docs →](docs/corpora.md#diffing-collections)
 - **Read-only MCP server** — expose your corpora as grounded, cited tools to any MCP client. [docs →](docs/mcp.md)
 - **Structure-aware chunking** — heading/paragraph-aware, code-fence-safe, pinned per collection. [docs →](docs/retrieval.md#chunking)
@@ -140,9 +152,10 @@ passing the conformance suites — no changes to the core.
 ## Configuration
 
 Precedence: **flags > env (`LORE_*`) > config file > defaults**; the config file
-is TOML at `<user-config-dir>/lore/config.toml`. Full settings reference —
-provider, rerank, storage, chunking, cache, split endpoints, Azure — in
-[docs/configuration.md](docs/configuration.md).
+is TOML at `<user-config-dir>/lore/config.toml`. Run `lore config path` to print
+the exact location, and `lore config init` to write a commented starter file
+there. Full settings reference — provider, rerank, storage, chunking, cache,
+split endpoints, Azure — in [docs/configuration.md](docs/configuration.md).
 
 ## Output and exit codes
 

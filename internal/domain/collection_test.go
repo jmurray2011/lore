@@ -92,6 +92,16 @@ func TestCollectionAcceptsSpace(t *testing.T) {
 			t.Errorf("want ErrSpaceMismatch, got %v", err)
 		}
 	})
+
+	t.Run("mismatch error names the remedy", func(t *testing.T) {
+		err := c.AcceptsSpace(domain.EmbeddingSpace{Model: "other", Dimensions: 8})
+		msg := err.Error()
+		// The message must tell the user what to DO, not just state the invariant:
+		// configure a matching embedder, or rebuild the collection.
+		if !strings.Contains(msg, "rebuild") || !strings.Contains(strings.ToLower(msg), "embedder") {
+			t.Errorf("space-mismatch error should name the remedy (configure an embedder / rebuild), got: %s", msg)
+		}
+	})
 }
 
 func TestValidateCollectionName(t *testing.T) {

@@ -17,6 +17,13 @@ func newInitCmd(deps *Deps) *cobra.Command {
 	return &cobra.Command{
 		Use:   "init <collection>",
 		Short: "Create a collection, pinned to the configured embedding space",
+		Long: `Create a collection: a named, searchable index of your documents.
+
+A collection is permanently pinned to the embedding model configured when it is
+created, so configure your provider first (see docs/configuration.md). To use a
+different embedding model later, create a new collection — there is no in-place
+re-embed.`,
+		Example: `  lore init notes`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) != 1 {
 				return fmt.Errorf("%w: init takes exactly one collection name", domain.ErrInvalidArgument)
@@ -400,7 +407,7 @@ func newStatusCmd(deps *Deps) *cobra.Command {
 			}
 			coll, err := deps.Catalog.Get(cmd.Context(), args[0])
 			if err != nil {
-				return err
+				return hintUnknownCollection(cmd.Context(), deps, err)
 			}
 			docs, err := deps.Catalog.ListDocuments(cmd.Context(), args[0])
 			if err != nil {

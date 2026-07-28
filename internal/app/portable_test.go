@@ -43,7 +43,7 @@ func seedExportable(t *testing.T, colls *fakeCollections, docs *fakeDocs, idx *f
 }
 
 func newImporter(colls *fakeCollections, docs *fakeDocs, idx *fakeIndex) *app.Importer {
-	return app.NewImporter(colls, docs, idx, app.NewRemover(colls, docs, idx, &fakeLexical{}), &fakeLexical{})
+	return app.NewImporter(colls, docs, idx, app.NewRemover(colls, docs, idx, &fakeLexical{}), &fakeLexical{}, &fakeEmbedder{space: testSpace()})
 }
 
 func TestExportImportRoundTrip(t *testing.T) {
@@ -61,7 +61,7 @@ func TestExportImportRoundTrip(t *testing.T) {
 	}
 
 	dstColls, dstDocs, dstIdx := newFakeCollections(), &fakeDocs{}, &fakeIndex{}
-	isum, err := newImporter(dstColls, dstDocs, dstIdx).Import(ctx, &buf, "", false)
+	isum, err := newImporter(dstColls, dstDocs, dstIdx).Import(ctx, &buf, "", false, false)
 	if err != nil {
 		t.Fatalf("Import: %v", err)
 	}
@@ -134,7 +134,7 @@ func TestImportRename(t *testing.T) {
 	}
 
 	dstColls, dstDocs, dstIdx := newFakeCollections(), &fakeDocs{}, &fakeIndex{}
-	if _, err := newImporter(dstColls, dstDocs, dstIdx).Import(ctx, &buf, "renamed", false); err != nil {
+	if _, err := newImporter(dstColls, dstDocs, dstIdx).Import(ctx, &buf, "renamed", false, false); err != nil {
 		t.Fatalf("Import --name: %v", err)
 	}
 	if _, err := dstColls.Get(ctx, "renamed"); err != nil {
@@ -174,7 +174,7 @@ func TestImportCollisionAndForce(t *testing.T) {
 	t.Run("refuses an existing name without force", func(t *testing.T) {
 		colls, docs, idx := newFakeCollections(), &fakeDocs{}, &fakeIndex{}
 		seedExportable(t, colls, docs, idx, "kb") // already present
-		_, err := newImporter(colls, docs, idx).Import(ctx, export(), "", false)
+		_, err := newImporter(colls, docs, idx).Import(ctx, export(), "", false, false)
 		if !errors.Is(err, app.ErrAlreadyExists) {
 			t.Errorf("want ErrAlreadyExists, got %v", err)
 		}
@@ -193,7 +193,7 @@ func TestImportCollisionAndForce(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		if _, err := newImporter(colls, docs, idx).Import(ctx, export(), "", true); err != nil {
+		if _, err := newImporter(colls, docs, idx).Import(ctx, export(), "", true, false); err != nil {
 			t.Fatalf("Import --force: %v", err)
 		}
 		// The stale document is gone; the imported one is present.
@@ -215,7 +215,7 @@ func TestImportRejectsNewerArtifact(t *testing.T) {
 	buf.WriteString("body")
 
 	colls, docs, idx := newFakeCollections(), &fakeDocs{}, &fakeIndex{}
-	_, err := newImporter(colls, docs, idx).Import(ctx, &buf, "", false)
+	_, err := newImporter(colls, docs, idx).Import(ctx, &buf, "", false, false)
 	if !errors.Is(err, artifact.ErrUnsupportedVersion) {
 		t.Fatalf("want ErrUnsupportedVersion, got %v", err)
 	}

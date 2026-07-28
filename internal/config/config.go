@@ -658,6 +658,33 @@ func DefaultPath() (string, error) {
 	return filepath.Join(dir, "lore", "config.toml"), nil
 }
 
+// UndecodedKeys returns the keys present in the TOML file at path that lore does
+// not recognize — a typo, or a key placed in the wrong table (e.g. a top-level
+// api_key instead of one under [provider]). A silently ignored key otherwise
+// behaves exactly like an unset one, so the composition root logs these as a
+// warning to break the edit / re-run / same-error loop. An empty path, an absent
+// file, or a decode error yields no keys (a real decode error surfaces through
+// Resolve, which reads the same file).
+func UndecodedKeys(path string) []string {
+	if path == "" {
+		return nil
+	}
+	var fc fileConfig
+	md, err := toml.DecodeFile(path, &fc)
+	if err != nil {
+		return nil
+	}
+	und := md.Undecoded()
+	if len(und) == 0 {
+		return nil
+	}
+	keys := make([]string, len(und))
+	for i, k := range und {
+		keys[i] = k.String()
+	}
+	return keys
+}
+
 // DefaultDBPath is the conventional SQLite database location, alongside the
 // config file: <user-config-dir>/lore/lore.db.
 func DefaultDBPath() (string, error) {

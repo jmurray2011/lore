@@ -23,9 +23,36 @@ collection returns the same results as the original). The format is versioned;
 an artifact newer than your `lore` understands is refused with a clear error
 rather than mis-parsed.
 
-This is what you commit to a repo, attach to a release, or hand a teammate ("the
-docs, pre-indexed — ask it anything"), and it is the natural unit to point an
-agent or [MCP server](mcp.md) at: a portable corpus, no re-indexing required.
+This is what you commit to a repo, attach to a release, or hand a teammate (the
+docs, pre-indexed), and it is the natural unit to point an agent or
+[MCP server](mcp.md) at. The artifact records each document's source URI
+(including local file paths) alongside its chunks. What a recipient needs to
+query it is below.
+
+### What the recipient needs
+
+`import` itself needs nothing but the `lore` binary, and `ls`/`status`/`docs`/
+`cat`/`diff` then work fully offline. Querying is where the embedding space
+matters — the query text has to be embedded into the same space as the stored
+vectors:
+
+- **The same embedder.** To run `query`/`ask` on the carried vectors, configure an
+  OpenAI-compatible endpoint (and key) serving the *same embedding model and
+  dimensions* the corpus was built with. `lore status <name>` after import shows
+  that model/dimensions; a mismatch is refused with a clear, actionable error.
+- **A different embedder** (`import --re-embed`). Rebuilds the vectors from the
+  carried chunk text with *your* configured embedder and pins the collection to
+  your space, so any embedder you can run — including a local one like Ollama's
+  `nomic-embed-text` — makes the corpus queryable. It calls the embedder, so cost
+  and time scale with the corpus; it is a one-time step.
+- **No embedder at all** (`query --lexical` / `ask --lexical`). Retrieve by BM25
+  keyword match with no embedding, so a handed corpus is usable with no API key.
+  `ask --lexical` still needs a chat model to synthesize, but any chat endpoint
+  works — chat is not tied to the corpus's embedding space.
+
+The lossless round-trip (identical results to the original) holds on the first
+path — same embedder, carried vectors. `--re-embed` re-derives vectors in a new
+space, so results are equivalent, not byte-identical.
 
 ## Diffing collections
 

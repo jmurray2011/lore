@@ -2,7 +2,7 @@
 // SpreadsheetML parts; most cell text lives in a shared-string table
 // (xl/sharedStrings.xml) referenced by cells in xl/worksheets/*.xml. This
 // extractor resolves those references and emits one line per row (cells
-// tab-joined) so row context — e.g. a control ID beside its status — survives
+// tab-joined) so row context — e.g. an item ID beside its status — survives
 // for retrieval. Formatting, formulas, and merged-cell geometry are not
 // preserved. Stdlib only.
 package xlsx

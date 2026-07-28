@@ -58,8 +58,8 @@ func TestExtract(t *testing.T) {
 	e := xlsx.New()
 
 	t.Run("reconstructs rows, resolving shared strings and inline numbers", func(t *testing.T) {
-		shared := []string{"Control", "AC-2 Account Management", "Status", "Open"}
-		// row1: Control | Status   row2: AC-2... | Open | 42 (inline number)
+		shared := []string{"Item", "A-2 Widget Assembly", "Status", "Open"}
+		// row1: Item | Status   row2: A-2... | Open | 42 (inline number)
 		sheet := `<row><c t="s"><v>0</v></c><c t="s"><v>2</v></c></row>` +
 			`<row><c t="s"><v>1</v></c><c t="s"><v>3</v></c><c><v>42</v></c></row>`
 
@@ -67,10 +67,10 @@ func TestExtract(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Extract: %v", err)
 		}
-		if !strings.Contains(got, "AC-2 Account Management\tOpen\t42") {
+		if !strings.Contains(got, "A-2 Widget Assembly\tOpen\t42") {
 			t.Errorf("row context lost; got:\n%s", got)
 		}
-		if !strings.Contains(got, "Control\tStatus") {
+		if !strings.Contains(got, "Item\tStatus") {
 			t.Errorf("header row missing; got:\n%s", got)
 		}
 	})
