@@ -4,7 +4,7 @@ All notable changes to lore are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); lore adheres to
 [Semantic Versioning](https://semver.org/).
 
-## [1.0.0] — 2026-06-13 — "The auditable knowledge base"
+## [1.0.0] — 2026-07-28 — "The auditable knowledge base"
 
 **1.0 is a stability commitment.** The CLI surface, the `--json` contracts, the
 exit-code semantics, and the on-disk/portable formats are now versioned and
@@ -49,6 +49,18 @@ changes migrate in place and degrade gracefully (see *Migration*).
   `--budget` and multiple collections; mutually exclusive with `--rerank`/`--mmr`.
 - **Exit code 5** — a quality gate was not met (`ask --verify-strict`,
   `lore eval --fail-under`), distinct from runtime (1) and usage (2) errors.
+- **`lore config path` / `lore config init`.** `path` prints the config file lore
+  would read; `init` scaffolds a commented starter file there. Both skip the
+  runtime build, so they work before a provider is configured — the first-run
+  chicken-and-egg problem.
+- **Lexical-only retrieval — `query`/`ask --lexical`.** BM25 with no embedder
+  call at all, so a collection is searchable without a provider (and without
+  spending tokens). Distinct from `--hybrid`, which fuses BM25 *with* vectors.
+- **`import --re-embed`.** Rebuilds an imported collection's vectors in the
+  local embedding space, so an artifact built against someone else's embedder
+  becomes queryable with yours instead of being read-only. `import` also now
+  warns up front when the local embedder cannot query the collection it just
+  reconstructed.
 
 ### Changed
 
@@ -68,6 +80,19 @@ changes migrate in place and degrade gracefully (see *Migration*).
   `--max-per-source` → `--budget` trim.
 - `query`/`ask` hit `--json` gains an optional `metadata` field; `docs --json`
   gains `metadata`. Both are `omitempty`, so output without metadata is unchanged.
+- **A missing `--config` file is now a hard error**, not a silent fall-through to
+  defaults. Explicitly naming a config file that isn't there almost always means
+  a typo or a bad path, and silently ignoring it produced confusing downstream
+  failures. Unrecognized keys in a config file now warn (naming the key) instead
+  of being dropped, so a misspelled setting is visible rather than inert.
+- **Provider auth failures are actionable.** A 401/403 from the embed, chat, or
+  rerank endpoint is rewritten into guidance naming the env var to set, the
+  config file in play, and the relevant docs page, instead of surfacing the raw
+  provider error. Embedding-space mismatches now name the remedy, and
+  `query`/`ask` errors gained shell-quoting hints, rerank-key guidance, and
+  next steps on an unknown collection.
+- **Root and `init` help teach the workflow** (`init` → `add` → `ask`) rather
+  than only listing flags.
 
 ### Deferred
 
