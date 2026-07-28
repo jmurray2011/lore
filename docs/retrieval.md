@@ -257,8 +257,13 @@ selected by `chunk.strategy`:
     **never splits inside a fenced code block**; oversized sections split at
     paragraph (then sentence, then word) boundaries; tiny adjacent sections merge
     up to the target size.
-  - **Plain text / docx / pdf / xlsx** pack paragraphs up to the target size,
+  - **Plain text / docx / pdf** pack paragraphs up to the target size,
     never breaking mid-sentence where avoidable.
+  - **Spreadsheets (`.xlsx`, `.csv`)** chunk by table: every chunk repeats its
+    sheet name and the table's **header row**, so a row retrieved from the middle
+    of a workbook still names its own columns. Rows are never split across chunks
+    or duplicated between them — the repeated header takes the place of an
+    overlap window — and the sheet name is carried as the heading path.
 - **`fixed`** — fixed-size word windows (an escape hatch).
 
 Sizes are measured in **tokens** (`chunk.size`, `chunk.overlap`) for the
@@ -270,6 +275,13 @@ and in `--json`.
 the chunk's heading path is prepended to the text that gets **embedded**, so the
 vector captures the chunk's place in the document. The **stored** text is always
 the original — citations and `cat` show real content, never the prefixed form.
+The spreadsheet header repetition is different, and deliberately so: it is part
+of the **stored** text, because a table's header is genuinely missing from the
+chunk rather than merely absent from its embedding.
+
+The first line of each table is taken to be its header. A workbook with banner
+or title rows above the real header chunks worse; there is no heuristic that
+detects this, and none is planned.
 
 **Chunker pinning.** A collection records the chunker it was created with (shown
 by `lore status`). Re-ingesting (`add`/`sync`) with a *different* chunker —
@@ -279,6 +291,19 @@ re-chunking), so lore **refuses it with exit 4** rather than silently mixing.
 Changing the chunker means rebuilding: `lore init` a fresh collection and re-add.
 Collections created before pinning existed are read-only in the same way —
 queryable, but they must be rebuilt to ingest again.
+
+> **Upgrading to 1.1:** sheet-aware chunking changed the structure strategy's
+> output, so its version moved from `structure/v1` to `structure/v2`. The spec is
+> recorded per collection, not per format, so **every** collection created before
+> 1.1 is affected — including ones holding no spreadsheets. They remain fully
+> queryable (`query`, `ask`, `cat`, `export` are untouched); only `add` and
+> `sync` refuse, with exit 4. Rebuild when you next need to ingest into one:
+>
+> ```bash
+> lore status notes            # shows the pinned chunker, e.g. structure/v1 ...
+> lore rm notes                # then re-init and re-add from source
+> lore init notes && lore add notes ./docs
+> ```
 
 Code-aware chunking (one chunk per function/class, via tree-sitter) is a planned
 future strategy that slots into the same registry; source files currently use

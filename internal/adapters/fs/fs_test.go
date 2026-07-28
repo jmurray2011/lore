@@ -30,6 +30,7 @@ func TestSourceWalk(t *testing.T) {
 	write("doc.pdf", "%PDF-ish")
 	write("report.docx", "zip-ish")
 	write("sheet.xlsx", "zip-ish")
+	write("rows.csv", "id,status")
 	write(".secret.txt", "shh")
 	write(".git/config", "[core]")
 	write("sub/c.md", "cee")
@@ -43,8 +44,8 @@ func TestSourceWalk(t *testing.T) {
 		t.Fatalf("Walk: %v", err)
 	}
 
-	if len(got) != 7 {
-		t.Fatalf("want 7 items, got %d: %v", len(got), got)
+	if len(got) != 8 {
+		t.Fatalf("want 8 items, got %d: %v", len(got), got)
 	}
 	if _, ok := got[".secret.txt"]; ok {
 		t.Error("hidden file should be skipped")
@@ -78,6 +79,11 @@ func TestSourceWalk(t *testing.T) {
 	}
 	if got["sheet.xlsx"].ContentType != "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" {
 		t.Errorf("sheet.xlsx type = %q", got["sheet.xlsx"].ContentType)
+	}
+	// Explicit, not mime.TypeByExtension: the OS mime table (the Windows registry,
+	// /etc/mime.types) can map .csv to something else on some machines.
+	if got["rows.csv"].ContentType != "text/csv" {
+		t.Errorf("rows.csv type = %q", got["rows.csv"].ContentType)
 	}
 	if !strings.HasPrefix(got["a.md"].URI, "file://") {
 		t.Errorf("URI = %q, want file:// scheme", got["a.md"].URI)

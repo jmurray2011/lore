@@ -46,7 +46,8 @@ func TestEndToEnd(t *testing.T) {
 	}
 
 	dbPath := filepath.Join(dir, "lore.db")
-	env := append(os.Environ(),
+	env := append(
+		os.Environ(),
 		"LORE_BASE_URL="+provider.URL+"/v1",
 		"LORE_API_KEY=test",
 		"LORE_EMBED_MODEL=stub-embed",
@@ -104,8 +105,13 @@ func TestEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	csvPath := filepath.Join(dir, "rows.csv")
+	if err := os.WriteFile(csvPath, []byte("id,status,owner\ncsvsentinel,open,ruiz\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
 	mustSucceed(t, "init", "docs")
-	mustSucceed(t, "add", "docs", txtPath, docxPath, pdfPath, xlsxPath)
+	mustSucceed(t, "add", "docs", txtPath, docxPath, pdfPath, xlsxPath, csvPath)
 
 	// Fresh process must see the collection written by a prior process.
 	if out := mustSucceed(t, "--json", "ls"); !strings.Contains(out, `"name": "docs"`) {
@@ -116,7 +122,8 @@ func TestEndToEnd(t *testing.T) {
 	}
 	// docs lists every ingested source (persisted via sqlite ListDocuments).
 	if out := mustSucceed(t, "--json", "docs", "docs"); !strings.Contains(out, "alpha.txt") ||
-		!strings.Contains(out, "report.docx") || !strings.Contains(out, "paper.pdf") || !strings.Contains(out, "sheet.xlsx") {
+		!strings.Contains(out, "report.docx") || !strings.Contains(out, "paper.pdf") ||
+		!strings.Contains(out, "sheet.xlsx") || !strings.Contains(out, "rows.csv") {
 		t.Fatalf("docs did not list all ingested sources: %s", out)
 	}
 	// sync with no path replays the source roots remembered (in sqlite) by add,
@@ -124,12 +131,18 @@ func TestEndToEnd(t *testing.T) {
 	if out := mustSucceed(t, "--json", "sync", "docs"); !strings.Contains(out, `"added": 0`) {
 		t.Fatalf("sync should replay remembered sources and re-add nothing: %s", out)
 	}
-	// All three formats flowed through the router into the store.
+	// Every format flowed through the router into the store.
 	out := mustSucceed(t, "--json", "query", "docs", "alpha")
 	for _, want := range []string{"alpha beta gamma", "docxsentinel", "pdfsentinel", "xlsxsentinel"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("query missing %q (format not ingested?): %s", want, out)
 		}
+	}
+	// The csv is retrievable and its chunk carries the header row, so a retrieved
+	// record still names its columns.
+	if out := mustSucceed(t, "--json", "query", "docs", "csvsentinel"); !strings.Contains(out, "csvsentinel") ||
+		!strings.Contains(out, "id,status,owner") {
+		t.Fatalf("csv chunk missing or stripped of its header: %s", out)
 	}
 	if out := mustSucceed(t, "--json", "ask", "docs", "what is alpha?"); !strings.Contains(out, "stub answer") {
 		t.Fatalf("ask did not return the synthesized answer: %s", out)
@@ -177,7 +190,8 @@ func TestEndToEndAnswerCache(t *testing.T) {
 		t.Fatalf("build binary: %v", err)
 	}
 
-	env := append(os.Environ(),
+	env := append(
+		os.Environ(),
 		"LORE_BASE_URL="+provider.URL+"/v1",
 		"LORE_API_KEY=test",
 		"LORE_EMBED_MODEL=stub-embed",
@@ -254,7 +268,8 @@ func TestEndToEndSplitEmbedChatEndpoints(t *testing.T) {
 		t.Fatalf("build binary: %v", err)
 	}
 
-	env := append(os.Environ(),
+	env := append(
+		os.Environ(),
 		// No LORE_BASE_URL: both roles override the shared connection entirely.
 		"LORE_API_KEY=secret", // shared key, inherited by both roles
 		"LORE_EMBED_BASE_URL="+embedSrv.URL+"/v1",

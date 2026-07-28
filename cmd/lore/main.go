@@ -327,14 +327,24 @@ func buildChunkers(cc config.Chunk, counter *tiktoken.Counter) (domain.Registry,
 		if err != nil {
 			return domain.Registry{}, err
 		}
-		// Plain text (and the default for docx paragraphs + best-effort pdf/xlsx
-		// text) uses the paragraph-aware, token-sized text chunker.
+		// Plain text (and the default for docx paragraphs + best-effort pdf text)
+		// uses the paragraph-aware, token-sized text chunker.
 		text, err := domain.NewTextChunker(cc.Size, cc.Overlap, counter.Count)
 		if err != nil {
 			return domain.Registry{}, err
 		}
+		// Tabular formats are row-per-line, so paragraph packing would split a
+		// table anywhere and strand rows without their column headers.
+		sheet, err := domain.NewSheetChunker(cc.Size, cc.Overlap, counter.Count)
+		if err != nil {
+			return domain.Registry{}, err
+		}
 		spec := domain.ChunkerSpec{Strategy: "structure", Version: domain.StructureChunkerVersion, Size: cc.Size, Overlap: cc.Overlap, Tokenizer: tiktoken.EncodingName, ContextPrefix: cc.ContextPrefix}
-		return domain.NewRegistry(spec, text, map[string]domain.Chunker{"text/markdown": markdown})
+		return domain.NewRegistry(spec, text, map[string]domain.Chunker{
+			"text/markdown":  markdown,
+			"text/csv":       sheet,
+			xlsx.ContentType: sheet,
+		})
 	default:
 		// config validation rejects unknown strategies; this stays defensive.
 		return domain.Registry{}, fmt.Errorf("lore: %w: unknown chunk strategy %q", domain.ErrInvalidArgument, cc.Strategy)

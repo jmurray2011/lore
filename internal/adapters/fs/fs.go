@@ -149,6 +149,11 @@ func contentType(path string) string {
 		return "text/markdown"
 	case ".txt", ".text":
 		return "text/plain"
+	case ".csv":
+		// Explicit rather than via mime.TypeByExtension: the OS mime table (the
+		// Windows registry, /etc/mime.types) can map .csv to a spreadsheet type,
+		// which would route it to the wrong extractor.
+		return "text/csv"
 	case ".pdf":
 		return "application/pdf"
 	case ".docx":

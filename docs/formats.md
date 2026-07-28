@@ -8,7 +8,8 @@ from files it *skipped*.
 | Plain text | `.txt` | UTF-8, newlines normalized |
 | Markdown | `.md`, `.markdown` | heading-aware chunking, code-fence-safe |
 | Word | `.docx` | text runs, paragraph breaks |
-| Excel | `.xlsx` | one line per row, cells tab-joined |
+| Excel | `.xlsx` | one line per row, cells tab-joined, each sheet led by its tab name |
+| CSV | `.csv` | passed through as text; first line treated as a header row |
 | PDF | `.pdf` | best-effort text (no layout/tables; image-only PDFs yield nothing) |
 
 Unsupported files are reported as a separate `unsupported` count (distinct from
@@ -33,9 +34,14 @@ will re-ingest a file you excluded on `add` unless you exclude it again or delet
 it at the source.
 
 Extraction is best-effort *text*: PDF layout, columns, and tables are not
-preserved, and `.xlsx` formatting and formulas are dropped (cell values only).
-See [chunking](retrieval.md#chunking) for how extracted text is split into the
-retrieval unit.
+preserved, and `.xlsx` formatting and formulas are dropped (cell values only —
+a formula cell yields its last cached value, and a date yields its serial
+number, since number formats are not applied). Empty cells are skipped rather
+than padded, so column position is not recoverable from a row's text.
+
+Tabular formats (`.xlsx`, `.csv`) are chunked so that each chunk repeats its
+sheet name and header row — see [chunking](retrieval.md#chunking) for how
+extracted text is split into the retrieval unit.
 
 ## Data formats (versioned)
 
