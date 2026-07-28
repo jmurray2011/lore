@@ -4,6 +4,16 @@ All notable changes to lore are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/); lore adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.1.2] — 2026-07-28
+
+### Changed
+
+- Test fixtures for the spreadsheet chunker and xlsx extractor now use neutral
+  vocabulary. No functional change; the binary is equivalent to 1.1.1.
+
+Released so that the published binaries carry a commit stamp that resolves in
+the public history.
+
 ## [1.1.1] — 2026-07-28
 
 ### Security
