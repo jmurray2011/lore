@@ -116,7 +116,17 @@ type chatRequest struct {
 	Messages       []chatMessage   `json:"messages"`
 	ResponseFormat *responseFormat `json:"response_format,omitempty"`
 	Stream         bool            `json:"stream,omitempty"`
+	// Temperature and Seed are pinned only for a reproducible (audited) synthesis;
+	// pointers so omitempty omits them entirely on a normal request (temperature 0
+	// is a meaningful pinned value that must be sent, not dropped).
+	Temperature *float64 `json:"temperature,omitempty"`
+	Seed        *int     `json:"seed,omitempty"`
 }
+
+// deterministicSeed is the fixed seed pinned for reproducible synthesis. A
+// constant (not per-run) is the point: replay must send the same seed to
+// reproduce the same sampling.
+const deterministicSeed = 1
 
 // streamChunk is one server-sent chunk of a streamed chat completion: the token
 // delta is in choices[0].delta.content.
@@ -140,7 +150,13 @@ type jsonSchema struct {
 }
 
 type chatResponse struct {
-	Choices []struct {
+	// Model is the model the provider actually served (often more specific than
+	// the requested name, e.g. gpt-4o-mini-2024-07-18); SystemFingerprint is the
+	// backend configuration identity. Both are recorded as answer provenance so a
+	// manifest pins the generation identity, not just the requested model name.
+	Model             string `json:"model"`
+	SystemFingerprint string `json:"system_fingerprint"`
+	Choices           []struct {
 		Message struct {
 			Content string `json:"content"`
 		} `json:"message"`
@@ -150,6 +166,18 @@ type chatResponse struct {
 // Synthesize asks the model to answer the question grounded in the given hits
 // and any attachments.
 func (g *Generator) Synthesize(ctx context.Context, question string, hits []domain.ChunkHit, attachments []domain.Attachment) (app.Answer, error) {
+	return g.synthesize(ctx, question, hits, attachments, false)
+}
+
+// SynthesizeDeterministic is Synthesize with the generation pinned for
+// reproducibility — temperature 0 and a fixed seed — recording the pinned values
+// in the answer's Provenance. It satisfies app.DeterministicGenerator, the seam
+// the audited `ask --reproducible` path requires.
+func (g *Generator) SynthesizeDeterministic(ctx context.Context, question string, hits []domain.ChunkHit, attachments []domain.Attachment) (app.Answer, error) {
+	return g.synthesize(ctx, question, hits, attachments, true)
+}
+
+func (g *Generator) synthesize(ctx context.Context, question string, hits []domain.ChunkHit, attachments []domain.Attachment, deterministic bool) (app.Answer, error) {
 	system := systemPrompt
 	if g.caps.StructuredOutput {
 		system += structuredInstruction
@@ -164,6 +192,10 @@ func (g *Generator) Synthesize(ctx context.Context, question string, hits []doma
 			{Role: "system", Content: system},
 			{Role: "user", Content: userContent},
 		},
+	}
+	if deterministic {
+		temp, seed := 0.0, deterministicSeed
+		req.Temperature, req.Seed = &temp, &seed
 	}
 	if g.caps.StructuredOutput {
 		req.ResponseFormat = &responseFormat{
@@ -180,9 +212,20 @@ func (g *Generator) Synthesize(ctx context.Context, question string, hits []doma
 		return app.Answer{}, fmt.Errorf("openai: chat completion returned no choices")
 	}
 	content := resp.Choices[0].Message.Content
+	prov := &app.Provenance{ResolvedModel: resp.Model, SystemFingerprint: resp.SystemFingerprint}
+	if deterministic {
+		prov.Deterministic = true
+		prov.Temperature = 0
+		prov.Seed = deterministicSeed
+	}
 
 	if g.caps.StructuredOutput {
-		return parseStructured(content, hits)
+		ans, err := parseStructured(content, hits)
+		if err != nil {
+			return app.Answer{}, err
+		}
+		ans.Provenance = prov
+		return ans, nil
 	}
 	// Rewrite the model's [n] ordinals to the canonical [chunkID] form and collect
 	// the cited chunks; fall back to the whole grounding set when it cited nothing.
@@ -190,7 +233,7 @@ func (g *Generator) Synthesize(ctx context.Context, question string, hits []doma
 	if len(citations) == 0 {
 		citations = groundingSet(hits)
 	}
-	return app.Answer{Text: text, Citations: citations}, nil
+	return app.Answer{Text: text, Citations: citations, Provenance: prov}, nil
 }
 
 // resolveCitations rewrites the model's bracketed ordinal references ([n], or

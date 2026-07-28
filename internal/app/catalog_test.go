@@ -115,6 +115,81 @@ func TestCatalogListDocuments(t *testing.T) {
 	})
 }
 
+func TestCatalogDiff(t *testing.T) {
+	ctx := context.Background()
+	space := testSpace()
+
+	seed := func(t *testing.T, docs *fakeDocs, collection, uri, content string) {
+		t.Helper()
+		doc, err := domain.NewDocument(collection, uri, domain.HashContent([]byte(content)), time.Unix(0, 0).UTC())
+		if err != nil {
+			t.Fatalf("NewDocument: %v", err)
+		}
+		if err := docs.Upsert(ctx, doc, nil); err != nil {
+			t.Fatalf("Upsert: %v", err)
+		}
+	}
+
+	docs := &fakeDocs{}
+	// old: a.md, shared.md (v1), gone.md
+	seed(t, docs, "old", "file:///a.md", "a1")
+	seed(t, docs, "old", "file:///shared.md", "v1")
+	seed(t, docs, "old", "file:///gone.md", "g")
+	// new: a.md (unchanged), shared.md (v2), added.md
+	seed(t, docs, "new", "file:///a.md", "a1")
+	seed(t, docs, "new", "file:///shared.md", "v2")
+	seed(t, docs, "new", "file:///added.md", "x")
+	cat := app.NewCatalog(
+		newFakeCollections(mustCollection(t, "old", space), mustCollection(t, "new", space)),
+		docs, &fakeEmbedder{space: space}, chunker41(t))
+
+	t.Run("classifies added, removed, and changed by source URI and hash", func(t *testing.T) {
+		diff, err := cat.Diff(ctx, "old", "new")
+		if err != nil {
+			t.Fatalf("Diff: %v", err)
+		}
+		if len(diff.Added) != 1 || diff.Added[0].SourceURI != "file:///added.md" {
+			t.Errorf("Added = %+v, want [added.md]", diff.Added)
+		}
+		if len(diff.Removed) != 1 || diff.Removed[0].SourceURI != "file:///gone.md" {
+			t.Errorf("Removed = %+v, want [gone.md]", diff.Removed)
+		}
+		if len(diff.Changed) != 1 || diff.Changed[0].SourceURI != "file:///shared.md" {
+			t.Fatalf("Changed = %+v, want [shared.md]", diff.Changed)
+		}
+		ch := diff.Changed[0]
+		if ch.From != string(domain.HashContent([]byte("v1"))) || ch.To != string(domain.HashContent([]byte("v2"))) {
+			t.Errorf("Changed hashes = %+v, want v1->v2", ch)
+		}
+	})
+
+	t.Run("an unchanged document appears in no bucket", func(t *testing.T) {
+		diff, err := cat.Diff(ctx, "old", "new")
+		if err != nil {
+			t.Fatalf("Diff: %v", err)
+		}
+		for _, r := range append(append([]app.DocRef{}, diff.Added...), diff.Removed...) {
+			if r.SourceURI == "file:///a.md" {
+				t.Errorf("unchanged a.md should not appear: %+v", diff)
+			}
+		}
+		for _, ch := range diff.Changed {
+			if ch.SourceURI == "file:///a.md" {
+				t.Errorf("unchanged a.md should not appear as changed: %+v", diff)
+			}
+		}
+	})
+
+	t.Run("a missing collection is ErrNotFound", func(t *testing.T) {
+		if _, err := cat.Diff(ctx, "old", "ghost"); !errors.Is(err, app.ErrNotFound) {
+			t.Errorf("want ErrNotFound, got %v", err)
+		}
+		if _, err := cat.Diff(ctx, "ghost", "new"); !errors.Is(err, app.ErrNotFound) {
+			t.Errorf("want ErrNotFound, got %v", err)
+		}
+	})
+}
+
 func TestCatalogDocumentChunks(t *testing.T) {
 	ctx := context.Background()
 	space := testSpace()

@@ -6,14 +6,26 @@ reranking, token budgets, cross-collection search, streaming, and chunking.
 
 ## `query` → `synthesize`: the retrieval/synthesis seam
 
-`ask` is retrieval + synthesis in one step. To get *between* them — filter,
-re-rank, threshold, or merge hits yourself — pipe `query --json` into
-`synthesize`, which reads hits on stdin and answers from exactly those:
+`ask` is retrieval + synthesis in one step, and most retrieval shaping is now a
+flag on it (`--hybrid`, `--rerank`, `--mmr`, `--max-per-source`, `--recency`,
+`--where`, `--budget`). `synthesize` is the escape hatch for the rest: it reads
+hits on stdin and answers from *exactly* those, so you can interpose arbitrary
+`jq` surgery — or feed chunks from a **different retriever entirely** — between
+retrieval and synthesis:
 
 ```bash
 lore query kb "tenant isolation" --json \
   | jq 'map(select(.score > 0.3))' \
   | lore synthesize "how is tenant isolation enforced?"
+```
+
+The synthesis-side flags match `ask`: `--verify`/`--verify-strict`, `--stream`/
+`--no-stream`, `--expand`, and `--attach`. Crucially, `synthesize --verify`
+checks each claim against the **piped chunks themselves** (no collection lookup),
+so faithfulness gating works even when the grounding came from outside `lore`:
+
+```bash
+lore query kb "key rotation" --json | lore synthesize "current policy?" --verify-strict
 ```
 
 Query hits and answer citations are tagged with their source as `source#chunk`,
@@ -42,7 +54,10 @@ lore ask notes "…" --expand --json           # answer object gains an "expansi
 usage error (exit 2); a well-formed but absent one warns on stderr, still prints
 the chunks that were found, and exits 3. `--expand` (and `--explain`, below) are
 orthogonal to each other, to `--source`, and to `--strict` (strict still
-hard-errors on an ungrounded question before either runs).
+hard-errors before either runs when retrieval returns no chunks — an empty
+collection or an over-narrow `--source`/`--where`, *not* a question the corpus
+merely answers poorly; for "is the answer actually supported by what it cites?"
+use `--verify-strict`, the faithfulness gate).
 
 To delete a specific chunk rather than read it — e.g. a passage that should no
 longer be retrievable — use `rm --chunk` (the write-side counterpart of
@@ -61,6 +76,22 @@ its vector from the index, **not** from the source document — re-ingesting tha
 source (`add`/`sync`) re-chunks it and brings the text back. For permanent
 redaction, also remove or edit the source, or drop the whole document with
 `rm --doc`.
+
+Both `cat --doc` and `rm --doc` resolve their `--doc` selector against the
+collection's documents, so you can pass the basename `lore docs` prints — or a
+glob/substring — instead of the full `file://` URI:
+
+```bash
+lore cat notes --doc report.md          # basename
+lore cat notes --doc 'spec-*'           # glob on the basename
+lore rm  notes --doc 'Meeting Notes (1)' # unique substring of the URI
+```
+
+Resolution is tiered (exact URI, then exact basename, then glob, then
+case-insensitive substring); the first tier with a match wins. A selector that
+matches more than one document is a usage error (exit 2) listing the candidates;
+one that matches none is not-found (exit 3). A full source URI still resolves
+to itself, so existing scripts are unaffected.
 
 ## Retrieval diagnostics
 
@@ -252,3 +283,176 @@ queryable, but they must be rebuilt to ingest again.
 Code-aware chunking (one chunk per function/class, via tree-sitter) is a planned
 future strategy that slots into the same registry; source files currently use
 the text chunker.
+
+## Hybrid retrieval (BM25 ⊕ vector)
+
+Pure cosine similarity misses exact keywords, rare tokens, and code identifiers.
+`--hybrid` runs a BM25 keyword search alongside the vector search and fuses the
+two ranked lists with **Reciprocal Rank Fusion** (rank-based, so the incomparable
+cosine and BM25 scales never need normalizing).
+
+```console
+lore query notes "OAuth PKCE flow" --hybrid          # fuse keyword + semantic
+lore ask   notes "what is CVE-2024-1234?" --hybrid   # keyword-heavy questions benefit most
+```
+
+`-k` is the final count; each retriever contributes a wider candidate pool that
+RRF fuses. A hit's `score` stays its cosine similarity (`0.0` for a chunk found
+only by keyword match); the returned order is the fusion order. Composes with
+`--rerank` (hybrid feeds the rerank pool), `--budget`, `--source`, and `--where`.
+Turn it on by default with `[retrieval] hybrid = true` (override per-command with
+`--hybrid=false`). Single-collection only for now.
+
+The lexical index is built as you ingest. A collection built before hybrid
+existed answers `--hybrid` queries vector-only until rebuilt (`init` + re-`add`).
+
+## Keyword-only retrieval (`--lexical`)
+
+`--lexical` retrieves by BM25 keyword match **only** — it never embeds the query,
+so it works with no embedder and no API key. Its purpose is querying a collection
+whose embedding space you cannot serve: an imported corpus built with a model you
+do not have, or any collection when the provider is unavailable.
+
+```console
+lore query notes "OAuth PKCE flow" --lexical        # BM25 only, no embedding call
+lore ask   notes "what is auth?"    --lexical        # grounds on BM25 hits, then synthesizes
+```
+
+Hits are ranked by BM25 and carry `score` `0` (no cosine is computed). It is a
+distinct retrieval mode: single-collection, and mutually exclusive with
+`--hybrid`/`--rerank`/`--mmr`/`--recency` (which all reorder a vector pool).
+`ask --lexical` still calls a chat model to synthesize — chat is not tied to the
+corpus's embedding space, so any chat endpoint works. For the full-quality path
+when you have a *different* embedder, `import --re-embed` rebuilds vectors in your
+space (see [Portable corpora](corpora.md)).
+
+## Metadata filtering (`--where`)
+
+Attach structured metadata at ingest — `add --meta key=value` (repeatable) and
+markdown front-matter — then scope retrieval to it:
+
+```console
+lore add notes ./docs --meta team=platform --meta reviewed=2025-06-01
+lore query notes "rotation policy" --where 'author=alice' --where 'date>=2025-01-01'
+lore docs notes --where 'team=platform'
+```
+
+The predicate grammar is deliberately small (a filter, not a query language):
+`key op value`, AND-combined, with `op` in `= != < <= > >=` (numeric/date/string
+coercion) and `~` (case-insensitive glob with comma-list tag membership). A
+document lacking the key never matches. Filtering is exact (applied in the index
+before the top-k cut) and composes with `--source`, `--hybrid`, `--rerank`,
+`--budget`, and cross-collection `-c`. Metadata appears in `--json` hits and `docs`.
+
+## Diversity (`--max-per-source`, MMR)
+
+By default a single dominant document can sweep `-k`. Two levers fix that:
+
+```console
+lore query notes "deployment" --max-per-source 2     # at most 2 chunks per document
+lore ask   notes "summarize the risks" --mmr --mmr-lambda 0.5
+```
+
+`--max-per-source N` caps hits per source document. `--mmr` reorders by Maximal
+Marginal Relevance — `λ·relevance − (1−λ)·max-similarity-to-already-selected` —
+so near-duplicate chunks are demoted; `--mmr-lambda` (default 0.5) trades
+relevance (1.0) against diversity (0.0). Order in the pipeline:
+fuse/rerank/recency/MMR → `--max-per-source` → `--budget`. `--mmr` is
+single-collection and not combined with `--rerank` (both reorder the pool).
+
+## Recency (`--recency`)
+
+Vector similarity has no notion of time: over an evolving corpus, a stale chunk
+can outrank a newer correction and sweep `-k` purely on relevance. `--recency`
+re-ranks a wider candidate pool by relevance blended with an exponential time
+decay, so a fresh-but-slightly-less-similar chunk that pure cosine buried can
+surface.
+
+```console
+lore query notes "current key rotation policy" --recency
+lore ask   notes "what is the policy now?" --recency --half-life-days 30
+```
+
+Each hit's cosine score is multiplied by `2^(−age/half-life)`; the pool is
+re-sorted by the adjusted score and trimmed to `-k` (the cosine score is
+preserved for display — only the order changes). `--half-life-days` (default 90)
+sets how fast relevance gives way to freshness: a chunk one half-life old keeps
+half its weight; a shorter half-life prefers recency more aggressively.
+
+**A document's date is inferred from the file, not assumed from one format.**
+`lore` tries, strongest to weakest:
+
+1. an explicit *last-modified* front-matter field — `updated`, `modified`,
+   `lastmod`, `updated_at`, `last_modified` (matched case-insensitively);
+2. the file's **filesystem modify time**, captured at ingest under the `mtime`
+   metadata key (so it travels in `export` artifacts and is itself
+   `--where`-queryable, e.g. `--where 'mtime>=2026-06-01'`);
+3. a date in the **filename or path** — an ISO date (`2026-06-09`) or ISO week
+   (`2026-W20`), which covers date-named work logs that have no front matter;
+4. a *created*-style field — `created`, `created_at`, `date`, `published`
+   (ranked below modify-time so an actively-edited note with only a stale
+   `created:` isn't treated as old);
+5. the document's ingest time, as a last resort.
+
+A document with **no** discoverable date keeps full weight, so recency never
+buries an undated chunk on a guess. Filename/path dates are read at query time
+(no re-ingest needed); `mtime` is captured when a document is ingested.
+
+Like the other rerankers, `--recency` operates on a wider pool then trims to
+`-k`; it composes with `--hybrid`, `--where`, `--source`, `--budget`, and
+multiple `-c` collections, and is mutually exclusive with `--rerank` and `--mmr`
+(all three reorder the pool).
+
+## Faithfulness verification & evaluation
+
+An answer is only as good as your ability to *prove* it's grounded.
+
+**`ask --verify`** runs a second pass that checks each sentence (claim) of the
+answer is entailed by the chunk(s) it cites, using the configured chat model:
+
+```console
+lore ask notes "how does key rotation work?" --verify
+```
+
+Human output appends a Verification block (✓ supported · ✗ unsupported · ?
+uncited) with a support rate; `--json` adds a `verification` array
+(`{claim, cited_chunks, verdict, rationale}`) and a `support_rate`.
+**`--verify-strict`** exits non-zero (code 5) if any claim is unsupported — a CI
+faithfulness gate. Verification buffers the answer (it can't verify a token
+stream, so it disables `--stream`) and composes with `--rerank`/`--budget`/
+`--source`/`--where`/`-c`.
+
+**`lore eval`** measures retrieval (and, with `--verify`, answer faithfulness)
+over a question set:
+
+```console
+lore eval notes -f questions.jsonl --verify \
+  --fail-under recall=0.8 --fail-under support_rate=0.9
+```
+
+The eval set is JSONL (an optional first line `{"version": 1}`), one case per line:
+
+```json
+{"question": "how does auth work?", "expected_sources": ["auth.md"]}
+{"question": "rotation cadence?", "expected_chunks": ["<chunk-id>"]}
+```
+
+It reports recall@k, precision@k, MRR, nDCG, and hit-rate (against
+`expected_chunks` when present, else `expected_sources`) plus support-rate under
+`--verify`, per-question and aggregate, human and `--json`. Repeatable
+`--fail-under <metric>=<value>` exits 5 when an aggregate is below threshold — the
+"retrieval didn't regress / the docs still answer X" CI gate.
+
+`eval` evaluates the **same retrieval you run**, not a fixed baseline: it accepts
+the `query`/`ask` retrieval flags (`--hybrid`, `--rerank`, `--recency`, `--mmr`,
+`--where`, `--source`, `--max-per-source`) and resolves each question through the
+same engine, so your metrics reflect your actual pipeline. Measure a change
+before adopting it — e.g. `lore eval notes -f q.jsonl` vs `… --hybrid --recency`.
+
+## Code-aware chunking
+
+Code-aware chunking (one chunk per function/class) is a planned future strategy
+that slots into the chunker registry. It is deferred past 1.0 to keep the
+default build cgo-free (static, cross-compiled, air-gap-clean binaries); the
+resolved approach is a pure-Go heuristic chunker. Source files currently use the
+text chunker.

@@ -20,13 +20,18 @@ var _ app.DocumentRepository = (*DocumentRepository)(nil)
 
 // Upsert stores the document and replaces its chunks, atomically.
 func (r *DocumentRepository) Upsert(ctx context.Context, doc *domain.Document, chunks []domain.Chunk) error {
+	meta, err := encodeMeta(doc.Metadata)
+	if err != nil {
+		return err
+	}
 	return r.tx(ctx, func(tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO documents(id, collection, source_uri, hash, ingested_at, fingerprint) VALUES(?,?,?,?,?,?)
+			`INSERT INTO documents(id, collection, source_uri, hash, ingested_at, fingerprint, metadata) VALUES(?,?,?,?,?,?,?)
 			 ON CONFLICT(id) DO UPDATE SET
 			   collection=excluded.collection, source_uri=excluded.source_uri,
-			   hash=excluded.hash, ingested_at=excluded.ingested_at, fingerprint=excluded.fingerprint`,
-			doc.ID, doc.Collection, doc.SourceURI, doc.Hash, doc.IngestedAt.UTC().Format(time.RFC3339Nano), doc.Fingerprint); err != nil {
+			   hash=excluded.hash, ingested_at=excluded.ingested_at, fingerprint=excluded.fingerprint,
+			   metadata=excluded.metadata`,
+			doc.ID, doc.Collection, doc.SourceURI, doc.Hash, doc.IngestedAt.UTC().Format(time.RFC3339Nano), doc.Fingerprint, meta); err != nil {
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM chunks WHERE document_id=?`, doc.ID); err != nil {
@@ -221,7 +226,7 @@ func (r *DocumentRepository) ListDocuments(ctx context.Context, collection strin
 }
 
 // docColumns is the document column list, in the order scanDoc expects.
-const docColumns = "id, collection, source_uri, hash, ingested_at, fingerprint"
+const docColumns = "id, collection, source_uri, hash, ingested_at, fingerprint, metadata"
 
 // chunkColumns (and chunkColumnsA, the c-aliased form for JOINs) is the chunk
 // column list in the order scanChunk expects.
@@ -246,8 +251,9 @@ func scanDoc(s interface{ Scan(...any) error }) (*domain.Document, error) {
 	var (
 		d          domain.Document
 		ingestedAt string
+		metaRaw    string
 	)
-	if err := s.Scan(&d.ID, &d.Collection, &d.SourceURI, &d.Hash, &ingestedAt, &d.Fingerprint); err != nil {
+	if err := s.Scan(&d.ID, &d.Collection, &d.SourceURI, &d.Hash, &ingestedAt, &d.Fingerprint, &metaRaw); err != nil {
 		return nil, err
 	}
 	t, err := time.Parse(time.RFC3339Nano, ingestedAt)
@@ -255,6 +261,11 @@ func scanDoc(s interface{ Scan(...any) error }) (*domain.Document, error) {
 		return nil, fmt.Errorf("sqlite: parse ingested_at: %w", err)
 	}
 	d.IngestedAt = t
+	meta, err := decodeMeta(metaRaw)
+	if err != nil {
+		return nil, err
+	}
+	d.Metadata = meta
 	return &d, nil
 }
 

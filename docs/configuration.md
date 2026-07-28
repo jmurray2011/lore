@@ -3,6 +3,51 @@
 Precedence: **flags > environment (`LORE_*`) > config file > defaults.** The
 config file is TOML at `<user-config-dir>/lore/config.toml`.
 
+## Minimal setup
+
+Against OpenAI, one setting is enough — everything else has a working default:
+
+```console
+export LORE_API_KEY=sk-...
+```
+
+To use a config file instead of environment variables, scaffold one and edit it:
+
+```console
+lore config init      # write a commented starter config.toml to the default path
+lore config path      # print the exact config file lore will read
+```
+
+`<user-config-dir>/lore/config.toml` resolves per OS:
+
+- Linux: `~/.config/lore/config.toml` (or `$XDG_CONFIG_HOME/lore/config.toml`)
+- macOS: `~/Library/Application Support/lore/config.toml`
+- Windows: `%AppData%\lore\config.toml`
+
+A fully local, no-API-key setup (e.g. Ollama) needs four settings, since the
+OpenAI-shaped defaults for the models and endpoint no longer apply:
+
+```console
+export LORE_BASE_URL=http://localhost:11434/v1
+export LORE_EMBED_MODEL=nomic-embed-text
+export LORE_DIMENSIONS=768
+export LORE_CHAT_MODEL=llama3.1
+```
+
+Good to know:
+
+- `dimensions` must match the embedding model. A collection is pinned to
+  `embed_model`/`dimensions` at `lore init`; changing them later refuses to
+  ingest (rebuild the collection instead — remove it and re-`init`).
+- Pointing `--config` at a file that does not exist is an error, not a silent
+  fall back to defaults. Unrecognized keys in the config file are logged as a
+  warning, so a typo or a misplaced key (e.g. a top-level `api_key` instead of
+  one under `[provider]`) does not pass silently.
+- A provider authentication failure (HTTP 401/403) is reported with the setting
+  to fix (`LORE_API_KEY` / `provider.api_key`), not the raw provider response.
+
+## Full reference
+
 | Env | TOML | Default | Meaning |
 |---|---|---|---|
 | `LORE_BASE_URL` | `provider.base_url` | `https://api.openai.com/v1` | OpenAI-compatible base URL |

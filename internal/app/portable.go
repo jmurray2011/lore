@@ -86,6 +86,7 @@ func (e *Exporter) Export(ctx context.Context, collection string, w io.Writer) (
 			Hash:        string(d.Hash),
 			IngestedAt:  d.IngestedAt,
 			Fingerprint: d.Fingerprint,
+			Metadata:    map[string]string(d.Metadata),
 		}
 		for _, c := range chunks {
 			vec, ok := vecByID[c.ID]
@@ -123,13 +124,18 @@ type Importer struct {
 	collections CollectionRepository
 	docs        DocumentRepository
 	index       VectorIndex
+	lexical     LexicalIndex
 	remover     *Remover
+	embedder    Embedder
 }
 
 // NewImporter wires an Importer; the Remover handles the cascade when --force
-// replaces an existing collection.
-func NewImporter(collections CollectionRepository, docs DocumentRepository, index VectorIndex, remover *Remover) *Importer {
-	return &Importer{collections: collections, docs: docs, index: index, remover: remover}
+// replaces an existing collection. The lexical index is rebuilt from the imported
+// chunks (it is derived content, not carried in the artifact); a nil lexical index
+// imports without one. The embedder is used only by re-embed imports (rebuilding
+// vectors in the local space); a nil embedder makes re-embed a usage error.
+func NewImporter(collections CollectionRepository, docs DocumentRepository, index VectorIndex, remover *Remover, lexical LexicalIndex, embedder Embedder) *Importer {
+	return &Importer{collections: collections, docs: docs, index: index, lexical: lexical, remover: remover, embedder: embedder}
 }
 
 // Import reconstructs the collection in r (a plaintext artifact; any decryption
@@ -137,7 +143,7 @@ func NewImporter(collections CollectionRepository, docs DocumentRepository, inde
 // that already exists is refused with ErrAlreadyExists unless force, which
 // replaces it via the cascade. A malformed or too-new artifact surfaces the
 // artifact package's errors before anything is written.
-func (im *Importer) Import(ctx context.Context, r io.Reader, name string, force bool) (TransferSummary, error) {
+func (im *Importer) Import(ctx context.Context, r io.Reader, name string, force, reEmbed bool) (TransferSummary, error) {
 	b, err := artifact.Read(r)
 	if err != nil {
 		return TransferSummary{}, err
@@ -150,9 +156,22 @@ func (im *Importer) Import(ctx context.Context, r io.Reader, name string, force 
 	if err := domain.ValidateCollectionName(target); err != nil {
 		return TransferSummary{}, err
 	}
+	// The collection is pinned to the artifact's embedding space, unless re-embed
+	// rebuilds the vectors in the local embedder's space — the path that makes a
+	// handed corpus queryable when you cannot serve the model it was built with.
 	space, err := domain.NewEmbeddingSpace(b.Collection.Model, b.Collection.Dimensions)
 	if err != nil {
 		return TransferSummary{}, fmt.Errorf("artifact embedding space: %w", err)
+	}
+	if reEmbed {
+		if im.embedder == nil {
+			return TransferSummary{}, fmt.Errorf("%w: --re-embed needs an embedder, none is configured", domain.ErrInvalidArgument)
+		}
+		local, serr := im.embedder.Space(ctx)
+		if serr != nil {
+			return TransferSummary{}, fmt.Errorf("re-embed: read embedder space: %w", serr)
+		}
+		space = local
 	}
 	chunker := domain.ChunkerSpec{
 		Strategy:      b.Collection.Chunker.Strategy,
@@ -197,6 +216,7 @@ func (im *Importer) Import(ctx context.Context, r io.Reader, name string, force 
 	chunkCount := 0
 	for _, d := range b.Documents {
 		docID := domain.DeriveDocumentID(target, d.SourceURI)
+		meta := domain.Metadata(d.Metadata)
 		doc := &domain.Document{
 			ID:          docID,
 			Collection:  target,
@@ -204,19 +224,50 @@ func (im *Importer) Import(ctx context.Context, r io.Reader, name string, force 
 			Hash:        domain.ContentHash(d.Hash),
 			IngestedAt:  d.IngestedAt,
 			Fingerprint: d.Fingerprint,
+			Metadata:    meta,
 		}
 		chunks := make([]domain.Chunk, len(d.Chunks))
-		entries := make([]VectorEntry, len(d.Chunks))
 		for i, c := range d.Chunks {
-			cid := domain.DeriveChunkID(docID, c.Seq)
-			chunks[i] = domain.Chunk{ID: cid, DocumentID: docID, Seq: c.Seq, Text: c.Text, HeadingPath: c.HeadingPath}
-			entries[i] = VectorEntry{ChunkID: cid, Vector: c.Vector}
+			chunks[i] = domain.Chunk{ID: domain.DeriveChunkID(docID, c.Seq), DocumentID: docID, Seq: c.Seq, Text: c.Text, HeadingPath: c.HeadingPath}
+		}
+		// Vectors are the carried ones, or — with re-embed — rebuilt from the chunk
+		// text in the local space. Re-embed uses the stored chunk text (any
+		// heading-prefix embedding context is not reconstructed); the vectors are
+		// mutually coherent and match a query embedded by the same embedder, which
+		// is what retrieval needs. A purist re-ingests from source.
+		vectors := make([][]float32, len(d.Chunks))
+		if reEmbed {
+			texts := make([]string, len(chunks))
+			for i, c := range chunks {
+				texts[i] = c.Text
+			}
+			vecs, eerr := im.embedder.Embed(ctx, texts)
+			if eerr != nil {
+				return TransferSummary{}, fmt.Errorf("re-embed %q: %w", d.SourceURI, eerr)
+			}
+			if len(vecs) != len(chunks) {
+				return TransferSummary{}, fmt.Errorf("re-embed %q: embedder returned %d vectors for %d chunks", d.SourceURI, len(vecs), len(chunks))
+			}
+			vectors = vecs
+		} else {
+			for i, c := range d.Chunks {
+				vectors[i] = c.Vector
+			}
+		}
+		entries := make([]VectorEntry, len(chunks))
+		for i, c := range chunks {
+			entries[i] = VectorEntry{ChunkID: c.ID, Vector: vectors[i], Metadata: meta}
 		}
 		if err := im.docs.Upsert(ctx, doc, chunks); err != nil {
 			return TransferSummary{}, fmt.Errorf("import document %q: %w", d.SourceURI, err)
 		}
 		if err := im.index.Upsert(ctx, target, entries); err != nil {
 			return TransferSummary{}, fmt.Errorf("import vectors for %q: %w", d.SourceURI, err)
+		}
+		if im.lexical != nil {
+			if err := im.lexical.Upsert(ctx, target, lexicalDocs(chunks, meta)); err != nil {
+				return TransferSummary{}, fmt.Errorf("import lexical for %q: %w", d.SourceURI, err)
+			}
 		}
 		chunkCount += len(chunks)
 	}

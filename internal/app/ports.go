@@ -20,6 +20,17 @@ var (
 	// chunks and no attachments were supplied — there is nothing to ground an
 	// answer in, so the LLM is not called.
 	ErrNoGrounding = errors.New("no grounding")
+	// ErrGateUnmet marks a quality gate that did not pass: ask --verify-strict
+	// found unsupported claims, or lore eval missed a --fail-under threshold. It is
+	// distinct from a runtime error so CI can tell "the answer/retrieval did not
+	// meet the bar" (an actionable, expected signal) from "the tool broke" (exit 1).
+	ErrGateUnmet = errors.New("quality gate not met")
+	// ErrReproducibleUnsupported is returned for ask --reproducible when the
+	// configured generator cannot pin generation for reproducibility (no
+	// DeterministicGenerator capability) — an audited exhibit cannot promise a
+	// literal re-run, so the run fails rather than silently producing a
+	// non-deterministic answer it claims is reproducible.
+	ErrReproducibleUnsupported = errors.New("reproducible generation unsupported")
 )
 
 // CollectionRepository persists Collection aggregates.
@@ -87,10 +98,14 @@ type DocumentRepository interface {
 	DeleteCollection(ctx context.Context, collection string) ([]domain.ChunkID, error)
 }
 
-// VectorEntry pairs a chunk identity with its vector for indexing.
+// VectorEntry pairs a chunk identity with its vector for indexing. Metadata is
+// the chunk's document-level attributes, carried on the entry so the index can
+// apply a --where filter during Search without reaching into the
+// DocumentRepository (the two are separate ports, possibly separate engines).
 type VectorEntry struct {
-	ChunkID domain.ChunkID
-	Vector  []float32
+	ChunkID  domain.ChunkID
+	Vector   []float32
+	Metadata domain.Metadata
 }
 
 // VectorIndex stores and searches vectors. It is deliberately dumb: space
@@ -100,16 +115,47 @@ type VectorEntry struct {
 // Semantics:
 //   - Upsert replaces entries with the same ChunkID.
 //   - Search returns up to k matches, best first (higher score = more
-//     similar). Unknown collection or k <= 0 yields no matches, no error.
+//     similar), considering only entries whose Metadata satisfies filter; the
+//     filter is applied before the top-k cut, so the result is exact (no
+//     over-fetch). The zero Predicate matches every entry, i.e. no filtering.
+//     Unknown collection or k <= 0 yields no matches, no error.
 //   - Delete of absent IDs is a no-op.
 type VectorIndex interface {
 	Upsert(ctx context.Context, collection string, entries []VectorEntry) error
-	Search(ctx context.Context, collection string, query []float32, k int) ([]domain.VectorMatch, error)
+	Search(ctx context.Context, collection string, query []float32, k int, filter domain.Predicate) ([]domain.VectorMatch, error)
 	// Entries returns every stored (ChunkID, Vector) for the collection, in
 	// unspecified order, as copies the caller may retain. An unknown collection
 	// yields no entries and no error (mirrors Search). It feeds a collection's
 	// own vectors back as queries (query --from-collection) without re-embedding.
 	Entries(ctx context.Context, collection string) ([]VectorEntry, error)
+	Delete(ctx context.Context, collection string, ids []domain.ChunkID) error
+}
+
+// LexicalDoc is one chunk's lexical content for the LexicalIndex: its identity,
+// the text to index, and the document metadata a --where filter applies to. It is
+// the lexical-side sibling of VectorEntry.
+type LexicalDoc struct {
+	ChunkID  domain.ChunkID
+	Text     string
+	Metadata domain.Metadata
+}
+
+// LexicalIndex is a keyword (BM25) index over chunk text — the lexical half of
+// hybrid retrieval, a sibling of VectorIndex kept separate so each port stays
+// small and every adapter implements it honestly (memstore in-memory BM25, sqlite
+// FTS5). Results feed rank-based fusion (domain.FuseRRF) with the vector results,
+// so Search returns only the ranked identities, not scores.
+//
+// Semantics:
+//   - Upsert replaces entries with the same ChunkID.
+//   - Search returns up to k chunk IDs ranked by lexical relevance, best first,
+//     considering only entries whose Metadata satisfies filter. An empty query,
+//     unknown collection, or k <= 0 yields no matches, no error. A chunk is a
+//     candidate when it contains at least one query term.
+//   - Delete of absent IDs is a no-op.
+type LexicalIndex interface {
+	Upsert(ctx context.Context, collection string, docs []LexicalDoc) error
+	Search(ctx context.Context, collection string, query string, k int, filter domain.Predicate) ([]domain.ChunkID, error)
 	Delete(ctx context.Context, collection string, ids []domain.ChunkID) error
 }
 
@@ -130,6 +176,23 @@ type Answer struct {
 	// retrieved chunk or attachment. False means the model answered from its own
 	// knowledge alone (only possible in non-strict mode).
 	Grounded bool
+	// Provenance records the generation identity and determinism settings the
+	// generator used, when it captured them. The openai adapter fills it; in-
+	// memory fakes leave it nil. It backs an ask manifest's generation block and
+	// is nil-safe everywhere.
+	Provenance *Provenance
+}
+
+// Provenance records how an answer was generated: the model the provider
+// actually served (ResolvedModel) and its SystemFingerprint, plus whether the
+// request was pinned for reproducibility (Deterministic, with the Temperature
+// and Seed used). It is the generation half of a reproducible ask manifest.
+type Provenance struct {
+	ResolvedModel     string
+	SystemFingerprint string
+	Deterministic     bool
+	Temperature       float64
+	Seed              int
 }
 
 // Generator synthesizes an answer grounded in retrieved chunks, optionally with
@@ -148,6 +211,17 @@ type Generator interface {
 // with a type assertion; the CLI uses it only for interactive streaming.
 type StreamingGenerator interface {
 	SynthesizeStream(ctx context.Context, question string, hits []domain.ChunkHit, attachments []domain.Attachment, onDelta func(string)) (Answer, error)
+}
+
+// DeterministicGenerator is an optional capability a Generator may implement: it
+// synthesizes with the generation pinned for reproducibility (temperature 0 and
+// a fixed seed) and records the pinned values in the returned Answer's
+// Provenance. The audited ask --reproducible path requires it; callers detect
+// support with a type assertion (see Asker.SynthesizeReproducible) and fail with
+// ErrReproducibleUnsupported when it is absent rather than silently producing a
+// non-deterministic answer.
+type DeterministicGenerator interface {
+	SynthesizeDeterministic(ctx context.Context, question string, hits []domain.ChunkHit, attachments []domain.Attachment) (Answer, error)
 }
 
 // AnswerCache stores synthesized answers keyed by an opaque content hash, for
@@ -175,7 +249,11 @@ type SourceItem struct {
 	URI         string
 	ContentType string
 	Fingerprint string
-	Open        func() ([]byte, error)
+	// ModTime is the source's last-modified time, recorded as recency provenance
+	// (the reserved `mtime` metadata key). Zero when the source has no meaningful
+	// timestamp (e.g. stdin).
+	ModTime time.Time
+	Open    func() ([]byte, error)
 }
 
 // Source yields raw documents from somewhere (filesystem walk, stdin, URL).
@@ -188,6 +266,21 @@ type Source interface {
 type Extractor interface {
 	Supports(contentType string) bool
 	Extract(contentType string, raw []byte) (string, error)
+}
+
+// Verdict is the entailment judgment for one claim against candidate evidence:
+// whether the evidence supports the claim, with an optional short rationale.
+type Verdict struct {
+	Supported bool
+	Rationale string
+}
+
+// Verifier judges whether a claim is entailed by evidence text — the model call
+// behind faithfulness verification (ask --verify). The default implementation
+// reuses the chat model via a structured entailment prompt, so it needs no new
+// dependency and inherits the chat endpoint configuration.
+type Verifier interface {
+	Verify(ctx context.Context, claim, evidence string) (Verdict, error)
 }
 
 // TokenCounter approximates how many tokens a piece of text occupies in an

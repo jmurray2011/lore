@@ -76,7 +76,7 @@ func SameSpace(colls []*Collection) error {
 // collection only if they were produced in the collection's own space.
 func (c *Collection) AcceptsSpace(s EmbeddingSpace) error {
 	if !c.Space.Equal(s) {
-		return fmt.Errorf("collection %q is bound to %s, got %s: %w", c.Name, c.Space, s, ErrSpaceMismatch)
+		return fmt.Errorf("collection %q is bound to embedding space %s, but the active embedder is %s; configure an embedder that serves %s, or rebuild the collection under the new model: %w", c.Name, c.Space, s, c.Space, ErrSpaceMismatch)
 	}
 	return nil
 }

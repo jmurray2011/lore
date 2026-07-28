@@ -43,7 +43,9 @@ func (r *DocumentRepository) Upsert(_ context.Context, doc *domain.Document, chu
 		delete(r.byChunkID, id)
 	}
 
-	r.docs[doc.ID] = *doc
+	stored := *doc
+	stored.Metadata = doc.Metadata.Clone() // copy-in: do not alias the caller's map
+	r.docs[doc.ID] = stored
 	ids := make([]domain.ChunkID, len(chunks))
 	for i, c := range chunks {
 		ids[i] = c.ID
@@ -65,6 +67,7 @@ func (r *DocumentRepository) GetBySource(_ context.Context, collection, sourceUR
 	if !ok {
 		return nil, fmt.Errorf("document %q in collection %q: %w", sourceURI, collection, app.ErrNotFound)
 	}
+	d.Metadata = d.Metadata.Clone() // copy-out: callers may mutate
 	return &d, nil
 }
 
@@ -134,6 +137,7 @@ func (r *DocumentRepository) GetDocuments(_ context.Context, ids []domain.Docume
 	for _, id := range ids {
 		if d, ok := r.docs[id]; ok {
 			doc := d
+			doc.Metadata = d.Metadata.Clone()
 			out = append(out, &doc)
 		}
 	}
@@ -150,6 +154,7 @@ func (r *DocumentRepository) ListDocuments(_ context.Context, collection string)
 	for _, d := range r.docs {
 		if d.Collection == collection {
 			doc := d
+			doc.Metadata = d.Metadata.Clone()
 			out = append(out, &doc)
 		}
 	}

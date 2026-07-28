@@ -83,6 +83,224 @@ func (s stubStreamingGen) SynthesizeStream(_ context.Context, _ string, _ []doma
 	return app.Answer{Text: s.text}, nil
 }
 
+// stubDeterministicGen implements app.DeterministicGenerator so a CLI test can
+// drive ask --reproducible; it records whether the determinism seam was used and
+// returns provenance reflecting a pinned (or default) generation.
+type stubDeterministicGen struct{ text string }
+
+func (s stubDeterministicGen) answer(hits []domain.ChunkHit, deterministic bool) app.Answer {
+	cites := make([]domain.Citation, len(hits))
+	for i, h := range hits {
+		cites[i] = domain.Citation{ChunkID: h.Chunk.ID, Source: h.Source, Seq: h.Chunk.Seq, Collection: h.Collection}
+	}
+	prov := &app.Provenance{ResolvedModel: "resolved-x", SystemFingerprint: "fp_z"}
+	if deterministic {
+		prov.Deterministic = true
+		prov.Seed = 1
+	}
+	return app.Answer{Text: s.text, Citations: cites, Provenance: prov}
+}
+
+func (s stubDeterministicGen) Synthesize(_ context.Context, _ string, hits []domain.ChunkHit, _ []domain.Attachment) (app.Answer, error) {
+	return s.answer(hits, false), nil
+}
+
+func (s stubDeterministicGen) SynthesizeDeterministic(_ context.Context, _ string, hits []domain.ChunkHit, _ []domain.Attachment) (app.Answer, error) {
+	return s.answer(hits, true), nil
+}
+
+func TestCLIAskReproducible(t *testing.T) {
+	qvec := []float32{1, 0, 0}
+
+	seedColl := func(t *testing.T, gen app.Generator) cli.Deps {
+		t.Helper()
+		deps, _, docs, index := newDeps(stubEmbedder{space: testSpace(), vec: qvec}, gen)
+		deps.ChatModel = "configured-model"
+		if _, code := exec(deps, "init", "docs"); code != 0 {
+			t.Fatal("init failed")
+		}
+		ctx := context.Background()
+		doc, err := domain.NewDocument("docs", "file:///a.md", domain.HashContent([]byte("x")), time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		chunk, err := domain.NewChunk(doc.ID, 0, "grounded body")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := docs.Upsert(ctx, doc, []domain.Chunk{chunk}); err != nil {
+			t.Fatal(err)
+		}
+		if err := index.Upsert(ctx, "docs", []app.VectorEntry{{ChunkID: chunk.ID, Vector: qvec}}); err != nil {
+			t.Fatal(err)
+		}
+		return deps
+	}
+
+	t.Run("--reproducible --json pins the generation and records it in the manifest", func(t *testing.T) {
+		deps := seedColl(t, stubDeterministicGen{text: "the answer"})
+		out, code := exec(deps, "ask", "docs", "why?", "--reproducible", "--json")
+		if code != 0 {
+			t.Fatalf("exit %d, out %q", code, out)
+		}
+		var ans answerViewJSON
+		if err := json.Unmarshal([]byte(out), &ans); err != nil {
+			t.Fatalf("bad JSON %q: %v", out, err)
+		}
+		if ans.Manifest == nil {
+			t.Fatal("ask --reproducible --json must carry a manifest")
+		}
+		g := ans.Manifest.Generation
+		if !g.Deterministic {
+			t.Error("manifest generation must be marked deterministic")
+		}
+		if g.ResolvedModel != "resolved-x" || g.SystemFingerprint != "fp_z" {
+			t.Errorf("generation identity = %+v, want resolved-x/fp_z", g)
+		}
+		if g.Temperature == nil || *g.Temperature != 0 {
+			t.Errorf("generation temperature = %v, want pinned 0", g.Temperature)
+		}
+		if g.Seed == nil || *g.Seed != 1 {
+			t.Errorf("generation seed = %v, want pinned 1", g.Seed)
+		}
+	})
+
+	t.Run("--reproducible fails closed (exit 2) when the generator cannot pin generation", func(t *testing.T) {
+		deps := seedColl(t, stubGenerator{text: "non-deterministic"})
+		_, code := exec(deps, "ask", "docs", "why?", "--reproducible")
+		if code != 2 {
+			t.Fatalf("exit %d, want 2 (ErrReproducibleUnsupported)", code)
+		}
+	})
+}
+
+func TestCLIReplay(t *testing.T) {
+	qvec := []float32{1, 0, 0}
+
+	setup := func(t *testing.T) (cli.Deps, *memstore.DocumentRepository, *memstore.VectorIndex) {
+		t.Helper()
+		deps, _, docs, index := newDeps(stubEmbedder{space: testSpace(), vec: qvec}, stubDeterministicGen{text: "the answer"})
+		deps.ChatModel = "configured-model"
+		if _, code := exec(deps, "init", "docs"); code != 0 {
+			t.Fatal("init failed")
+		}
+		ctx := context.Background()
+		doc, err := domain.NewDocument("docs", "file:///a.md", domain.HashContent([]byte("x")), time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		chunk, err := domain.NewChunk(doc.ID, 0, "grounded body")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := docs.Upsert(ctx, doc, []domain.Chunk{chunk}); err != nil {
+			t.Fatal(err)
+		}
+		if err := index.Upsert(ctx, "docs", []app.VectorEntry{{ChunkID: chunk.ID, Vector: qvec}}); err != nil {
+			t.Fatal(err)
+		}
+		return deps, docs, index
+	}
+
+	// exhibit produces a reproducible ask --json envelope to replay.
+	exhibit := func(t *testing.T, deps cli.Deps) string {
+		t.Helper()
+		out, code := exec(deps, "ask", "docs", "why?", "--reproducible", "--json")
+		if code != 0 {
+			t.Fatalf("ask exit %d, out %q", code, out)
+		}
+		return out
+	}
+
+	type replayJSON struct {
+		Reproduced     bool          `json:"reproduced"`
+		Attempted      bool          `json:"attempted"`
+		RetrievalMatch bool          `json:"retrieval_match"`
+		AnswerMatch    bool          `json:"answer_match"`
+		Drift          []interface{} `json:"drift"`
+	}
+
+	t.Run("replays an unchanged exhibit to a full reproduction", func(t *testing.T) {
+		deps, _, _ := setup(t)
+		env := exhibit(t, deps)
+		// The full ask --json envelope is accepted directly via stdin.
+		out, code := execStdin(deps, env, "replay", "--json")
+		if code != 0 {
+			t.Fatalf("replay exit %d, out %q", code, out)
+		}
+		var rv replayJSON
+		if err := json.Unmarshal([]byte(out), &rv); err != nil {
+			t.Fatalf("bad replay JSON %q: %v", out, err)
+		}
+		if !rv.Reproduced || !rv.Attempted || !rv.RetrievalMatch || !rv.AnswerMatch || len(rv.Drift) != 0 {
+			t.Errorf("replay verdict = %+v, want fully reproduced with no drift", rv)
+		}
+	})
+
+	t.Run("a manifest file argument is accepted", func(t *testing.T) {
+		deps, _, _ := setup(t)
+		env := exhibit(t, deps)
+		path := filepath.Join(t.TempDir(), "exhibit.json")
+		if err := os.WriteFile(path, []byte(env), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, code := exec(deps, "replay", path); code != 0 {
+			t.Fatalf("replay <file> exit %d, want 0", code)
+		}
+	})
+
+	t.Run("corpus drift fails closed (exit 5) and does not attempt reproduction", func(t *testing.T) {
+		deps, docs, _ := setup(t)
+		env := exhibit(t, deps)
+		// Mutate the corpus: a new document changes the collection's digest.
+		ctx := context.Background()
+		d2, err := domain.NewDocument("docs", "file:///b.md", domain.HashContent([]byte("y")), time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := docs.Upsert(ctx, d2, nil); err != nil {
+			t.Fatal(err)
+		}
+		out, code := execStdin(deps, env, "replay", "--json")
+		if code != 5 {
+			t.Fatalf("replay exit %d, want 5 (drift fails closed)", code)
+		}
+		var rv replayJSON
+		if err := json.Unmarshal([]byte(out), &rv); err != nil {
+			t.Fatalf("bad replay JSON %q: %v", out, err)
+		}
+		if rv.Reproduced || rv.Attempted || len(rv.Drift) != 1 {
+			t.Errorf("drift verdict = %+v, want not-reproduced, not-attempted, one drift", rv)
+		}
+	})
+
+	t.Run("--allow-drift re-runs the checks despite drift", func(t *testing.T) {
+		deps, docs, _ := setup(t)
+		env := exhibit(t, deps)
+		ctx := context.Background()
+		d2, err := domain.NewDocument("docs", "file:///b.md", domain.HashContent([]byte("y")), time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := docs.Upsert(ctx, d2, nil); err != nil {
+			t.Fatal(err)
+		}
+		out, code := execStdin(deps, env, "replay", "--allow-drift", "--json")
+		if code != 0 {
+			t.Fatalf("replay --allow-drift exit %d, out %q", code, out)
+		}
+		var rv replayJSON
+		if err := json.Unmarshal([]byte(out), &rv); err != nil {
+			t.Fatalf("bad replay JSON %q: %v", out, err)
+		}
+		// The cited chunk still retrieves and re-synthesis is stable, so despite
+		// drift the answer reproduces under --allow-drift.
+		if !rv.Attempted || !rv.RetrievalMatch || !rv.AnswerMatch || !rv.Reproduced {
+			t.Errorf("--allow-drift verdict = %+v, want attempted + reproduced", rv)
+		}
+	})
+}
+
 func TestCLIAskStream(t *testing.T) {
 	qvec := []float32{1, 0, 0}
 	seed := func(t *testing.T, gen app.Generator) cli.Deps {
@@ -162,35 +380,65 @@ func (s *stubRerankProvider) Rerank(_ context.Context, _ string, docs []string, 
 	return out, nil
 }
 
-// withReranker attaches a Reranker use case (over prov) to deps.
+// withReranker attaches a Reranker use case (over prov) to deps and rebuilds the
+// Retriever so query/ask --rerank can reach it.
 func withReranker(deps cli.Deps, prov app.RerankProvider) cli.Deps {
 	deps.Rerank = app.NewReranker(prov)
+	deps.Retriever = app.NewRetriever(deps.Query, deps.Rerank, deps.Index)
 	return deps
 }
+
+// testConfigPath is a stand-in default config path handed to NewRootCommand in
+// tests. It need not exist: config subcommands that write a file take an explicit
+// temp-dir path, and everything else only reads it for --config help / display.
+const testConfigPath = "/test/home/.config/lore/config.toml"
 
 func newDeps(emb app.Embedder, gen app.Generator) (cli.Deps, *memstore.CollectionRepository, *memstore.DocumentRepository, *memstore.VectorIndex) {
 	colls := memstore.NewCollectionRepository()
 	docs := memstore.NewDocumentRepository()
 	index := memstore.NewVectorIndex()
-	q := app.NewQuerier(colls, index, docs, emb)
+	lexical := memstore.NewLexicalIndex()
+	q := app.NewQuerier(colls, index, docs, emb, lexical)
 	fixed, _ := domain.NewFixedChunker(domain.DefaultChunkSize, domain.DefaultChunkOverlap)
 	chunkers, _ := domain.NewRegistry(testChunkerSpec(), fixed, nil)
 	source := fs.NewSource()
 	catalog := app.NewCatalog(colls, docs, emb, chunkers)
-	ingestor := app.NewIngestor(colls, docs, index, emb, extract.New(), source, chunkers)
-	remover := app.NewRemover(colls, docs, index)
+	ingestor := app.NewIngestor(colls, docs, index, emb, extract.New(), source, chunkers, lexical)
+	remover := app.NewRemover(colls, docs, index, lexical)
+	asker := app.NewAsker(q, gen)
+	retriever := app.NewRetriever(q, nil, index)
+	checker := app.NewChecker(stubVerifier{}, catalog)
 	deps := cli.Deps{
-		Catalog: catalog,
-		Ingest:  ingestor,
-		Sync:    app.NewSyncer(catalog, ingestor, remover, source),
-		Query:   q,
-		Ask:     app.NewAsker(q, gen),
-		Remove:  remover,
-		Tokens:  wordTokenCounter{},
-		Export:  app.NewExporter(colls, docs, index),
-		Import:  app.NewImporter(colls, docs, index, remover),
+		Catalog:   catalog,
+		Ingest:    ingestor,
+		Sync:      app.NewSyncer(catalog, ingestor, remover, source),
+		Query:     q,
+		Ask:       asker,
+		Retriever: retriever,
+		Remove:    remover,
+		Replay:    app.NewReplayer(catalog, retriever, asker, docs),
+		Tokens:    wordTokenCounter{},
+		Export:    app.NewExporter(colls, docs, index),
+		Import:    app.NewImporter(colls, docs, index, remover, lexical, emb),
+		Verify:    checker,
+		Eval:      app.NewEvaluator(asker, checker),
+		Index:     index,
+	}
+	if sp, err := emb.Space(context.Background()); err == nil {
+		deps.EmbedSpace = sp
 	}
 	return deps, colls, docs, index
+}
+
+// stubVerifier judges a claim supported unless its text is in unsupported (keyed
+// on the segmented claim text, citation markers stripped).
+type stubVerifier struct{ unsupported map[string]bool }
+
+func (v stubVerifier) Verify(_ context.Context, claim, _ string) (app.Verdict, error) {
+	if v.unsupported[claim] {
+		return app.Verdict{Supported: false, Rationale: "not entailed"}, nil
+	}
+	return app.Verdict{Supported: true, Rationale: "entailed"}, nil
 }
 
 // wordTokenCounter is a deterministic stand-in for the real tiktoken counter in
@@ -203,7 +451,7 @@ func (wordTokenCounter) Count(s string) int { return len(strings.Fields(s)) }
 // exec runs one command with a fresh root (clean flag state) over shared deps.
 func exec(deps cli.Deps, args ...string) (string, int) {
 	var out bytes.Buffer
-	root := cli.NewRootCommand(depsBuilder(deps), "test", &out, io.Discard)
+	root := cli.NewRootCommand(depsBuilder(deps), "test", testConfigPath, &out, io.Discard)
 	root.SetArgs(args)
 	code := cli.ExitCode(root.Execute())
 	return out.String(), code
@@ -212,7 +460,7 @@ func exec(deps cli.Deps, args ...string) (string, int) {
 // execErr is exec but also returns whatever the command wrote to stderr.
 func execErr(deps cli.Deps, args ...string) (stdout, stderr string, code int) {
 	var out, errb bytes.Buffer
-	root := cli.NewRootCommand(depsBuilder(deps), "test", &out, &errb)
+	root := cli.NewRootCommand(depsBuilder(deps), "test", testConfigPath, &out, &errb)
 	root.SetArgs(args)
 	code = cli.ExitCode(root.Execute())
 	return out.String(), errb.String(), code
@@ -221,7 +469,7 @@ func execErr(deps cli.Deps, args ...string) (stdout, stderr string, code int) {
 // execStdin is exec with the given string fed to the command on stdin.
 func execStdin(deps cli.Deps, stdin string, args ...string) (string, int) {
 	var out bytes.Buffer
-	root := cli.NewRootCommand(depsBuilder(deps), "test", &out, io.Discard)
+	root := cli.NewRootCommand(depsBuilder(deps), "test", testConfigPath, &out, io.Discard)
 	root.SetIn(strings.NewReader(stdin))
 	root.SetArgs(args)
 	code := cli.ExitCode(root.Execute())
@@ -249,7 +497,7 @@ func TestRootBuildsDepsFromGlobalFlags(t *testing.T) {
 		return deps, nil
 	}
 	var out bytes.Buffer
-	root := cli.NewRootCommand(build, "test", &out, io.Discard)
+	root := cli.NewRootCommand(build, "test", testConfigPath, &out, io.Discard)
 	root.SetArgs([]string{"--config", "/tmp/x.toml", "--log-level", "debug", "--log-format", "json", "-v", "ls"})
 	if err := root.Execute(); err != nil {
 		t.Fatalf("execute: %v", err)
@@ -270,7 +518,7 @@ func TestRootBuildErrorPropagates(t *testing.T) {
 		return cli.Deps{}, fmt.Errorf("%w: bad config", domain.ErrInvalidArgument)
 	}
 	var out bytes.Buffer
-	root := cli.NewRootCommand(build, "test", &out, io.Discard)
+	root := cli.NewRootCommand(build, "test", testConfigPath, &out, io.Discard)
 	root.SetArgs([]string{"ls"})
 	if code := cli.ExitCode(root.Execute()); code != 2 {
 		t.Errorf("build error should surface as exit 2, got %d", code)
@@ -463,6 +711,154 @@ func TestCLIStatusDocCount(t *testing.T) {
 	if v.Model != "test-embed" {
 		t.Errorf("status still carries collection details: %+v", v)
 	}
+	// The corpus digest is a pure function of the (source, hash) set, so it is
+	// deterministic regardless of the ingest clock.
+	wantDigest := domain.SnapshotOf([]*domain.Document{
+		{SourceURI: "file:///a.md", Hash: domain.HashContent([]byte("file:///a.md"))},
+		{SourceURI: "file:///b.md", Hash: domain.HashContent([]byte("file:///b.md"))},
+	}).Digest
+	if v.Digest != string(wantDigest) {
+		t.Errorf("corpus_digest = %q, want %q", v.Digest, wantDigest)
+	}
+	if v.LastIngest == "" {
+		t.Error("last_ingest_at is empty, want the most recent ingestion time")
+	}
+}
+
+// TestCLIDocSelectorResolution exercises the human-friendly --doc selector end to
+// end through the cat and rm commands: a basename resolves to its full URI, an
+// ambiguous selector is a usage error, and an unmatched one is not-found.
+func TestCLIDocSelectorResolution(t *testing.T) {
+	seed := func(t *testing.T) cli.Deps {
+		t.Helper()
+		deps, _, docs, _ := newDeps(stubEmbedder{space: testSpace()}, stubGenerator{})
+		if _, code := exec(deps, "init", "docs"); code != 0 {
+			t.Fatal("init failed")
+		}
+		ctx := context.Background()
+		for _, uri := range []string{"file:///corpus/spec-v1.md", "file:///corpus/spec-v2.md", "file:///corpus/notes/readme.md"} {
+			doc, err := domain.NewDocument("docs", uri, domain.HashContent([]byte(uri)), time.Now())
+			if err != nil {
+				t.Fatal(err)
+			}
+			c, _ := domain.NewChunk(domain.DeriveDocumentID("docs", uri), 0, "body of "+uri)
+			if err := docs.Upsert(ctx, doc, []domain.Chunk{c}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return deps
+	}
+
+	t.Run("cat resolves a unique basename to the full URI", func(t *testing.T) {
+		out, code := exec(seed(t), "cat", "docs", "--doc", "readme.md", "--json")
+		if code != 0 {
+			t.Fatalf("cat --doc readme.md exit %d, out %q", code, out)
+		}
+		var got []chunkViewJSON
+		if err := json.Unmarshal([]byte(out), &got); err != nil {
+			t.Fatalf("bad JSON %q: %v", out, err)
+		}
+		if len(got) != 1 || got[0].Text != "body of file:///corpus/notes/readme.md" {
+			t.Errorf("resolved to the wrong document: %+v", got)
+		}
+	})
+
+	t.Run("cat with an ambiguous selector is a usage error", func(t *testing.T) {
+		if _, code := exec(seed(t), "cat", "docs", "--doc", "spec"); code != 2 {
+			t.Errorf("ambiguous --doc should exit 2, got %d", code)
+		}
+	})
+
+	t.Run("cat with an unmatched selector is not-found", func(t *testing.T) {
+		if _, code := exec(seed(t), "cat", "docs", "--doc", "nonesuch.md"); code != 3 {
+			t.Errorf("unmatched --doc should exit 3, got %d", code)
+		}
+	})
+
+	t.Run("rm resolves a basename and removes that document", func(t *testing.T) {
+		deps := seed(t)
+		if _, code := exec(deps, "rm", "docs", "--doc", "readme.md"); code != 0 {
+			t.Fatalf("rm --doc readme.md exit %d", code)
+		}
+		// Gone: the same selector no longer resolves.
+		if _, code := exec(deps, "cat", "docs", "--doc", "readme.md"); code != 3 {
+			t.Errorf("removed document should be not-found, got exit %d", code)
+		}
+		// Siblings survive.
+		if _, code := exec(deps, "cat", "docs", "--doc", "spec-v1.md"); code != 0 {
+			t.Errorf("sibling document should remain, got exit %d", code)
+		}
+	})
+}
+
+func TestCLIDiff(t *testing.T) {
+	deps, _, docs, _ := newDeps(stubEmbedder{space: testSpace()}, stubGenerator{})
+	ctx := context.Background()
+	for _, code := range []string{"old", "new"} {
+		if _, c := exec(deps, "init", code); c != 0 {
+			t.Fatalf("init %s failed", code)
+		}
+	}
+	seed := func(collection, uri, content string) {
+		doc, err := domain.NewDocument(collection, uri, domain.HashContent([]byte(content)), time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		c, _ := domain.NewChunk(domain.DeriveDocumentID(collection, uri), 0, content)
+		if err := docs.Upsert(ctx, doc, []domain.Chunk{c}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seed("old", "file:///a.md", "a1")
+	seed("old", "file:///shared.md", "v1")
+	seed("old", "file:///gone.md", "g")
+	seed("new", "file:///a.md", "a1")
+	seed("new", "file:///shared.md", "v2")
+	seed("new", "file:///added.md", "x")
+
+	t.Run("reports added/removed/changed as JSON", func(t *testing.T) {
+		out, code := exec(deps, "diff", "old", "new", "--json")
+		if code != 0 {
+			t.Fatalf("diff exit %d, out %q", code, out)
+		}
+		var got diffViewJSON
+		if err := json.Unmarshal([]byte(out), &got); err != nil {
+			t.Fatalf("bad JSON %q: %v", out, err)
+		}
+		if len(got.Added) != 1 || got.Added[0].Source != "file:///added.md" {
+			t.Errorf("Added = %+v", got.Added)
+		}
+		if len(got.Removed) != 1 || got.Removed[0].Source != "file:///gone.md" {
+			t.Errorf("Removed = %+v", got.Removed)
+		}
+		if len(got.Changed) != 1 || got.Changed[0].Source != "file:///shared.md" {
+			t.Errorf("Changed = %+v", got.Changed)
+		}
+	})
+
+	t.Run("human output names the changed documents", func(t *testing.T) {
+		out, code := exec(deps, "diff", "old", "new")
+		if code != 0 {
+			t.Fatalf("diff exit %d", code)
+		}
+		for _, want := range []string{"added.md", "gone.md", "shared.md"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("human output missing %q: %q", want, out)
+			}
+		}
+	})
+
+	t.Run("an unknown collection exits 3", func(t *testing.T) {
+		if _, code := exec(deps, "diff", "old", "ghost"); code != 3 {
+			t.Errorf("want exit 3, got %d", code)
+		}
+	})
+
+	t.Run("wrong arity is a usage error", func(t *testing.T) {
+		if _, code := exec(deps, "diff", "old"); code != 2 {
+			t.Errorf("want exit 2, got %d", code)
+		}
+	})
 }
 
 func TestCLIDocs(t *testing.T) {
@@ -724,6 +1120,86 @@ func TestCLIQuerySourceFilter(t *testing.T) {
 	}
 }
 
+func TestCLIMetadataWhereFilter(t *testing.T) {
+	qvec := []float32{1, 0, 0}
+	deps, _, docs, index := newDeps(stubEmbedder{space: testSpace(), vec: qvec}, stubGenerator{})
+	if _, code := exec(deps, "init", "docs"); code != 0 {
+		t.Fatal("init failed")
+	}
+	ctx := context.Background()
+	seed := func(uri string, meta domain.Metadata) {
+		did := domain.DeriveDocumentID("docs", uri)
+		doc, err := domain.NewDocument("docs", uri, domain.HashContent([]byte(uri)), time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		doc.Metadata = meta
+		ch, err := domain.NewChunk(did, 0, "content of "+uri)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := docs.Upsert(ctx, doc, []domain.Chunk{ch}); err != nil {
+			t.Fatal(err)
+		}
+		if err := index.Upsert(ctx, "docs", []app.VectorEntry{{ChunkID: ch.ID, Vector: qvec, Metadata: meta}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seed("file:///a.md", domain.Metadata{"author": "alice", "date": "2025-06-01"})
+	seed("file:///b.md", domain.Metadata{"author": "bob", "date": "2024-01-01"})
+
+	t.Run("query --where filters by metadata and exposes it in --json", func(t *testing.T) {
+		out, code := exec(deps, "query", "docs", "anything", "--where", "author=alice", "--json")
+		if code != 0 {
+			t.Fatalf("query exit %d, out %q", code, out)
+		}
+		var hits []hitViewJSON
+		if err := json.Unmarshal([]byte(out), &hits); err != nil {
+			t.Fatalf("bad JSON %q: %v", out, err)
+		}
+		if len(hits) != 1 || !strings.Contains(hits[0].Source, "a.md") {
+			t.Fatalf("--where author=alice should keep only alice's hit, got %+v", hits)
+		}
+		if hits[0].Metadata["author"] != "alice" {
+			t.Errorf("hit JSON should expose metadata, got %v", hits[0].Metadata)
+		}
+	})
+
+	t.Run("query --where with a date predicate", func(t *testing.T) {
+		out, code := exec(deps, "query", "docs", "anything", "--where", "date>=2025-01-01", "--json")
+		if code != 0 {
+			t.Fatalf("query exit %d", code)
+		}
+		var hits []hitViewJSON
+		if err := json.Unmarshal([]byte(out), &hits); err != nil {
+			t.Fatalf("bad JSON: %v", err)
+		}
+		if len(hits) != 1 || !strings.Contains(hits[0].Source, "a.md") {
+			t.Errorf("date>=2025-01-01 should keep only a.md, got %+v", hits)
+		}
+	})
+
+	t.Run("docs --where filters the document listing", func(t *testing.T) {
+		out, code := exec(deps, "docs", "docs", "--where", "author=bob", "--json")
+		if code != 0 {
+			t.Fatalf("docs exit %d", code)
+		}
+		var list []docViewJSON
+		if err := json.Unmarshal([]byte(out), &list); err != nil {
+			t.Fatalf("bad JSON: %v", err)
+		}
+		if len(list) != 1 || !strings.Contains(list[0].Source, "b.md") || list[0].Metadata["author"] != "bob" {
+			t.Errorf("docs --where author=bob should list only b.md with metadata, got %+v", list)
+		}
+	})
+
+	t.Run("a malformed --where is a usage error (exit 2)", func(t *testing.T) {
+		if _, code := exec(deps, "query", "docs", "anything", "--where", "author"); code != 2 {
+			t.Errorf("malformed --where should exit 2, got %d", code)
+		}
+	})
+}
+
 func TestCLISpaceMismatchExits4(t *testing.T) {
 	// Collection pinned to one space; embedder reports a different one.
 	deps, colls, _, _ := newDeps(stubEmbedder{space: domain.EmbeddingSpace{Model: "other", Dimensions: 9}}, stubGenerator{})
@@ -776,6 +1252,7 @@ func TestCLIChunkerMismatchExits4(t *testing.T) {
 func TestCLIAsk(t *testing.T) {
 	qvec := []float32{1, 0, 0}
 	deps, _, docs, index := newDeps(stubEmbedder{space: testSpace(), vec: qvec}, stubGenerator{text: "the answer"})
+	deps.ChatModel = "test-chat-model"
 	if _, code := exec(deps, "init", "docs"); code != 0 {
 		t.Fatal("init failed")
 	}
@@ -821,6 +1298,27 @@ func TestCLIAsk(t *testing.T) {
 	// Likewise --explain off: no explain key.
 	if strings.Contains(out, "explain") {
 		t.Errorf("--json without --explain must not include an explain key: %s", out)
+	}
+
+	// ask --json carries the reproducible provenance manifest.
+	m := ans.Manifest
+	if m == nil {
+		t.Fatal("ask --json must carry a provenance manifest")
+	}
+	if len(m.Corpus) != 1 || m.Corpus[0].Collection != "docs" || m.Corpus[0].Digest == "" {
+		t.Errorf("manifest corpus = %+v, want one docs ref with a digest", m.Corpus)
+	}
+	if m.Retrieval.K != 8 {
+		t.Errorf("manifest retrieval.k = %d, want 8 (default -k)", m.Retrieval.K)
+	}
+	if m.Generation.ChatModel != "test-chat-model" {
+		t.Errorf("manifest chat_model = %q, want test-chat-model", m.Generation.ChatModel)
+	}
+	if want := string(domain.HashContent([]byte("the answer"))); m.AnswerDigest != want {
+		t.Errorf("manifest answer_digest = %q, want %q", m.AnswerDigest, want)
+	}
+	if len(m.CitedChunks) != 1 || m.CitedChunks[0] != string(chunk.ID) {
+		t.Errorf("manifest cited_chunks = %v, want [%s]", m.CitedChunks, chunk.ID)
 	}
 }
 
@@ -1389,6 +1887,68 @@ func TestCLISynthesize(t *testing.T) {
 	})
 }
 
+func TestCLISynthesizeParity(t *testing.T) {
+	c0 := domain.DeriveChunkID(domain.DeriveDocumentID("docs", "file:///a.md"), 0)
+	qvec := []float32{1, 0, 0}
+	// First sentence cites c0; the second is uncited (drives the strict gate).
+	gen := stubGenerator{text: "The sky is blue [" + string(c0) + "]. An uncited sentence."}
+	deps, _, docs, index := newDeps(stubEmbedder{space: testSpace(), vec: qvec}, gen)
+	if _, code := exec(deps, "init", "docs"); code != 0 {
+		t.Fatal("init failed")
+	}
+	ctx := context.Background()
+	doc, _ := domain.NewDocument("docs", "file:///a.md", domain.HashContent([]byte("x")), time.Now())
+	chunk, _ := domain.NewChunk(doc.ID, 0, "the sky is blue today")
+	if err := docs.Upsert(ctx, doc, []domain.Chunk{chunk}); err != nil {
+		t.Fatal(err)
+	}
+	if err := index.Upsert(ctx, "docs", []app.VectorEntry{{ChunkID: chunk.ID, Vector: qvec}}); err != nil {
+		t.Fatal(err)
+	}
+	hitsJSON, code := exec(deps, "query", "docs", "anything", "--json")
+	if code != 0 {
+		t.Fatalf("query exit %d", code)
+	}
+
+	t.Run("--verify judges the piped hits and reports a support rate", func(t *testing.T) {
+		out, code := execStdin(deps, hitsJSON, "synthesize", "q", "--verify", "--json")
+		if code != 0 {
+			t.Fatalf("synthesize --verify exit %d, out %q", code, out)
+		}
+		var v struct {
+			SupportRate  *float64 `json:"support_rate"`
+			Verification []struct {
+				Verdict string `json:"verdict"`
+			} `json:"verification"`
+		}
+		if err := json.Unmarshal([]byte(out), &v); err != nil {
+			t.Fatalf("bad JSON %q: %v", out, err)
+		}
+		if len(v.Verification) != 2 || v.Verification[0].Verdict != "supported" || v.Verification[1].Verdict != "uncited" {
+			t.Errorf("verdicts = %+v", v.Verification)
+		}
+		if v.SupportRate == nil || *v.SupportRate != 0.5 {
+			t.Errorf("support rate = %v, want 0.5", v.SupportRate)
+		}
+	})
+
+	t.Run("--verify-strict exits 5 when a claim is not supported", func(t *testing.T) {
+		if _, code := execStdin(deps, hitsJSON, "synthesize", "q", "--verify-strict"); code != 5 {
+			t.Errorf("want exit 5, got %d", code)
+		}
+	})
+
+	t.Run("--stream emits the answer and exits 0", func(t *testing.T) {
+		out, code := execStdin(deps, hitsJSON, "synthesize", "q", "--stream")
+		if code != 0 {
+			t.Fatalf("synthesize --stream exit %d, out %q", code, out)
+		}
+		if !strings.Contains(out, "sky is blue") {
+			t.Errorf("streamed output missing the answer prose: %q", out)
+		}
+	})
+}
+
 func TestCLIAskAttach(t *testing.T) {
 	t.Run("--attach reads a file into an Attachment passed to the generator", func(t *testing.T) {
 		var got []domain.Attachment
@@ -1471,6 +2031,332 @@ func TestCLIAddThenQuery(t *testing.T) {
 	}
 }
 
+func TestCLIHybridRetrieval(t *testing.T) {
+	// The stub embedder returns the same vector for every chunk, so cosine ties —
+	// only the BM25 lexical signal (populated through the real add path) can
+	// distinguish a keyword match. Hybrid fusion must therefore surface it.
+	deps, _, _, _ := newDeps(stubEmbedder{space: testSpace(), vec: []float32{1, 0, 0}}, stubGenerator{})
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "fox.txt"), []byte("the quick brown fox jumps over the lazy dog"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "lorem.txt"), []byte("lorem ipsum dolor sit amet consectetur"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, code := exec(deps, "init", "docs"); code != 0 {
+		t.Fatal("init failed")
+	}
+	if _, code := exec(deps, "add", "docs", dir); code != 0 {
+		t.Fatal("add failed")
+	}
+
+	t.Run("--hybrid surfaces the keyword match the vector tie would bury", func(t *testing.T) {
+		out, code := exec(deps, "query", "docs", "fox", "--hybrid", "--json")
+		if code != 0 {
+			t.Fatalf("query --hybrid exit %d, out %q", code, out)
+		}
+		var hits []hitViewJSON
+		if err := json.Unmarshal([]byte(out), &hits); err != nil {
+			t.Fatalf("bad JSON %q: %v", out, err)
+		}
+		if len(hits) == 0 || !strings.Contains(hits[0].Source, "fox.txt") {
+			t.Errorf("--hybrid should rank the keyword match (fox.txt) first, got %+v", hits)
+		}
+	})
+
+	t.Run("--hybrid with multiple collections is a usage error", func(t *testing.T) {
+		if _, code := exec(deps, "query", "docs", "-c", "notes", "fox", "--hybrid"); code != 2 {
+			t.Errorf("--hybrid + -c should exit 2, got %d", code)
+		}
+	})
+}
+
+func TestCLIDiversity(t *testing.T) {
+	qvec := []float32{1, 0, 0}
+	deps, _, docs, index := newDeps(stubEmbedder{space: testSpace(), vec: qvec}, stubGenerator{})
+	if _, code := exec(deps, "init", "docs"); code != 0 {
+		t.Fatal("init failed")
+	}
+	ctx := context.Background()
+	// One document with three chunks (same source) plus a second document.
+	seedDoc := func(uri string, nChunks int) {
+		did := domain.DeriveDocumentID("docs", uri)
+		doc, err := domain.NewDocument("docs", uri, domain.HashContent([]byte(uri)), time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		var chunks []domain.Chunk
+		var entries []app.VectorEntry
+		for i := 0; i < nChunks; i++ {
+			ch, err := domain.NewChunk(did, i, uri+" chunk")
+			if err != nil {
+				t.Fatal(err)
+			}
+			chunks = append(chunks, ch)
+			entries = append(entries, app.VectorEntry{ChunkID: ch.ID, Vector: qvec})
+		}
+		if err := docs.Upsert(ctx, doc, chunks); err != nil {
+			t.Fatal(err)
+		}
+		if err := index.Upsert(ctx, "docs", entries); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seedDoc("file:///a.md", 3)
+	seedDoc("file:///b.md", 1)
+
+	t.Run("--max-per-source caps hits per document", func(t *testing.T) {
+		out, code := exec(deps, "query", "docs", "anything", "-k", "8", "--max-per-source", "1", "--json")
+		if code != 0 {
+			t.Fatalf("query exit %d, out %q", code, out)
+		}
+		var hits []hitViewJSON
+		if err := json.Unmarshal([]byte(out), &hits); err != nil {
+			t.Fatalf("bad JSON: %v", err)
+		}
+		perSource := map[string]int{}
+		for _, h := range hits {
+			perSource[h.Source]++
+		}
+		for src, n := range perSource {
+			if n > 1 {
+				t.Errorf("--max-per-source 1 should cap %s at 1, got %d", src, n)
+			}
+		}
+		if len(hits) != 2 {
+			t.Errorf("want 2 hits (1 per source), got %d", len(hits))
+		}
+	})
+
+	t.Run("--mmr runs and returns diversified hits", func(t *testing.T) {
+		out, code := exec(deps, "query", "docs", "anything", "--mmr", "--json")
+		if code != 0 {
+			t.Fatalf("query --mmr exit %d, out %q", code, out)
+		}
+		var hits []hitViewJSON
+		if err := json.Unmarshal([]byte(out), &hits); err != nil {
+			t.Fatalf("bad JSON: %v", err)
+		}
+		if len(hits) == 0 {
+			t.Error("--mmr should return hits")
+		}
+	})
+
+	t.Run("--mmr with --rerank is a usage error", func(t *testing.T) {
+		if _, code := exec(deps, "query", "docs", "anything", "--mmr", "--rerank"); code != 2 {
+			t.Errorf("--mmr + --rerank should exit 2, got %d", code)
+		}
+	})
+
+	t.Run("--mmr with multiple collections is a usage error", func(t *testing.T) {
+		if _, code := exec(deps, "query", "docs", "-c", "notes", "anything", "--mmr"); code != 2 {
+			t.Errorf("--mmr + -c should exit 2, got %d", code)
+		}
+	})
+}
+
+func TestCLIRecency(t *testing.T) {
+	qvec := []float32{1, 0, 0}
+	deps, _, docs, index := newDeps(stubEmbedder{space: testSpace(), vec: qvec}, stubGenerator{})
+	if _, code := exec(deps, "init", "docs"); code != 0 {
+		t.Fatal("init failed")
+	}
+	ctx := context.Background()
+	seed := func(uri, updated string, vec []float32) {
+		did := domain.DeriveDocumentID("docs", uri)
+		doc, err := domain.NewDocument("docs", uri, domain.HashContent([]byte(uri)), time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		doc.Metadata = domain.Metadata{"updated": updated}
+		ch, err := domain.NewChunk(did, 0, uri+" content")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := docs.Upsert(ctx, doc, []domain.Chunk{ch}); err != nil {
+			t.Fatal(err)
+		}
+		if err := index.Upsert(ctx, "docs", []app.VectorEntry{{ChunkID: ch.ID, Vector: vec}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// old.md is MORE relevant by cosine (vector == query) but stale; new.md is
+	// slightly less relevant but fresh.
+	seed("file:///old.md", "2020-01-01", []float32{1, 0, 0})
+	seed("file:///new.md", "2026-06-13", []float32{0.7, 0.7, 0})
+
+	topSource := func(args ...string) string {
+		out, code := exec(deps, args...)
+		if code != 0 {
+			t.Fatalf("exit %d: %s", code, out)
+		}
+		var hits []hitViewJSON
+		if err := json.Unmarshal([]byte(out), &hits); err != nil {
+			t.Fatalf("bad JSON: %v", err)
+		}
+		if len(hits) == 0 {
+			t.Fatal("no hits")
+		}
+		return hits[0].Source
+	}
+
+	t.Run("plain ranks the stale-but-more-relevant doc first", func(t *testing.T) {
+		if src := topSource("query", "docs", "anything", "--json"); src != "file:///old.md" {
+			t.Errorf("plain top hit = %s, want old.md (higher cosine)", src)
+		}
+	})
+
+	t.Run("--recency surfaces the fresher doc first", func(t *testing.T) {
+		if src := topSource("query", "docs", "anything", "--recency", "--json"); src != "file:///new.md" {
+			t.Errorf("--recency top hit = %s, want new.md (fresher)", src)
+		}
+	})
+
+	t.Run("--recency with --rerank is a usage error", func(t *testing.T) {
+		if _, code := exec(deps, "query", "docs", "anything", "--recency", "--rerank"); code != 2 {
+			t.Errorf("--recency + --rerank should exit 2, got %d", code)
+		}
+	})
+
+	t.Run("--recency with --mmr is a usage error", func(t *testing.T) {
+		if _, code := exec(deps, "query", "docs", "anything", "--recency", "--mmr"); code != 2 {
+			t.Errorf("--recency + --mmr should exit 2, got %d", code)
+		}
+	})
+
+	t.Run("--half-life-days <= 0 is a usage error", func(t *testing.T) {
+		if _, code := exec(deps, "query", "docs", "anything", "--recency", "--half-life-days", "0"); code != 2 {
+			t.Errorf("--half-life-days 0 should exit 2, got %d", code)
+		}
+	})
+}
+
+func TestCLIAskVerify(t *testing.T) {
+	c0 := domain.DeriveChunkID(domain.DeriveDocumentID("docs", "file:///a.md"), 0)
+	qvec := []float32{1, 0, 0}
+	// The canned answer cites c0 in its first sentence and leaves the second uncited.
+	gen := stubGenerator{text: "The sky is blue [" + string(c0) + "]. An uncited sentence."}
+	deps, _, docs, index := newDeps(stubEmbedder{space: testSpace(), vec: qvec}, gen)
+	if _, code := exec(deps, "init", "docs"); code != 0 {
+		t.Fatal("init failed")
+	}
+	ctx := context.Background()
+	doc, _ := domain.NewDocument("docs", "file:///a.md", domain.HashContent([]byte("x")), time.Now())
+	chunk, _ := domain.NewChunk(doc.ID, 0, "the sky is blue today")
+	if err := docs.Upsert(ctx, doc, []domain.Chunk{chunk}); err != nil {
+		t.Fatal(err)
+	}
+	if err := index.Upsert(ctx, "docs", []app.VectorEntry{{ChunkID: chunk.ID, Vector: qvec}}); err != nil {
+		t.Fatal(err)
+	}
+
+	type verifyJSON struct {
+		SupportRate  *float64 `json:"support_rate"`
+		Verification []struct {
+			Claim       string   `json:"claim"`
+			Verdict     string   `json:"verdict"`
+			CitedChunks []string `json:"cited_chunks"`
+		} `json:"verification"`
+	}
+
+	t.Run("--verify reports per-claim verdicts and a support rate", func(t *testing.T) {
+		out, code := exec(deps, "ask", "docs", "q", "--verify", "--json")
+		if code != 0 {
+			t.Fatalf("ask --verify exit %d, out %q", code, out)
+		}
+		var v verifyJSON
+		if err := json.Unmarshal([]byte(out), &v); err != nil {
+			t.Fatalf("bad JSON %q: %v", out, err)
+		}
+		if len(v.Verification) != 2 {
+			t.Fatalf("want 2 claims, got %+v", v.Verification)
+		}
+		if v.Verification[0].Verdict != "supported" || v.Verification[1].Verdict != "uncited" {
+			t.Errorf("verdicts = %q, %q", v.Verification[0].Verdict, v.Verification[1].Verdict)
+		}
+		if v.SupportRate == nil || *v.SupportRate != 0.5 {
+			t.Errorf("support rate = %v, want 0.5", v.SupportRate)
+		}
+	})
+
+	t.Run("--verify-strict exits 5 when a claim is unsupported", func(t *testing.T) {
+		if _, code := exec(deps, "ask", "docs", "q", "--verify-strict"); code != 5 {
+			t.Errorf("--verify-strict with an uncited claim should exit 5, got %d", code)
+		}
+	})
+}
+
+func TestCLIEval(t *testing.T) {
+	c0 := domain.DeriveChunkID(domain.DeriveDocumentID("docs", "file:///a.md"), 0)
+	qvec := []float32{1, 0, 0}
+	deps, _, docs, index := newDeps(stubEmbedder{space: testSpace(), vec: qvec}, stubGenerator{text: "answer"})
+	if _, code := exec(deps, "init", "docs"); code != 0 {
+		t.Fatal("init failed")
+	}
+	ctx := context.Background()
+	doc, _ := domain.NewDocument("docs", "file:///a.md", domain.HashContent([]byte("x")), time.Now())
+	chunk, _ := domain.NewChunk(doc.ID, 0, "auth uses keys")
+	if err := docs.Upsert(ctx, doc, []domain.Chunk{chunk}); err != nil {
+		t.Fatal(err)
+	}
+	if err := index.Upsert(ctx, "docs", []app.VectorEntry{{ChunkID: chunk.ID, Vector: qvec}}); err != nil {
+		t.Fatal(err)
+	}
+	jsonl := `{"version":1}` + "\n" + `{"question":"q","expected_chunks":["` + string(c0) + `"]}` + "\n"
+
+	t.Run("reports aggregate metrics as JSON", func(t *testing.T) {
+		out, code := execStdin(deps, jsonl, "eval", "docs", "--json")
+		if code != 0 {
+			t.Fatalf("eval exit %d, out %q", code, out)
+		}
+		var report struct {
+			Aggregates map[string]float64 `json:"aggregates"`
+		}
+		if err := json.Unmarshal([]byte(out), &report); err != nil {
+			t.Fatalf("bad JSON %q: %v", out, err)
+		}
+		if report.Aggregates["recall"] != 1 || report.Aggregates["hit_rate"] != 1 {
+			t.Errorf("aggregates = %+v (want recall/hit 1)", report.Aggregates)
+		}
+	})
+
+	t.Run("--fail-under passes when the metric meets the threshold", func(t *testing.T) {
+		if _, code := execStdin(deps, jsonl, "eval", "docs", "--fail-under", "recall=0.5"); code != 0 {
+			t.Errorf("recall 1.0 >= 0.5 should pass, got exit %d", code)
+		}
+	})
+
+	t.Run("--fail-under exits 5 when the metric is below the threshold", func(t *testing.T) {
+		if _, code := execStdin(deps, jsonl, "eval", "docs", "--fail-under", "recall=1.5"); code != 5 {
+			t.Errorf("recall 1.0 < 1.5 should exit 5, got %d", code)
+		}
+	})
+
+	t.Run("an unknown --fail-under metric is a usage error", func(t *testing.T) {
+		if _, code := execStdin(deps, jsonl, "eval", "docs", "--fail-under", "bogus=0.5"); code != 2 {
+			t.Errorf("unknown metric should exit 2, got %d", code)
+		}
+	})
+
+	t.Run("evaluates the configured retrieval (a retrieval flag is wired through)", func(t *testing.T) {
+		// --hybrid must reach the shared Retriever; with the stub lexical it degrades
+		// to vector but still runs and reports metrics.
+		out, code := execStdin(deps, jsonl, "eval", "docs", "--hybrid", "--json")
+		if code != 0 {
+			t.Fatalf("eval --hybrid exit %d, out %q", code, out)
+		}
+		if !strings.Contains(out, "recall") {
+			t.Errorf("eval --hybrid should still report metrics: %q", out)
+		}
+	})
+
+	t.Run("retrieval guards reach eval (recency+rerank is a usage error)", func(t *testing.T) {
+		if _, code := execStdin(deps, jsonl, "eval", "docs", "--recency", "--rerank"); code != 2 {
+			t.Errorf("eval --recency --rerank should exit 2 (mutually exclusive), got %d", code)
+		}
+	})
+}
+
 func TestCLIAddCountsUnsupportedSeparately(t *testing.T) {
 	deps, _, _, _ := newDeps(stubEmbedder{space: testSpace(), vec: []float32{1, 0, 0}}, stubGenerator{})
 	dir := t.TempDir()
@@ -1495,6 +2381,52 @@ func TestCLIAddCountsUnsupportedSeparately(t *testing.T) {
 	if sum.Added != 1 || sum.Unsupported != 1 || sum.Skipped != 0 {
 		t.Errorf("want Added 1 Unsupported 1 Skipped 0, got %+v", sum)
 	}
+}
+
+func TestCLIAddExclude(t *testing.T) {
+	setup := func(t *testing.T) (cli.Deps, string) {
+		t.Helper()
+		deps, _, _, _ := newDeps(stubEmbedder{space: testSpace(), vec: []float32{1, 0, 0}}, stubGenerator{})
+		dir := t.TempDir()
+		for _, name := range []string{"keep.txt", "also-keep.txt", "Meeting Notes (1).txt"} {
+			if err := os.WriteFile(filepath.Join(dir, name), []byte("hello grounded world"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, code := exec(deps, "init", "docs"); code != 0 {
+			t.Fatal("init failed")
+		}
+		return deps, dir
+	}
+
+	t.Run("excludes matching files and reports the count", func(t *testing.T) {
+		deps, dir := setup(t)
+		out, code := exec(deps, "add", "docs", dir, "--exclude", "*(1)*", "--json")
+		if code != 0 {
+			t.Fatalf("add --exclude exit %d, out %q", code, out)
+		}
+		var sum ingestViewJSON
+		if err := json.Unmarshal([]byte(out), &sum); err != nil {
+			t.Fatalf("bad JSON %q: %v", out, err)
+		}
+		if sum.Added != 2 || sum.Excluded != 1 {
+			t.Errorf("want Added 2 Excluded 1, got %+v", sum)
+		}
+	})
+
+	t.Run("a malformed glob is a usage error", func(t *testing.T) {
+		deps, dir := setup(t)
+		if _, code := exec(deps, "add", "docs", dir, "--exclude", "[bad"); code != 2 {
+			t.Errorf("malformed --exclude should exit 2, got %d", code)
+		}
+	})
+
+	t.Run("--exclude with --stdin is a usage error", func(t *testing.T) {
+		deps, _ := setup(t)
+		if _, code := execStdin(deps, "piped", "add", "docs", "--stdin", "--exclude", "*.tmp"); code != 2 {
+			t.Errorf("--exclude with --stdin should exit 2, got %d", code)
+		}
+	})
 }
 
 func TestCLIStdinInput(t *testing.T) {
@@ -2453,9 +3385,10 @@ type collectionViewJSON struct {
 }
 
 type docViewJSON struct {
-	Source     string `json:"source"`
-	Hash       string `json:"hash"`
-	IngestedAt string `json:"ingested_at"`
+	Source     string            `json:"source"`
+	Hash       string            `json:"hash"`
+	IngestedAt string            `json:"ingested_at"`
+	Metadata   map[string]string `json:"metadata"`
 }
 
 type statusViewJSON struct {
@@ -2464,6 +3397,8 @@ type statusViewJSON struct {
 	Dimensions int    `json:"dimensions"`
 	CreatedAt  string `json:"created_at"`
 	Documents  int    `json:"documents"`
+	LastIngest string `json:"last_ingest_at"`
+	Digest     string `json:"corpus_digest"`
 }
 
 type syncViewJSON struct {
@@ -2483,13 +3418,14 @@ type chunkViewJSON struct {
 }
 
 type hitViewJSON struct {
-	ChunkID     string   `json:"chunk_id"`
-	Source      string   `json:"source"`
-	Seq         int      `json:"seq"`
-	Score       float64  `json:"score"`
-	RerankScore *float64 `json:"rerank_score"`
-	Collection  string   `json:"collection"`
-	Text        string   `json:"text"`
+	ChunkID     string            `json:"chunk_id"`
+	Source      string            `json:"source"`
+	Seq         int               `json:"seq"`
+	Score       float64           `json:"score"`
+	RerankScore *float64          `json:"rerank_score"`
+	Collection  string            `json:"collection"`
+	Metadata    map[string]string `json:"metadata"`
+	Text        string            `json:"text"`
 }
 
 type fromGroupViewJSON struct {
@@ -2501,6 +3437,24 @@ type fromGroupViewJSON struct {
 	Hits []hitViewJSON `json:"hits"`
 }
 
+type diffViewJSON struct {
+	From  string `json:"from"`
+	To    string `json:"to"`
+	Added []struct {
+		Source string `json:"source"`
+		Hash   string `json:"hash"`
+	} `json:"added"`
+	Removed []struct {
+		Source string `json:"source"`
+		Hash   string `json:"hash"`
+	} `json:"removed"`
+	Changed []struct {
+		Source string `json:"source"`
+		From   string `json:"from"`
+		To     string `json:"to"`
+	} `json:"changed"`
+}
+
 type answerViewJSON struct {
 	Text      string `json:"text"`
 	Citations []struct {
@@ -2509,10 +3463,35 @@ type answerViewJSON struct {
 		Seq        int    `json:"seq"`
 		Collection string `json:"collection"`
 	} `json:"citations"`
-	Grounded        bool             `json:"grounded"`
-	Expansions      []chunkViewJSON  `json:"expansions"`
-	Explain         *explainViewJSON `json:"explain"`
-	GroundingTokens *int             `json:"grounding_tokens"`
+	Grounded        bool              `json:"grounded"`
+	Expansions      []chunkViewJSON   `json:"expansions"`
+	Explain         *explainViewJSON  `json:"explain"`
+	GroundingTokens *int              `json:"grounding_tokens"`
+	Manifest        *manifestViewJSON `json:"manifest"`
+}
+
+type manifestViewJSON struct {
+	Question string `json:"question"`
+	AskedAt  string `json:"asked_at"`
+	Corpus   []struct {
+		Collection string `json:"collection"`
+		Digest     string `json:"digest"`
+		Model      string `json:"embedding_model"`
+		Dimensions int    `json:"dimensions"`
+	} `json:"corpus"`
+	Retrieval struct {
+		K int `json:"k"`
+	} `json:"retrieval"`
+	Generation struct {
+		ChatModel         string   `json:"chat_model"`
+		ResolvedModel     string   `json:"resolved_model"`
+		SystemFingerprint string   `json:"system_fingerprint"`
+		Deterministic     bool     `json:"deterministic"`
+		Temperature       *float64 `json:"temperature"`
+		Seed              *int     `json:"seed"`
+	} `json:"generation"`
+	CitedChunks  []string `json:"cited_chunks"`
+	AnswerDigest string   `json:"answer_digest"`
 }
 
 type explainViewJSON struct {
@@ -2535,6 +3514,7 @@ type ingestViewJSON struct {
 	Added       int `json:"added"`
 	Skipped     int `json:"skipped"`
 	Unsupported int `json:"unsupported"`
+	Excluded    int `json:"excluded"`
 	Chunks      int `json:"chunks"`
 }
 

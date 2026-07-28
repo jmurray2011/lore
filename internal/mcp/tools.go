@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -47,6 +48,10 @@ type AskInput struct {
 	K              int      `json:"k,omitempty" jsonschema:"number of chunks to ground on (default 8)"`
 	Budget         int      `json:"budget,omitempty" jsonschema:"cap the grounding to roughly this many tokens, trimming within k (0 = no cap)"`
 	Rerank         bool     `json:"rerank,omitempty" jsonschema:"two-stage retrieval: search a wide vector pool then cross-encoder rerank to the top k (requires a configured rerank provider)"`
+	Hybrid         bool     `json:"hybrid,omitempty" jsonschema:"fuse BM25 keyword search with vector search (recovers exact-term and identifier matches)"`
+	MMR            bool     `json:"mmr,omitempty" jsonschema:"diversify grounding with Maximal Marginal Relevance (single-collection; not with rerank)"`
+	Recency        bool     `json:"recency,omitempty" jsonschema:"prefer recently-updated documents via a time decay (not with rerank/mmr)"`
+	Where          []string `json:"where,omitempty" jsonschema:"restrict grounding to documents whose metadata matches these predicates, e.g. 'author=alice' (ANDed)"`
 	SourceGlob     string   `json:"source_glob,omitempty" jsonschema:"restrict grounding to documents whose source matches this glob, e.g. '*.pdf'"`
 	Strict         bool     `json:"strict,omitempty" jsonschema:"when true, return an error instead of an ungrounded answer if no chunks match"`
 	IncludeSources *bool    `json:"include_sources,omitempty" jsonschema:"include each cited chunk's full text in the citations (default true)"`
@@ -81,7 +86,9 @@ func (s *Server) ask(ctx context.Context, _ *mcpsdk.CallToolRequest, in AskInput
 		return nil, AskOutput{}, err
 	}
 
-	hits, err := s.resolveHits(ctx, collections, in.Question, in.K, in.SourceGlob, in.Rerank)
+	hits, err := s.resolveHits(ctx, collections, in.Question, retrieveParams{
+		K: in.K, Source: in.SourceGlob, Where: in.Where, Rerank: in.Rerank, Hybrid: in.Hybrid, MMR: in.MMR, Recency: in.Recency,
+	})
 	if err != nil {
 		return nil, AskOutput{}, err
 	}
@@ -171,6 +178,10 @@ type QueryInput struct {
 	K           int      `json:"k,omitempty" jsonschema:"number of chunks to return (default 8)"`
 	SourceGlob  string   `json:"source_glob,omitempty" jsonschema:"restrict to documents whose source matches this glob, e.g. '*.pdf'"`
 	Rerank      bool     `json:"rerank,omitempty" jsonschema:"two-stage retrieval: search a wide vector pool then cross-encoder rerank to the top k (requires a configured rerank provider)"`
+	Hybrid      bool     `json:"hybrid,omitempty" jsonschema:"fuse BM25 keyword search with vector search (recovers exact-term and identifier matches)"`
+	MMR         bool     `json:"mmr,omitempty" jsonschema:"diversify results with Maximal Marginal Relevance (single-collection; not with rerank)"`
+	Recency     bool     `json:"recency,omitempty" jsonschema:"prefer recently-updated documents via a time decay (not with rerank/mmr)"`
+	Where       []string `json:"where,omitempty" jsonschema:"restrict to documents whose metadata matches these predicates, e.g. 'author=alice' (ANDed)"`
 }
 
 // Hit is one retrieved chunk in the query result (the standard lore hit object
@@ -202,7 +213,9 @@ func (s *Server) query(ctx context.Context, _ *mcpsdk.CallToolRequest, in QueryI
 		return nil, QueryOutput{}, err
 	}
 
-	hits, err := s.resolveHits(ctx, collections, in.Query, in.K, in.SourceGlob, in.Rerank)
+	hits, err := s.resolveHits(ctx, collections, in.Query, retrieveParams{
+		K: in.K, Source: in.SourceGlob, Where: in.Where, Rerank: in.Rerank, Hybrid: in.Hybrid, MMR: in.MMR, Recency: in.Recency,
+	})
 	if err != nil {
 		return nil, QueryOutput{}, err
 	}
@@ -322,6 +335,14 @@ type CollectionStatusOutput struct {
 	Documents  int    `json:"documents" jsonschema:"number of documents ingested"`
 	Chunks     int    `json:"chunks" jsonschema:"number of indexed chunks"`
 	Chunker    string `json:"chunker" jsonschema:"the pinned chunker spec"`
+	// LastIngestAt is the most recent document ingestion time (RFC3339); it
+	// advances on any re-ingest, unlike a collection's birth timestamp. Empty
+	// for a collection with no documents.
+	LastIngestAt string `json:"last_ingest_at,omitempty" jsonschema:"timestamp of the most recently ingested document; advances on any re-ingest"`
+	// CorpusDigest is the corpus content identity (hex sha256 over the document
+	// set); it changes on any add, removal, or edit and is the stable handle for
+	// a provenance snapshot.
+	CorpusDigest string `json:"corpus_digest" jsonschema:"content digest of the document set; changes on any add, removal, or edit"`
 }
 
 func (s *Server) collectionStatus(ctx context.Context, _ *mcpsdk.CallToolRequest, in CollectionStatusInput) (*mcpsdk.CallToolResult, CollectionStatusOutput, error) {
@@ -344,13 +365,20 @@ func (s *Server) collectionStatus(ctx context.Context, _ *mcpsdk.CallToolRequest
 		return nil, CollectionStatusOutput{}, err
 	}
 	info := collectionInfo(coll, len(docs))
+	snap := domain.SnapshotOf(docs)
+	lastIngest := ""
+	if !snap.LastIngest.IsZero() {
+		lastIngest = snap.LastIngest.UTC().Format(time.RFC3339)
+	}
 	out := CollectionStatusOutput{
-		Name:       info.Name,
-		Model:      info.Model,
-		Dimensions: info.Dimensions,
-		Documents:  info.Documents,
-		Chunks:     len(entries),
-		Chunker:    info.Chunker,
+		Name:         info.Name,
+		Model:        info.Model,
+		Dimensions:   info.Dimensions,
+		Documents:    info.Documents,
+		Chunks:       len(entries),
+		Chunker:      info.Chunker,
+		LastIngestAt: lastIngest,
+		CorpusDigest: string(snap.Digest),
 	}
 	return textResult(statusText(out)), out, nil
 }

@@ -5,8 +5,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	iofs "io/fs"
 	"log/slog"
 	"net/http"
 	"os"
@@ -48,8 +50,14 @@ func main() {
 }
 
 func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	defaultPath, _ := config.DefaultPath()
+
 	fail := func(err error) int {
-		_, _ = fmt.Fprintf(stderr, "lore: %v\n", err)
+		if msg, ok := authGuidance(err, defaultPath); ok {
+			_, _ = fmt.Fprintf(stderr, "lore: %s\n", msg)
+		} else {
+			_, _ = fmt.Fprintf(stderr, "lore: %v\n", err)
+		}
 		return cli.ExitCode(err)
 	}
 
@@ -66,12 +74,20 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		}
 	}()
 
-	defaultPath, _ := config.DefaultPath()
-
 	build := func(_ context.Context, opts cli.GlobalOptions) (cli.Deps, error) {
 		path := defaultPath
 		if opts.ConfigPath != "" {
 			path = opts.ConfigPath
+			// An explicitly requested config file that is not there is a mistake,
+			// not a cue to fall back to defaults: fail loudly so the user does not
+			// run against the wrong endpoint/DB believing their config was loaded.
+			// (The default path staying absent is still fine — that is defaults+env.)
+			if _, statErr := os.Stat(path); statErr != nil {
+				if errors.Is(statErr, iofs.ErrNotExist) {
+					return cli.Deps{}, fmt.Errorf("%w: --config %s: file does not exist", domain.ErrInvalidArgument, path)
+				}
+				return cli.Deps{}, fmt.Errorf("config: %s: %w", path, statErr)
+			}
 		}
 		cfg, err := config.Resolve(path, os.Getenv, config.FlagOverrides{
 			LogLevel:  opts.LogLevel,
@@ -82,6 +98,12 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			return cli.Deps{}, err
 		}
 		logger = config.NewLogger(cfg.Log, stderr)
+		// Surface silently-ignored config keys (typos, misplaced keys) now that the
+		// logger exists; without this a misspelled setting reads exactly like an
+		// unset one and the user never learns why their config had no effect.
+		if unknown := config.UndecodedKeys(path); len(unknown) > 0 {
+			logger.Warn("ignoring unrecognized config keys", "path", path, "keys", unknown)
+		}
 
 		store, err := openStorage(cfg.Storage)
 		if err != nil {
@@ -149,26 +171,52 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		source := fs.NewSource()
 
 		catalog := app.NewCatalog(store.collections, store.docs, embedder, chunkers)
-		ingestor := app.NewIngestor(store.collections, store.docs, store.index, embedder, extractor, source, chunkers, app.WithConcurrency(cfg.Ingest.Concurrency))
-		querier := app.NewQuerier(store.collections, store.index, store.docs, embedder)
-		remover := app.NewRemover(store.collections, store.docs, store.index)
+		ingestor := app.NewIngestor(store.collections, store.docs, store.index, embedder, extractor, source, chunkers, store.lexical, app.WithConcurrency(cfg.Ingest.Concurrency))
+		querier := app.NewQuerier(store.collections, store.index, store.docs, embedder, store.lexical)
+		retriever := app.NewRetriever(querier, reranker, store.index)
+		remover := app.NewRemover(store.collections, store.docs, store.index, store.lexical)
+		asker := app.NewAsker(querier, generator)
+
+		// Faithfulness verification reuses the chat model (decision): a Verifier over
+		// the same chat connection, no extra dependency. The Checker fetches cited
+		// chunk text via the Catalog as evidence; the Evaluator runs eval sets.
+		verifier, err := openai.NewVerifier(chatConn.BaseURL, chatConn.APIKey, cfg.Provider.ChatModel, cfg.Provider.StructuredOutput, authStyle(chatConn.Auth), &http.Client{Timeout: chatConn.Timeout})
+		if err != nil {
+			return cli.Deps{}, err
+		}
+		checker := app.NewChecker(verifier, catalog)
 		return cli.Deps{
-			Catalog: catalog,
-			Ingest:  ingestor,
-			Sync:    app.NewSyncer(catalog, ingestor, remover, source),
-			Query:   querier,
-			Ask:     app.NewAsker(querier, generator),
-			Rerank:  reranker,
-			Remove:  remover,
-			Tokens:  counter,
-			Export:  app.NewExporter(store.collections, store.docs, store.index),
-			Import:  app.NewImporter(store.collections, store.docs, store.index, remover),
-			Index:   store.index,
-			Log:     logger,
+			Catalog:         catalog,
+			Ingest:          ingestor,
+			Sync:            app.NewSyncer(catalog, ingestor, remover, source),
+			Query:           querier,
+			Ask:             asker,
+			Retriever:       retriever,
+			Rerank:          reranker,
+			Remove:          remover,
+			Replay:          app.NewReplayer(catalog, retriever, asker, store.docs),
+			Tokens:          counter,
+			Export:          app.NewExporter(store.collections, store.docs, store.index),
+			Import:          app.NewImporter(store.collections, store.docs, store.index, remover, store.lexical, embedder),
+			Verify:          checker,
+			Eval:            app.NewEvaluator(asker, checker),
+			Index:           store.index,
+			Log:             logger,
+			RetrievalHybrid: cfg.Retrieval.Hybrid,
+			ChatModel:       cfg.Provider.ChatModel,
+			EmbedSpace:      domain.EmbeddingSpace{Model: cfg.Provider.EmbedModel, Dimensions: cfg.Provider.Dimensions},
 		}, nil
 	}
 
-	root := cli.NewRootCommand(build, fmt.Sprintf("%s (commit %s, built %s)", version, commit, date), stdout, stderr)
+	root := cli.NewRootCommand(build, fmt.Sprintf("%s (commit %s, built %s)", version, commit, date), defaultPath, stdout, stderr)
+	// Show the real resolved config path in --config help instead of the abstract
+	// "<user-config-dir>/..." placeholder, so a user knows exactly which file to
+	// create or edit.
+	if defaultPath != "" {
+		if f := root.PersistentFlags().Lookup("config"); f != nil {
+			f.Usage = fmt.Sprintf("path to the TOML config file (default: %s)", defaultPath)
+		}
+	}
 	root.SetArgs(args)
 	if err := root.ExecuteContext(ctx); err != nil {
 		if logger != nil {
@@ -177,6 +225,22 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return fail(err)
 	}
 	return 0
+}
+
+// authGuidance turns a provider authentication rejection (HTTP 401/403) into an
+// actionable message that names where to set the key, replacing the raw upstream
+// error body a user would otherwise see. It returns ok=false for any other error
+// so the caller prints the default form. configPath is the resolved default
+// config location, named so a layman knows which file to edit.
+func authGuidance(err error, configPath string) (string, bool) {
+	var se *httpjson.StatusError
+	if !errors.As(err, &se) || (se.Code != http.StatusUnauthorized && se.Code != http.StatusForbidden) {
+		return "", false
+	}
+	return fmt.Sprintf("provider authentication failed (HTTP %d from %s).\n"+
+		"  Set an API key:  export LORE_API_KEY=<key>   (or add api_key under [provider] in %s)\n"+
+		"  Provider setup and auth styles (OpenAI, Azure, Ollama, local): see docs/configuration.md",
+		se.Code, se.Path, configPath), true
 }
 
 // authStyle maps a resolved connection's auth string to the openai/httpjson
@@ -194,6 +258,7 @@ type storage struct {
 	collections app.CollectionRepository
 	docs        app.DocumentRepository
 	index       app.VectorIndex
+	lexical     app.LexicalIndex
 	cache       app.AnswerCache
 	close       func() error
 }
@@ -209,6 +274,7 @@ func openStorage(cfg config.Storage) (storage, error) {
 			collections: memstore.NewCollectionRepository(),
 			docs:        memstore.NewDocumentRepository(),
 			index:       memstore.NewVectorIndex(),
+			lexical:     memstore.NewLexicalIndex(),
 			cache:       memstore.NewAnswerCache(),
 			close:       func() error { return nil },
 		}, nil
@@ -232,6 +298,7 @@ func openStorage(cfg config.Storage) (storage, error) {
 			collections: s.Collections(),
 			docs:        s.Documents(),
 			index:       s.Vectors(),
+			lexical:     s.Lexical(),
 			cache:       s.Cache(),
 			close:       s.Close,
 		}, nil

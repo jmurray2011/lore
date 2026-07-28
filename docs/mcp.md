@@ -19,16 +19,17 @@ lore mcp --http :8080                 # serve Streamable HTTP on 127.0.0.1:8080 
 
 | Tool | What it does |
 |---|---|
-| `ask` | Answer a question using **only** the named collection(s); returns a grounded answer with citations to the exact passages (each citation carries the chunk text by default, so claims are verifiable without a second call). Honors `k`, `budget`, `rerank`, `source_glob`, `strict`, multi-collection merge. |
-| `query` | Raw retrieval, no synthesis: the ranked chunks (text, source, score, chunk_id, collection) for an agent that wants to process the evidence itself. |
+| `ask` | Answer a question using **only** the named collection(s); returns a grounded answer with citations to the exact passages (each citation carries the chunk text by default, so claims are verifiable without a second call). Honors `k`, `budget`, `rerank`, `hybrid`, `mmr`, `recency`, `where`, `source_glob`, `strict`, multi-collection merge. |
+| `query` | Raw retrieval, no synthesis: the ranked chunks (text, source, score, chunk_id, collection) for an agent that wants to process the evidence itself. Honors `k`, `rerank`, `hybrid`, `mmr`, `recency`, `where`, `source_glob`, multi-collection merge. |
 | `get_chunks` | Fetch specific chunks by ID — the exact passages an `ask` answer cited. Unknown IDs are omitted, not an error. |
 | `list_collections` | Discover the exposed collections with their document count, model, dimensions, and chunker. |
 | `collection_status` | Detailed status for one collection, including its chunk count. |
 
 The tools map directly onto the `ask` / `query` / `cat --chunk` / `ls` / `status`
-commands and the same `--rerank`, `--budget`, `--strict`, `--source`, and
-multi-collection semantics — the MCP server wires the existing use cases to a
-protocol surface, it does not reimplement them. lore's failures (unknown
+commands and the same `--rerank`, `--hybrid`, `--mmr`, `--recency`, `--where`,
+`--budget`, `--strict`, `--source`, and multi-collection semantics — the MCP
+server and the CLI share one retrieval engine (`app.Retriever`), so they cannot
+drift. lore's failures (unknown
 collection, embedding-space mismatch across collections, `rerank` requested with
 no rerank provider configured, `strict` with nothing to ground on) come back as
 **MCP tool errors** — the server stays up across them.

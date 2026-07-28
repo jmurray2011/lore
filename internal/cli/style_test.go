@@ -10,10 +10,10 @@ import (
 
 func TestShortLabel(t *testing.T) {
 	cases := map[string]string{
-		"file:///mnt/c/Users/x/SSP-v2.docx": "SSP-v2.docx",
-		"file:///a/b/c.md":                  "c.md",
-		"notes.txt":                         "notes.txt",
-		"":                                  "",
+		"file:///var/data/corpus/spec-v2.docx": "spec-v2.docx",
+		"file:///a/b/c.md":                     "c.md",
+		"notes.txt":                            "notes.txt",
+		"":                                     "",
 	}
 	for in, want := range cases {
 		if got := shortLabel(in); got != want {

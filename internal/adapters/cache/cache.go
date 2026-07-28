@@ -33,8 +33,9 @@ type Generator struct {
 
 // compile-time port checks
 var (
-	_ app.Generator          = (*Generator)(nil)
-	_ app.StreamingGenerator = (*Generator)(nil)
+	_ app.Generator              = (*Generator)(nil)
+	_ app.StreamingGenerator     = (*Generator)(nil)
+	_ app.DeterministicGenerator = (*Generator)(nil)
 )
 
 // NewGenerator wraps inner so its answers are cached in store. salt scopes the
@@ -66,6 +67,20 @@ func (g *Generator) Synthesize(ctx context.Context, question string, hits []doma
 	_ = g.cache.Put(ctx, key, ans, now)
 	_ = g.cache.Prune(ctx, now.Add(-g.ttl))
 	return ans, nil
+}
+
+// SynthesizeDeterministic forwards to the inner generator's reproducible path
+// and BYPASSES the cache entirely: an audited run must get a freshly pinned
+// (temperature 0 + seed) generation, never a possibly-non-deterministic cached
+// answer, and must not write one back under the normal key. When the inner
+// generator cannot pin generation the determinism guarantee cannot be met, so it
+// returns ErrReproducibleUnsupported. Satisfies app.DeterministicGenerator.
+func (g *Generator) SynthesizeDeterministic(ctx context.Context, question string, hits []domain.ChunkHit, attachments []domain.Attachment) (app.Answer, error) {
+	dg, ok := g.inner.(app.DeterministicGenerator)
+	if !ok {
+		return app.Answer{}, app.ErrReproducibleUnsupported
+	}
+	return dg.SynthesizeDeterministic(ctx, question, hits, attachments)
 }
 
 // SynthesizeStream serves a cached answer in one whole-text delta when one

@@ -46,7 +46,7 @@ func TestRemover(t *testing.T) {
 		idx := &fakeIndex{}
 		seed(t, docs, idx, "docs", "file:///a.md", 2)
 		seed(t, docs, idx, "docs", "file:///b.md", 3)
-		rm := app.NewRemover(colls, docs, idx)
+		rm := app.NewRemover(colls, docs, idx, &fakeLexical{})
 
 		if err := rm.RemoveCollection(ctx, "docs"); err != nil {
 			t.Fatalf("RemoveCollection: %v", err)
@@ -63,7 +63,7 @@ func TestRemover(t *testing.T) {
 	})
 
 	t.Run("RemoveCollection unknown is ErrNotFound", func(t *testing.T) {
-		rm := app.NewRemover(newFakeCollections(), &fakeDocs{}, &fakeIndex{})
+		rm := app.NewRemover(newFakeCollections(), &fakeDocs{}, &fakeIndex{}, &fakeLexical{})
 		if err := rm.RemoveCollection(ctx, "ghost"); !errors.Is(err, app.ErrNotFound) {
 			t.Errorf("want ErrNotFound, got %v", err)
 		}
@@ -75,7 +75,7 @@ func TestRemover(t *testing.T) {
 		idx := &fakeIndex{}
 		seed(t, docs, idx, "docs", "file:///a.md", 2)
 		seed(t, docs, idx, "docs", "file:///b.md", 1) // survivor
-		rm := app.NewRemover(colls, docs, idx)
+		rm := app.NewRemover(colls, docs, idx, &fakeLexical{})
 
 		if err := rm.RemoveDocument(ctx, "docs", "file:///a.md"); err != nil {
 			t.Fatalf("RemoveDocument: %v", err)
@@ -92,7 +92,7 @@ func TestRemover(t *testing.T) {
 	})
 
 	t.Run("RemoveDocument unknown is ErrNotFound", func(t *testing.T) {
-		rm := app.NewRemover(newFakeCollections(mustCollection(t, "docs", space)), &fakeDocs{}, &fakeIndex{})
+		rm := app.NewRemover(newFakeCollections(mustCollection(t, "docs", space)), &fakeDocs{}, &fakeIndex{}, &fakeLexical{})
 		if err := rm.RemoveDocument(ctx, "docs", "file:///missing.md"); !errors.Is(err, app.ErrNotFound) {
 			t.Errorf("want ErrNotFound, got %v", err)
 		}
@@ -103,7 +103,7 @@ func TestRemover(t *testing.T) {
 		docs := &fakeDocs{}
 		idx := &fakeIndex{}
 		seed(t, docs, idx, "docs", "file:///a.md", 3)
-		rm := app.NewRemover(colls, docs, idx)
+		rm := app.NewRemover(colls, docs, idx, &fakeLexical{})
 
 		docID := domain.DeriveDocumentID("docs", "file:///a.md")
 		target := domain.DeriveChunkID(docID, 1)
@@ -128,7 +128,7 @@ func TestRemover(t *testing.T) {
 	})
 
 	t.Run("RemoveChunks on an unknown collection is ErrNotFound", func(t *testing.T) {
-		rm := app.NewRemover(newFakeCollections(), &fakeDocs{}, &fakeIndex{})
+		rm := app.NewRemover(newFakeCollections(), &fakeDocs{}, &fakeIndex{}, &fakeLexical{})
 		if _, err := rm.RemoveChunks(ctx, "ghost", []domain.ChunkID{"x:0"}); !errors.Is(err, app.ErrNotFound) {
 			t.Errorf("want ErrNotFound, got %v", err)
 		}

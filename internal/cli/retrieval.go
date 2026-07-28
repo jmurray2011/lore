@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -26,14 +28,22 @@ var maxAttachmentBytes int64 = 64 << 20
 
 func newQueryCmd(deps *Deps) *cobra.Command {
 	var (
-		k          int
-		source     string
-		explain    bool
-		rerank     bool
-		candidates int
-		budget     int
-		fromColl   string
-		collFlags  []string
+		k            int
+		source       string
+		where        []string
+		explain      bool
+		rerank       bool
+		candidates   int
+		budget       int
+		hybrid       bool
+		lexical      bool
+		maxPerSource int
+		mmr          bool
+		mmrLambda    float64
+		recency      bool
+		halfLifeDays float64
+		fromColl     string
+		collFlags    []string
 	)
 	cmd := &cobra.Command{
 		Use:   "query [collection] <query>",
@@ -45,8 +55,15 @@ func newQueryCmd(deps *Deps) *cobra.Command {
 			"queries (no re-embedding) and results are grouped by source chunk — for finding where " +
 			"two collections overlap or diverge.",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			filter, err := domain.ParseWhere(where)
+			if err != nil {
+				return err
+			}
 			if fromColl != "" {
-				return runQueryFrom(cmd, deps, args, fromColl, collFlags, k, source)
+				if hybrid {
+					return fmt.Errorf("%w: --hybrid cannot be combined with --from-collection (which queries by stored vectors)", domain.ErrInvalidArgument)
+				}
+				return runQueryFrom(cmd, deps, args, fromColl, collFlags, k, source, filter)
 			}
 
 			collections, queryText, err := resolveCollectionArgs(args, collFlags, "query", "query string")
@@ -58,7 +75,7 @@ func newQueryCmd(deps *Deps) *cobra.Command {
 				return err
 			}
 
-			hits, runnerUp, err := resolveHits(cmd, deps, collections, queryText, k, candidates, source, rerank, explain)
+			hits, runnerUp, err := resolveHits(cmd, deps, collections, queryText, k, candidates, source, filter, rerank, explain, hybrid, lexical, mmr, mmrLambda, recency, halfLifeDays, maxPerSource)
 			if err != nil {
 				return err
 			}
@@ -81,10 +98,18 @@ func newQueryCmd(deps *Deps) *cobra.Command {
 	}
 	cmd.Flags().IntVarP(&k, "top-k", "k", 8, "number of chunks to retrieve (the final count after --rerank)")
 	cmd.Flags().StringVar(&source, "source", "", "restrict to documents whose source matches this glob (e.g. '*.pdf')")
+	cmd.Flags().StringArrayVar(&where, "where", nil, "filter to documents whose metadata matches this predicate, e.g. 'author=alice' or 'date>=2025-01-01' (repeatable; ANDed)")
 	cmd.Flags().BoolVar(&explain, "explain", false, "print the score distribution (top-k + the best rejected candidate) to stderr")
 	cmd.Flags().BoolVar(&rerank, "rerank", false, "two-stage retrieval: vector-search a wide pool, then rerank to the top -k")
 	cmd.Flags().IntVar(&candidates, "rerank-candidates", 50, "size of the pre-rerank vector candidate pool (must be >= -k)")
 	cmd.Flags().IntVar(&budget, "budget", 0, "cap the returned set to this many tokens (after ranking; trims within -k)")
+	cmd.Flags().BoolVar(&hybrid, "hybrid", deps.RetrievalHybrid, "hybrid retrieval: fuse vector and BM25 keyword results (Reciprocal Rank Fusion)")
+	cmd.Flags().BoolVar(&lexical, "lexical", false, "BM25 keyword-only retrieval — no embedding, so it works with no API key (single-collection; not with --hybrid/--rerank/--mmr/--recency)")
+	cmd.Flags().IntVar(&maxPerSource, "max-per-source", 0, "cap the number of returned chunks per source document (0 = no cap)")
+	cmd.Flags().BoolVar(&mmr, "mmr", false, "diversify results with Maximal Marginal Relevance (single-collection; not with --rerank)")
+	cmd.Flags().Float64Var(&mmrLambda, "mmr-lambda", 0.5, "MMR relevance/diversity trade-off in [0,1] (1=pure relevance, 0=pure diversity)")
+	cmd.Flags().BoolVar(&recency, "recency", false, "recency-aware ranking: re-rank a wider pool by relevance with a time decay (not with --rerank/--mmr)")
+	cmd.Flags().Float64Var(&halfLifeDays, "half-life-days", 90, "recency half-life in days: a chunk this old keeps half its score (used with --recency)")
 	cmd.Flags().StringVar(&fromColl, "from-collection", "", "use this collection's stored vectors as the queries (no re-embedding), grouping hits by source chunk")
 	cmd.Flags().StringArrayVarP(&collFlags, "collection", "c", nil, "additional collection to search; repeatable (results merge across same-space collections)")
 	return cmd
@@ -93,14 +118,14 @@ func newQueryCmd(deps *Deps) *cobra.Command {
 // runQueryFrom handles `query <target> --from-collection <source>`: the target
 // is the sole positional, there is no query text (and no stdin), and -c is not
 // allowed — the source collection's stored vectors are the queries.
-func runQueryFrom(cmd *cobra.Command, deps *Deps, args []string, fromColl string, collFlags []string, k int, source string) error {
+func runQueryFrom(cmd *cobra.Command, deps *Deps, args []string, fromColl string, collFlags []string, k int, source string, filter domain.Predicate) error {
 	if len(collFlags) > 0 {
 		return fmt.Errorf("%w: --from-collection cannot be combined with -c/--collection", domain.ErrInvalidArgument)
 	}
 	if len(args) != 1 {
 		return fmt.Errorf("%w: query --from-collection takes the target <collection> and no query text", domain.ErrInvalidArgument)
 	}
-	groups, err := deps.Query.QueryFrom(cmd.Context(), args[0], fromColl, k, source)
+	groups, err := deps.Query.QueryFrom(cmd.Context(), args[0], fromColl, k, source, filter)
 	if err != nil {
 		return err
 	}
@@ -130,72 +155,102 @@ func budgetTrim(hits []domain.ChunkHit, budget int, counter app.TokenCounter) ([
 	return out, total
 }
 
-// resolveHits performs retrieval for query and ask, over one or many collections:
-// a plain top-k vector search, or — with --rerank — two-stage retrieval (a wide
-// vector candidate pool reranked to the final top-k). With more than one
-// collection the candidates are merged across them by score (each carrying its
-// origin collection). It returns the hits plus, for --explain, the runner-up
-// score (the best candidate just outside the returned set, by whichever ordering
-// is in effect — rerank score when reranking, similarity otherwise).
-func resolveHits(cmd *cobra.Command, deps *Deps, collections []string, queryText string, k, candidates int, source string, rerank, explain bool) ([]domain.ChunkHit, *float64, error) {
-	if rerank {
-		if deps.Rerank == nil {
-			return nil, nil, errRerankUnconfigured()
-		}
-		if candidates < k {
-			return nil, nil, fmt.Errorf("%w: --rerank-candidates (%d) must be >= -k (%d)", domain.ErrInvalidArgument, candidates, k)
-		}
-		pool, err := queryHits(cmd, deps, collections, queryText, candidates, source)
-		if err != nil {
-			return nil, nil, err
-		}
-		// With --explain, rerank the whole pool so the runner-up (k+1th by rerank
-		// score) is visible; otherwise truncate to k in the use case.
-		topN := k
-		if explain {
-			topN = 0
-		}
-		reranked, err := deps.Rerank.Rerank(cmd.Context(), queryText, pool, topN)
-		if err != nil {
-			return nil, nil, err
-		}
-		var runnerUp *float64
-		if explain && k > 0 && len(reranked) > k {
-			if rs := reranked[k].RerankScore; rs != nil {
-				s := *rs
-				runnerUp = &s
-			}
-			reranked = reranked[:k]
-		}
-		return reranked, runnerUp, nil
+// resolveHits translates query/ask flags into app.RetrieveOptions and resolves
+// them through the shared Retriever — the one place retrieval composition lives
+// (also used by the eval harness and the MCP server). It returns the ranked hits
+// plus, for --explain, the runner-up score (the best candidate just outside the
+// returned set).
+func resolveHits(cmd *cobra.Command, deps *Deps, collections []string, queryText string, k, candidates int, source string, filter domain.Predicate, rerank, explain, hybrid, lexical, mmr bool, mmrLambda float64, recency bool, halfLifeDays float64, maxPerSource int) ([]domain.ChunkHit, *float64, error) {
+	// Preflight the same way the standalone rerank command does, so query/ask
+	// --rerank name the config keys instead of the app layer's key-less phrasing.
+	if rerank && deps.Rerank == nil {
+		return nil, nil, errRerankUnconfigured()
 	}
-	if explain {
-		ret, err := explainHits(cmd, deps, collections, queryText, k, source)
-		if err != nil {
-			return nil, nil, err
-		}
-		return ret.Hits, nextScorePtr(ret), nil
-	}
-	hits, err := queryHits(cmd, deps, collections, queryText, k, source)
-	return hits, nil, err
+	hits, runnerUp, err := deps.Retriever.Resolve(cmd.Context(), app.RetrieveOptions{
+		Collections:  collections,
+		Query:        queryText,
+		K:            k,
+		Candidates:   candidates,
+		Source:       source,
+		Filter:       filter,
+		Rerank:       rerank,
+		Explain:      explain,
+		Hybrid:       hybrid,
+		Lexical:      lexical,
+		MMR:          mmr,
+		MMRLambda:    mmrLambda,
+		Recency:      recency,
+		HalfLife:     time.Duration(halfLifeDays * 24 * float64(time.Hour)),
+		MaxPerSource: maxPerSource,
+	})
+	return hits, runnerUp, hintUnknownCollection(cmd.Context(), deps, err)
 }
 
-// queryHits retrieves the top-k hits for one collection (the byte-for-byte
-// legacy path) or merges across several same-space collections.
-func queryHits(cmd *cobra.Command, deps *Deps, collections []string, queryText string, k int, source string) ([]domain.ChunkHit, error) {
-	if len(collections) > 1 {
-		return deps.Query.QueryAcross(cmd.Context(), collections, queryText, k, source)
+// hintUnknownCollection enriches an unknown-collection error (exit 3) with the
+// next step: the collections that DO exist, or how to create one when there are
+// none. It preserves the ErrNotFound chain (so the exit code is unchanged) and
+// is best-effort — if listing fails it returns the original error untouched. It
+// is meant for call sites where an ErrNotFound can only be a missing collection
+// (not a missing --doc/--chunk selector).
+func hintUnknownCollection(ctx context.Context, deps *Deps, err error) error {
+	if err == nil || !errors.Is(err, app.ErrNotFound) {
+		return err
 	}
-	return deps.Query.Query(cmd.Context(), collections[0], queryText, k, source)
+	colls, lerr := deps.Catalog.List(ctx)
+	if lerr != nil {
+		return err
+	}
+	if len(colls) == 0 {
+		return fmt.Errorf("%w; no collections exist yet — create one with `lore init <name>`", err)
+	}
+	names := make([]string, len(colls))
+	for i, c := range colls {
+		names[i] = c.Name
+	}
+	return fmt.Errorf("%w; existing collections: %s (see `lore ls`)", err, strings.Join(names, ", "))
 }
 
-// explainHits is queryHits' --explain twin: it also surfaces the runner-up just
-// outside the returned top-k, single- or multi-collection.
-func explainHits(cmd *cobra.Command, deps *Deps, collections []string, queryText string, k int, source string) (app.Retrieval, error) {
-	if len(collections) > 1 {
-		return deps.Query.ExplainAcross(cmd.Context(), collections, queryText, k, source)
+// verificationViews builds the --json per-claim verdicts for ask --verify.
+func verificationViews(claims []domain.Claim) []verificationClaimView {
+	out := make([]verificationClaimView, len(claims))
+	for i, c := range claims {
+		ids := make([]string, len(c.CitedChunks))
+		for j, id := range c.CitedChunks {
+			ids[j] = string(id)
+		}
+		out[i] = verificationClaimView{Claim: c.Text, CitedChunks: ids, Verdict: string(c.Verdict), Rationale: c.Rationale}
 	}
-	return deps.Query.Explain(cmd.Context(), collections[0], queryText, k, source)
+	return out
+}
+
+// verificationMarkdown renders the human verification block: a support-rate header
+// and each claim marked by verdict (✓ supported, ✗ unsupported, ? uncited).
+func verificationMarkdown(claims []domain.Claim, supportRate float64) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "## Verification\n\n**Support rate: %.0f%%** (%d/%d claims supported)\n\n", supportRate*100, supportedCount(claims), len(claims))
+	mark := map[domain.ClaimVerdict]string{
+		domain.VerdictSupported:   "✓",
+		domain.VerdictUnsupported: "✗",
+		domain.VerdictUncited:     "?",
+	}
+	for _, c := range claims {
+		fmt.Fprintf(&b, "- %s %s\n", mark[c.Verdict], c.Text)
+		if c.Verdict == domain.VerdictUnsupported && c.Rationale != "" {
+			fmt.Fprintf(&b, "  - _%s_\n", c.Rationale)
+		}
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// supportedCount counts the supported claims.
+func supportedCount(claims []domain.Claim) int {
+	n := 0
+	for _, c := range claims {
+		if c.Verdict == domain.VerdictSupported {
+			n++
+		}
+	}
+	return n
 }
 
 // resolveCollectionArgs derives the target collection set and the query/question
@@ -211,6 +266,11 @@ func resolveCollectionArgs(args, collFlags []string, cmdName, textName string) (
 		text = args[1]
 	case len(args) == 1 && len(collFlags) > 0:
 		text = args[0]
+	case len(args) > 2:
+		// Extra positional words almost always mean an unquoted multi-word query:
+		// name the real fix (quoting) rather than the generic usage line.
+		return nil, "", fmt.Errorf("%w: %s takes one collection and a single quoted %s — wrap the %s in quotes, e.g. lore %s notes %q",
+			domain.ErrInvalidArgument, cmdName, textName, textName, cmdName, "how does auth work?")
 	default:
 		return nil, "", fmt.Errorf("%w: %s takes a %s and at least one collection (a positional <collection> or -c/--collection)", domain.ErrInvalidArgument, cmdName, textName)
 	}
@@ -246,7 +306,7 @@ func hitViews(hits []domain.ChunkHit) ([]hitView, string) {
 	views := make([]hitView, len(hits))
 	var b strings.Builder
 	for i, h := range hits {
-		views[i] = hitView{ChunkID: string(h.Chunk.ID), Source: h.Source, Seq: h.Chunk.Seq, Score: h.Score, RerankScore: h.RerankScore, Collection: h.Collection, Text: h.Chunk.Text}
+		views[i] = hitView{ChunkID: string(h.Chunk.ID), Source: h.Source, Seq: h.Chunk.Seq, Score: h.Score, RerankScore: h.RerankScore, Collection: h.Collection, Metadata: h.Metadata, Text: h.Chunk.Text}
 		if i > 0 {
 			b.WriteString("\n---\n\n")
 		}
@@ -300,30 +360,31 @@ func writeQueryExplain(cmd *cobra.Command, ev explainView) error {
 	return err
 }
 
-// nextScorePtr returns the runner-up score as a pointer, or nil when there was
-// no further candidate (so --json renders next_score: null).
-func nextScorePtr(ret app.Retrieval) *float64 {
-	if !ret.HasNext {
-		return nil
-	}
-	s := ret.NextScore
-	return &s
-}
-
 func newAskCmd(deps *Deps) *cobra.Command {
 	var (
 		k            int
 		attach       []string
 		strict       bool
 		source       string
+		where        []string
 		expand       bool
 		explain      bool
 		rerank       bool
 		candidates   int
 		budget       int
+		hybrid       bool
+		lexical      bool
+		maxPerSource int
+		mmr          bool
+		mmrLambda    float64
+		recency      bool
+		halfLifeDays float64
+		verify       bool
+		verifyStrict bool
 		collFlags    []string
 		streamFlag   bool
 		noStreamFlag bool
+		reproducible bool
 	)
 	cmd := &cobra.Command{
 		Use:   "ask [collection] <question>",
@@ -334,6 +395,10 @@ func newAskCmd(deps *Deps) *cobra.Command {
 			"collection. Composes with --rerank, --budget, and --explain over the merged set.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			attachments, err := loadAttachments(attach)
+			if err != nil {
+				return err
+			}
+			filter, err := domain.ParseWhere(where)
 			if err != nil {
 				return err
 			}
@@ -349,6 +414,18 @@ func newAskCmd(deps *Deps) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if verifyStrict {
+				verify = true // --verify-strict implies verification
+			}
+			if verify {
+				if deps.Verify == nil {
+					return fmt.Errorf("%w: verification is not available", domain.ErrInvalidArgument)
+				}
+				stream = false // verification needs the whole answer; cannot verify a token stream
+			}
+			if reproducible {
+				stream = false // a reproducible exhibit needs the whole pinned answer, not a token stream
+			}
 			multi := len(collections) > 1
 			collLabel := strings.Join(collections, ", ")
 			var (
@@ -360,13 +437,14 @@ func newAskCmd(deps *Deps) *cobra.Command {
 				streamedRaw string
 			)
 			switch {
-			case rerank || budget > 0 || multi || stream:
+			case rerank || budget > 0 || multi || stream || hybrid || lexical || mmr || recency || maxPerSource > 0 || reproducible:
 				// Interpose between retrieval and synthesis: resolve hits (across
-				// collections and/or two-stage via --rerank), cap them to the token
-				// --budget, then synthesize — streaming the prose when enabled. Uses
-				// the Synthesize seam and replicates Ask's strict guard, which it lacks.
+				// collections, two-stage via --rerank, and/or --hybrid fusion), cap
+				// them to the token --budget, then synthesize — streaming the prose
+				// when enabled. Uses the Synthesize seam and replicates Ask's strict
+				// guard, which it lacks.
 				var hits []domain.ChunkHit
-				hits, runnerUp, err = resolveHits(cmd, deps, collections, question, k, candidates, source, rerank, explain)
+				hits, runnerUp, err = resolveHits(cmd, deps, collections, question, k, candidates, source, filter, rerank, explain, hybrid, lexical, mmr, mmrLambda, recency, halfLifeDays, maxPerSource)
 				if err != nil {
 					return err
 				}
@@ -387,15 +465,17 @@ func newAskCmd(deps *Deps) *cobra.Command {
 					})
 					streamed = true
 					streamedRaw = raw.String()
+				} else if reproducible {
+					ans, err = deps.Ask.SynthesizeReproducible(cmd.Context(), question, hits, attachments)
 				} else {
 					ans, err = deps.Ask.Synthesize(cmd.Context(), question, hits, attachments)
 				}
 				ret.Hits = hits
 			case explain:
-				ans, ret, err = deps.Ask.AskExplain(cmd.Context(), collections[0], question, k, attachments, strict, source)
-				runnerUp = nextScorePtr(ret)
+				ans, ret, err = deps.Ask.AskExplain(cmd.Context(), collections[0], question, k, attachments, strict, source, filter)
+				runnerUp = app.NextScorePtr(ret)
 			default:
-				ans, err = deps.Ask.Ask(cmd.Context(), collections[0], question, k, attachments, strict, source)
+				ans, err = deps.Ask.Ask(cmd.Context(), collections[0], question, k, attachments, strict, source, filter)
 			}
 			if err != nil {
 				return err // strict's ErrNoGrounding short-circuits here, before any expansion or explain output
@@ -441,6 +521,60 @@ func newAskCmd(deps *Deps) *cobra.Command {
 				md = expandedSources(ans, textByChunk)
 			}
 
+			// --verify: check each claim's faithfulness against its cited chunks. The
+			// per-claim verdicts ride in --json and append a human block; --verify-strict
+			// turns any unsupported claim into a non-zero exit (gateErr, code 5),
+			// returned only after the report is rendered so CI sees what failed.
+			var gateErr error
+			if verify {
+				claims, err := deps.Verify.Verify(cmd.Context(), collections[0], ans)
+				if err != nil {
+					return err
+				}
+				view.Verification = verificationViews(claims)
+				sr := domain.SupportRate(claims)
+				view.SupportRate = &sr
+				md += "\n\n" + verificationMarkdown(claims, sr)
+				if verifyStrict && !domain.AllSupported(claims) {
+					gateErr = fmt.Errorf("ask %q: %w: %d/%d claims supported", collLabel, app.ErrGateUnmet, supportedCount(claims), len(claims))
+				}
+			}
+
+			// On --json, attach the reproducible provenance manifest (corpus digests,
+			// retrieval config, generation identity, cited chunks, answer digest).
+			// Gated on --json so human runs do not pay the per-collection snapshot
+			// cost; the streamed path returned earlier and never emits JSON.
+			if asJSON, _ := cmd.Flags().GetBool("json"); asJSON {
+				rm := app.RetrievalManifest{
+					K:            k,
+					Source:       source,
+					Where:        where,
+					Rerank:       rerank,
+					Hybrid:       hybrid,
+					MMR:          mmr,
+					Recency:      recency,
+					MaxPerSource: maxPerSource,
+					Budget:       budget,
+				}
+				// Record a sub-lever only when its mode engaged, so the manifest
+				// never claims a default (rerank-candidates 50, mmr-lambda 0.5,
+				// half-life 90) that did not shape this retrieval.
+				if rerank {
+					rm.Candidates = candidates
+				}
+				if mmr {
+					rm.MMRLambda = mmrLambda
+				}
+				if recency {
+					rm.HalfLifeDays = halfLifeDays
+				}
+				m, err := buildAskManifest(cmd.Context(), deps, collections, question, rm, ans)
+				if err != nil {
+					return err
+				}
+				view.Manifest = m
+			}
+
 			// --explain: report the score distribution of the chunks that grounded
 			// the answer, plus the runner-up, annotated with which were cited.
 			// Orthogonal to --expand and --source. JSON carries it inside the
@@ -450,27 +584,46 @@ func newAskCmd(deps *Deps) *cobra.Command {
 				ev := buildExplain(ret.Hits, runnerUp, citedSet(ans))
 				if asJSON, _ := cmd.Flags().GetBool("json"); asJSON {
 					view.Explain = &ev
-					return render(cmd, view, md)
+					if err := render(cmd, view, md); err != nil {
+						return err
+					}
+					return gateErr
 				}
 				if err := render(cmd, view, md); err != nil {
 					return err
 				}
-				_, err := io.WriteString(cmd.ErrOrStderr(), explainText(ev))
-				return err
+				if _, err := io.WriteString(cmd.ErrOrStderr(), explainText(ev)); err != nil {
+					return err
+				}
+				return gateErr
 			}
 
-			return render(cmd, view, md)
+			if err := render(cmd, view, md); err != nil {
+				return err
+			}
+			return gateErr
 		},
 	}
 	cmd.Flags().IntVarP(&k, "top-k", "k", 8, "number of chunks to ground on (0 to ground on attachments only)")
 	cmd.Flags().StringArrayVar(&attach, "attach", nil, "file to send to the model as an attachment (repeatable)")
 	cmd.Flags().BoolVar(&strict, "strict", false, "fail (exit 1) instead of answering when nothing grounds the question")
 	cmd.Flags().StringVar(&source, "source", "", "restrict grounding to documents whose source matches this glob (e.g. '*.pdf')")
+	cmd.Flags().StringArrayVar(&where, "where", nil, "restrict grounding to documents whose metadata matches this predicate, e.g. 'author=alice' (repeatable; ANDed)")
 	cmd.Flags().BoolVar(&expand, "expand", false, "append the full text of each cited chunk after the answer")
 	cmd.Flags().BoolVar(&explain, "explain", false, "print the retrieval score distribution to stderr (the answer's explain key under --json)")
+	cmd.Flags().BoolVar(&verify, "verify", false, "check each answer sentence is entailed by the chunk(s) it cites; report per-claim verdicts and a support rate")
+	cmd.Flags().BoolVar(&verifyStrict, "verify-strict", false, "as --verify, but exit non-zero (5) if any claim is unsupported (a CI faithfulness gate)")
 	cmd.Flags().BoolVar(&rerank, "rerank", false, "two-stage retrieval: vector-search a wide pool, then rerank to the top -k before synthesis")
 	cmd.Flags().IntVar(&candidates, "rerank-candidates", 50, "size of the pre-rerank vector candidate pool (must be >= -k)")
 	cmd.Flags().IntVar(&budget, "budget", 0, "cap grounding to this many tokens (after ranking/rerank; trims within -k)")
+	cmd.Flags().BoolVar(&hybrid, "hybrid", deps.RetrievalHybrid, "hybrid retrieval: fuse vector and BM25 keyword results (Reciprocal Rank Fusion) before grounding")
+	cmd.Flags().BoolVar(&lexical, "lexical", false, "ground on BM25 keyword-only retrieval — no embedding, so it works with no embedder API key (single-collection)")
+	cmd.Flags().IntVar(&maxPerSource, "max-per-source", 0, "cap the number of grounding chunks per source document (0 = no cap)")
+	cmd.Flags().BoolVar(&mmr, "mmr", false, "diversify grounding with Maximal Marginal Relevance (single-collection; not with --rerank)")
+	cmd.Flags().Float64Var(&mmrLambda, "mmr-lambda", 0.5, "MMR relevance/diversity trade-off in [0,1] (1=pure relevance, 0=pure diversity)")
+	cmd.Flags().BoolVar(&reproducible, "reproducible", false, "pin generation (temperature 0 + seed) and capture model/fingerprint for a reproducible exhibit; pair with --json to emit the replayable manifest")
+	cmd.Flags().BoolVar(&recency, "recency", false, "recency-aware grounding: re-rank a wider pool by relevance with a time decay (not with --rerank/--mmr)")
+	cmd.Flags().Float64Var(&halfLifeDays, "half-life-days", 90, "recency half-life in days: a chunk this old keeps half its score (used with --recency)")
 	cmd.Flags().StringArrayVarP(&collFlags, "collection", "c", nil, "additional collection to ground on; repeatable (merges across same-space collections)")
 	cmd.Flags().BoolVar(&streamFlag, "stream", false, "stream the answer's tokens as they arrive (forced on; the default on an interactive terminal)")
 	cmd.Flags().BoolVar(&noStreamFlag, "no-stream", false, "disable streaming; buffer and render the full answer (restores rich Markdown output)")

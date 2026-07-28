@@ -27,21 +27,40 @@ type Deps struct {
 	Sync    *app.Syncer
 	Query   *app.Querier
 	Ask     *app.Asker
+	// Retriever composes retrieval (hybrid/rerank/mmr/recency/cap) for query/ask;
+	// the one source of truth shared with the eval harness and the MCP server.
+	Retriever *app.Retriever
 	// Rerank is nil when no rerank provider is configured; commands that need it
 	// (rerank, query/ask --rerank) report a usage error in that case.
 	Rerank *app.Reranker
 	Remove *app.Remover
+	// Replay re-runs an ask manifest to verify the answer reproduces (lore replay).
+	Replay *app.Replayer
 	// Tokens counts tokens for --budget token-bounded retrieval (query/ask).
 	Tokens app.TokenCounter
 	// Export and Import move a collection to/from a single portable artifact file.
 	Export *app.Exporter
 	Import *app.Importer
+	// Verify checks an answer's faithfulness (ask --verify); Eval runs an eval set
+	// (lore eval). Both may be nil if the runtime was built without them.
+	Verify *app.Checker
+	Eval   *app.Evaluator
 	// Index is the vector index, exposed read-only for the mcp server's
 	// collection_status chunk count. Other commands reach vectors via use cases.
 	Index app.VectorIndex
 	// Log is lore's configured logger (stderr), handed to the long-running mcp
 	// server so it honors --log-level/--log-format; nil is tolerated.
 	Log *slog.Logger
+	// RetrievalHybrid is the configured default for hybrid retrieval; it sets the
+	// default value of query/ask --hybrid (overridable per command).
+	RetrievalHybrid bool
+	// ChatModel is the configured chat model name, recorded in an ask manifest's
+	// generation identity. Empty is tolerated (manifest records what it knows).
+	ChatModel string
+	// EmbedSpace is the configured embedder's space (model + dimensions). Import
+	// compares it against an artifact's pinned space to warn when the local
+	// embedder cannot query the imported collection. Zero means "unknown".
+	EmbedSpace domain.EmbeddingSpace
 }
 
 // GlobalOptions are the resolved global flags the composition root needs to
@@ -65,14 +84,29 @@ type Builder func(context.Context, GlobalOptions) (Deps, error)
 // errOut. The build function is invoked once before any subcommand runs to
 // produce the dependencies the commands share. Errors returned from Execute map
 // to process exit codes via ExitCode.
-func NewRootCommand(build Builder, version string, out, errOut io.Writer) *cobra.Command {
+func NewRootCommand(build Builder, version, defaultConfigPath string, out, errOut io.Writer) *cobra.Command {
 	// deps is populated by PersistentPreRunE before any subcommand's RunE; the
 	// subcommands capture &deps so they see the built value at run time.
 	var deps Deps
 
 	root := &cobra.Command{
-		Use:           "lore",
-		Short:         "Fast, scriptable RAG and LLM operations over specific document sets",
+		Use:   "lore",
+		Short: "Fast, scriptable RAG and LLM operations over specific document sets",
+		Long: `lore indexes your documents and answers questions about them, citing the exact
+passages it used. Retrieval and answering run over an OpenAI-compatible API
+(OpenAI, Azure, Ollama, or any local server).
+
+Getting started:
+  export LORE_API_KEY=<key>              # or set api_key under [provider] in the config file
+  lore init notes                        # create a collection (pinned to your embedding model)
+  lore add notes ./docs                  # index a folder of documents
+  lore ask notes "how does auth work?"   # ask, grounded in those documents
+
+Configure your provider before 'lore init' — a collection is permanently pinned
+to the embedding model configured when it is created. See docs/configuration.md.`,
+		Example: `  lore init notes
+  lore add notes ./docs
+  lore ask notes "how does auth work?"`,
 		Version:       version,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -112,14 +146,18 @@ func NewRootCommand(build Builder, version string, out, errOut io.Writer) *cobra
 		newStatusCmd(&deps),
 		newDocsCmd(&deps),
 		newCatCmd(&deps),
+		newDiffCmd(&deps),
 		newQueryCmd(&deps),
 		newAskCmd(&deps),
+		newReplayCmd(&deps),
+		newEvalCmd(&deps),
 		newSynthesizeCmd(&deps),
 		newRerankCmd(&deps),
 		newExportCmd(&deps),
 		newImportCmd(&deps),
 		newRmCmd(&deps),
 		newMCPCmd(&deps),
+		newConfigCmd(defaultConfigPath),
 	)
 	return root
 }
@@ -140,12 +178,14 @@ func ExitCode(err error) int {
 	switch {
 	case err == nil:
 		return 0
-	case errors.Is(err, domain.ErrInvalidArgument):
+	case errors.Is(err, domain.ErrInvalidArgument), errors.Is(err, app.ErrReproducibleUnsupported):
 		return 2
 	case errors.Is(err, app.ErrNotFound):
 		return 3
 	case errors.Is(err, domain.ErrSpaceMismatch), errors.Is(err, domain.ErrChunkerMismatch):
 		return 4
+	case errors.Is(err, app.ErrGateUnmet):
+		return 5
 	default:
 		return 1
 	}
@@ -200,6 +240,14 @@ type statusView struct {
 	collectionView
 	Documents int    `json:"documents"`
 	Chunker   string `json:"chunker"`
+	// LastIngest is the most recent document ingestion time (max IngestedAt):
+	// the content-derived "as of when" that advances on any re-ingest, unlike
+	// CreatedAt. Omitted for an empty collection.
+	LastIngest string `json:"last_ingest_at,omitempty"`
+	// Digest is the corpus content identity (hex sha256 over the document set);
+	// it flips on any add, removal, or edit. The field a provenance snapshot
+	// should stamp instead of created_at.
+	Digest string `json:"corpus_digest"`
 }
 
 // chunkerLabel renders a collection's pinned chunker for display, naming the
@@ -223,7 +271,10 @@ type hitView struct {
 	// (multi-collection) queries; omitempty keeps single-collection output
 	// byte-for-byte unchanged.
 	Collection string `json:"collection,omitempty"`
-	Text       string `json:"text"`
+	// Metadata is the chunk's document-level attributes; omitempty keeps output
+	// unchanged for documents ingested without metadata.
+	Metadata domain.Metadata `json:"metadata,omitempty"`
+	Text     string          `json:"text"`
 }
 
 // fromRef identifies the source chunk a query --from-collection group was driven
@@ -277,6 +328,24 @@ type answerView struct {
 	// reported only when --budget is set; omitempty keeps output unchanged
 	// otherwise.
 	GroundingTokens *int `json:"grounding_tokens,omitempty"`
+	// Verification carries the per-claim faithfulness verdicts when --verify is set;
+	// SupportRate is the fraction of claims supported. omitempty keeps output
+	// unchanged without --verify.
+	Verification []verificationClaimView `json:"verification,omitempty"`
+	SupportRate  *float64                `json:"support_rate,omitempty"`
+	// Manifest is the reproducible provenance record of the ask: corpus digests,
+	// retrieval config, generation identity, cited chunks, and an answer digest.
+	// Present on --json so `lore replay` can re-run the exhibit. omitempty keeps
+	// human and streamed output unaffected.
+	Manifest *app.Manifest `json:"manifest,omitempty"`
+}
+
+// verificationClaimView is one claim's faithfulness verdict in --json output.
+type verificationClaimView struct {
+	Claim       string   `json:"claim"`
+	CitedChunks []string `json:"cited_chunks"`
+	Verdict     string   `json:"verdict"`
+	Rationale   string   `json:"rationale,omitempty"`
 }
 
 // explainView is the --explain diagnostic: the returned hits' score
@@ -308,9 +377,10 @@ type explainStats struct {
 }
 
 type docView struct {
-	Source     string `json:"source"`
-	Hash       string `json:"hash"`
-	IngestedAt string `json:"ingested_at"`
+	Source     string          `json:"source"`
+	Hash       string          `json:"hash"`
+	IngestedAt string          `json:"ingested_at"`
+	Metadata   domain.Metadata `json:"metadata,omitempty"`
 }
 
 // transferView is the export/import summary. Encrypted reports whether the

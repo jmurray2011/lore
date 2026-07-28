@@ -19,8 +19,10 @@ var (
 	_ app.CollectionRepository = (*fakeCollections)(nil)
 	_ app.DocumentRepository   = (*fakeDocs)(nil)
 	_ app.VectorIndex          = (*fakeIndex)(nil)
+	_ app.LexicalIndex         = (*fakeLexical)(nil)
 	_ app.Embedder             = (*fakeEmbedder)(nil)
 	_ app.Generator            = (*fakeGenerator)(nil)
+	_ app.Verifier             = (*fakeVerifier)(nil)
 	_ app.Source               = (*fakeSource)(nil)
 	_ app.Extractor            = (*fakeExtractor)(nil)
 )
@@ -127,15 +129,17 @@ func (f *fakeEmbedder) Embed(_ context.Context, texts []string) ([][]float32, er
 }
 
 type fakeIndex struct {
-	mu        sync.Mutex
-	matches   map[string][]domain.VectorMatch         // canned Search results
-	upserted  map[string]map[domain.ChunkID][]float32 // recorded Upserts per collection
-	searchErr error
-	upsertErr error
+	mu         sync.Mutex
+	matches    map[string][]domain.VectorMatch         // canned Search results
+	upserted   map[string]map[domain.ChunkID][]float32 // recorded Upserts per collection
+	gotEntries []app.VectorEntry                       // every entry ever upserted (with metadata)
+	searchErr  error
+	upsertErr  error
 
 	gotCollection string
 	gotQuery      []float32
 	gotK          int
+	gotFilter     domain.Predicate
 }
 
 func (f *fakeIndex) Upsert(_ context.Context, collection string, entries []app.VectorEntry) error {
@@ -154,14 +158,15 @@ func (f *fakeIndex) Upsert(_ context.Context, collection string, entries []app.V
 	}
 	for _, e := range entries {
 		col[e.ChunkID] = e.Vector
+		f.gotEntries = append(f.gotEntries, e)
 	}
 	return nil
 }
 
-func (f *fakeIndex) Search(_ context.Context, collection string, query []float32, k int) ([]domain.VectorMatch, error) {
+func (f *fakeIndex) Search(_ context.Context, collection string, query []float32, k int, filter domain.Predicate) ([]domain.VectorMatch, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.gotCollection, f.gotQuery, f.gotK = collection, query, k
+	f.gotCollection, f.gotQuery, f.gotK, f.gotFilter = collection, query, k, filter
 	if f.searchErr != nil {
 		return nil, f.searchErr
 	}
@@ -194,6 +199,41 @@ func (f *fakeIndex) count(collection string) int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return len(f.upserted[collection])
+}
+
+// fakeLexical is a hand fake of the LexicalIndex port: it records what it was
+// asked to index/delete and returns canned ranked results per collection.
+type fakeLexical struct {
+	mu        sync.Mutex
+	results   map[string][]domain.ChunkID // canned Search results per collection
+	indexed   []app.LexicalDoc
+	deleted   []domain.ChunkID
+	gotFilter domain.Predicate
+}
+
+func (f *fakeLexical) Upsert(_ context.Context, _ string, docs []app.LexicalDoc) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.indexed = append(f.indexed, docs...)
+	return nil
+}
+
+func (f *fakeLexical) Search(_ context.Context, collection, _ string, k int, filter domain.Predicate) ([]domain.ChunkID, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.gotFilter = filter
+	ids := f.results[collection]
+	if k > 0 && len(ids) > k {
+		ids = ids[:k]
+	}
+	return ids, nil
+}
+
+func (f *fakeLexical) Delete(_ context.Context, _ string, ids []domain.ChunkID) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.deleted = append(f.deleted, ids...)
+	return nil
 }
 
 type fakeDocs struct {
@@ -379,6 +419,29 @@ type fakeGenerator struct {
 func (f *fakeGenerator) Synthesize(_ context.Context, question string, hits []domain.ChunkHit, attachments []domain.Attachment) (app.Answer, error) {
 	f.gotQuestion, f.gotHits, f.gotAttachments = question, hits, attachments
 	return f.answer, f.err
+}
+
+// fakeVerifier returns canned verdicts keyed by claim text (default supported) and
+// records the claim/evidence pairs it was asked to judge.
+type fakeVerifier struct {
+	mu          sync.Mutex
+	unsupported map[string]bool // claim text → true means return unsupported
+	gotEvidence map[string]string
+	calls       int
+}
+
+func (f *fakeVerifier) Verify(_ context.Context, claim, evidence string) (app.Verdict, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+	if f.gotEvidence == nil {
+		f.gotEvidence = map[string]string{}
+	}
+	f.gotEvidence[claim] = evidence
+	if f.unsupported[claim] {
+		return app.Verdict{Supported: false, Rationale: "not entailed"}, nil
+	}
+	return app.Verdict{Supported: true, Rationale: "entailed"}, nil
 }
 
 type fakeSource struct {
