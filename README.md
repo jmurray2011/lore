@@ -23,14 +23,6 @@ lore embeds and answers over an OpenAI-compatible API, so it needs a provider
 (OpenAI, Azure, Ollama, vLLM, a local server, ...). Configure one before `init` —
 see [Quickstart](#quickstart) and [docs/configuration.md](docs/configuration.md).
 
-<!-- TODO: record — demo placeholder; replace the link below with the cast/GIF.
-     Record script (~25s; the grounded, cited answer is the payoff):
-       lore init notes && lore add notes ./docs && lore ask notes "how does auth work?"
-     e.g. `asciinema rec lore-demo.cast -c 'bash demo.sh'`, then `asciinema upload`
-     and point the link at the result — or `agg lore-demo.cast docs/demo.gif` and
-     use ![lore demo](docs/demo.gif). -->
-[![asciinema demo (coming soon)](https://img.shields.io/badge/demo-asciinema-d35400?logo=asciinema)](https://github.com/jmurray2011/lore)
-
 ## Why lore
 
 - **Auditable** — every answer cites exact chunks; `ask --verify` checks each claim is
