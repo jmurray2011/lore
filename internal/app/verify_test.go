@@ -30,8 +30,10 @@ func TestCheckerVerify(t *testing.T) {
 	verifier := &fakeVerifier{unsupported: map[string]bool{"Grass is purple": true}}
 	checker := app.NewChecker(verifier, catalog)
 
+	// "Mars is red." sits in its own paragraph: a same-paragraph sentence would
+	// inherit the block's citations, and this test pins the uncited path.
 	ans := app.Answer{
-		Text: "The sky is blue [" + string(c0.ID) + "]. Grass is purple [" + string(c1.ID) + "]. Mars is red.",
+		Text: "The sky is blue [" + string(c0.ID) + "]. Grass is purple [" + string(c1.ID) + "].\n\nMars is red.",
 		Citations: []domain.Citation{
 			{ChunkID: c0.ID, Source: "file:///a.md", Seq: 0},
 			{ChunkID: c1.ID, Source: "file:///a.md", Seq: 1},
@@ -78,7 +80,7 @@ func TestCheckerVerifyWithEvidence(t *testing.T) {
 	checker := app.NewChecker(verifier, nil)
 
 	ans := app.Answer{
-		Text: "The sky is blue [" + string(c0) + "]. Grass is purple [" + string(c1) + "]. Mars is red.",
+		Text: "The sky is blue [" + string(c0) + "]. Grass is purple [" + string(c1) + "].\n\nMars is red.",
 		Citations: []domain.Citation{
 			{ChunkID: c0, Source: "file:///a.md", Seq: 0},
 			{ChunkID: c1, Source: "file:///a.md", Seq: 1},

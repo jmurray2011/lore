@@ -23,9 +23,10 @@ func TestSegmentClaims(t *testing.T) {
 		if claims[1].CitedChunks[0] != b {
 			t.Errorf("claim 1 cites = %v", claims[1].CitedChunks)
 		}
-		// The uncited sentence is marked uncited up front (no evidence to verify).
-		if claims[2].Verdict != domain.VerdictUncited || len(claims[2].CitedChunks) != 0 {
-			t.Errorf("claim 2 should be uncited, got %+v", claims[2])
+		// The marker-less sentence shares the block, so it inherits its citations
+		// and goes to the Verifier rather than being flagged uncited.
+		if claims[2].Verdict != "" || len(claims[2].CitedChunks) != 2 {
+			t.Errorf("claim 2 should inherit the block's citations unjudged, got %+v", claims[2])
 		}
 		// Cited claims start unjudged (the Verifier fills them in).
 		if claims[0].Verdict != "" {
@@ -78,6 +79,61 @@ func TestSegmentClaims(t *testing.T) {
 		}
 		if claims[0].CitedChunks[0] != a || claims[1].CitedChunks[0] != b {
 			t.Errorf("claims = %+v", claims)
+		}
+	})
+
+	t.Run("drops bare list enumerators", func(t *testing.T) {
+		// "1. The sky..." splits as "1" | "The sky..." because a digit before ". "
+		// is a sentence end. The enumerator is list structure, not a claim; keeping
+		// it (always unverifiable) deflates the support rate of every numbered-list
+		// answer.
+		text := "1. The sky is blue [" + string(a) + "].\n2. Grass is green [" + string(b) + "].\n"
+		claims := domain.SegmentClaims(text, cites)
+		if len(claims) != 2 {
+			t.Fatalf("want 2 claims (enumerators are not claims), got %d: %+v", len(claims), claims)
+		}
+		if claims[0].Text != "The sky is blue" || claims[1].Text != "Grass is green" {
+			t.Errorf("claim texts = %q, %q", claims[0].Text, claims[1].Text)
+		}
+		if len(claims[0].CitedChunks) != 1 || claims[0].CitedChunks[0] != a {
+			t.Errorf("claim 0 cites = %v, want [%s]", claims[0].CitedChunks, a)
+		}
+		if len(claims[1].CitedChunks) != 1 || claims[1].CitedChunks[0] != b {
+			t.Errorf("claim 1 cites = %v, want [%s]", claims[1].CitedChunks, b)
+		}
+	})
+
+	t.Run("a marker-less sentence inherits its paragraph's citations", func(t *testing.T) {
+		// Generators cite once at the end of a multi-sentence point; the earlier
+		// sentences of the point carry no inline marker. They are grounded in the
+		// same chunks, so they inherit the paragraph's citations and get verified
+		// instead of being flagged uncited without a model call.
+		text := "Writing with the model reduced diversity. The authors credit the model [" + string(a) + "].\n"
+		claims := domain.SegmentClaims(text, cites)
+		if len(claims) != 2 {
+			t.Fatalf("want 2 claims, got %d: %+v", len(claims), claims)
+		}
+		if len(claims[0].CitedChunks) != 1 || claims[0].CitedChunks[0] != a {
+			t.Errorf("claim 0 should inherit the paragraph citation, got %+v", claims[0])
+		}
+		if claims[0].Verdict != "" {
+			t.Errorf("an inheriting claim goes to the Verifier unjudged, got %q", claims[0].Verdict)
+		}
+	})
+
+	t.Run("inheritance does not cross a paragraph break", func(t *testing.T) {
+		// A paragraph with no citations anywhere stays uncited: inheriting from a
+		// neighboring paragraph would attribute evidence the sentence never drew on.
+		text := "An overview sentence with no marker.\n\nKeys rotate yearly [" + string(a) + "].\n"
+		claims := domain.SegmentClaims(text, cites)
+		if len(claims) != 2 {
+			t.Fatalf("want 2 claims, got %d: %+v", len(claims), claims)
+		}
+		if claims[0].Verdict != domain.VerdictUncited || len(claims[0].CitedChunks) != 0 {
+			t.Errorf("claim 0 must stay uncited, got %+v", claims[0])
+		}
+		if len(claims[1].CitedChunks) != 1 || claims[1].CitedChunks[0] != a {
+			t.Errorf("claim 1 cites = %v", claims[1].CitedChunks)
 		}
 	})
 }

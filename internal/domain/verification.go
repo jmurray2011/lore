@@ -3,6 +3,7 @@ package domain
 import (
 	"regexp"
 	"strings"
+	"unicode"
 )
 
 // ClaimVerdict is the faithfulness verdict for one claim (sentence) of an answer.
@@ -47,32 +48,46 @@ var sentenceAbbrev = map[string]bool{
 	"ms": true, "dr": true, "prof": true, "sr": true, "jr": true, "st": true,
 }
 
-// segmentSentences breaks text into sentences at terminal punctuation followed by
+// segmentBlocks breaks text into sentences at terminal punctuation followed by
 // whitespace (or at line breaks), but does not split after a common abbreviation
 // ("e.g.", "U.S.", "etc."), a dotted acronym, or a single-letter initial — the
 // over-split a bare [.!?] regex causes on real prose. It is a heuristic biased
 // toward keeping a claim whole (under-splitting) rather than fragmenting it, since
 // a fragment orphans its citation. The terminal punctuation/line break is dropped
 // from the returned segments.
-func segmentSentences(text string) []string {
-	var out []string
+//
+// Sentences are grouped into blocks: a boundary whose whitespace contains a line
+// break ends the current block. A block is the citation-inheritance scope — one
+// paragraph or list item of generator output, which is not hard-wrapped.
+func segmentBlocks(text string) [][]string {
+	var blocks [][]string
+	var cur []string
 	start := 0
 	for _, loc := range sentenceBoundaryRE.FindAllStringSubmatchIndex(text, -1) {
 		punctStart := loc[2] // group 1 ([.!?]+) start, or -1 for a line-break boundary
 		contentEnd := loc[0]
+		lineBreak := true // a bare \n+ boundary (group 3) always ends the block
 		if punctStart >= 0 {
 			contentEnd = punctStart
 			if isAbbreviation(text[start:punctStart]) {
 				continue // not a real sentence end; fold into the current sentence
 			}
+			lineBreak = strings.Contains(text[loc[4]:loc[5]], "\n") // group 2 (\s+)
 		}
-		out = append(out, text[start:contentEnd])
+		cur = append(cur, text[start:contentEnd])
 		start = loc[1] // resume past the full boundary (punctuation+space or newline)
+		if lineBreak {
+			blocks = append(blocks, cur)
+			cur = nil
+		}
 	}
 	if start < len(text) {
-		out = append(out, text[start:])
+		cur = append(cur, text[start:])
 	}
-	return out
+	if len(cur) > 0 {
+		blocks = append(blocks, cur)
+	}
+	return blocks
 }
 
 // isAbbreviation reports whether the last whitespace-delimited token of preceding
@@ -96,9 +111,14 @@ var claimCitationRE = regexp.MustCompile(`\[([^\[\]]+)\]`)
 
 // SegmentClaims splits an answer into claims (sentences), extracts the chunk IDs
 // each cites (keeping only those present in citations — hallucinated IDs are
-// dropped), and strips the citation markers from the claim text. A sentence that
-// cites no valid chunk is marked VerdictUncited; a cited sentence is left
-// unjudged for the Verifier. Empty/whitespace-only answers yield no claims.
+// dropped), and strips the citation markers from the claim text. A sentence with
+// no letters is list structure or a stray number ("1." enumerators split as "1"),
+// not a claim, and is dropped. A sentence with no marker of its own inherits the
+// citations of its block — generators cite once at the end of a multi-sentence
+// point, and the point's earlier sentences are grounded in the same chunks. Only
+// a sentence whose whole block cites nothing is marked VerdictUncited; every
+// other claim is left unjudged for the Verifier. Empty/whitespace-only answers
+// yield no claims.
 func SegmentClaims(answer string, citations []Citation) []Claim {
 	valid := make(map[ChunkID]bool, len(citations))
 	for _, c := range citations {
@@ -106,20 +126,43 @@ func SegmentClaims(answer string, citations []Citation) []Claim {
 	}
 
 	var claims []Claim
-	for _, sentence := range segmentSentences(answer) {
-		cited := citedChunks(sentence, valid)
-		text := strings.TrimSpace(claimCitationRE.ReplaceAllString(sentence, ""))
-		text = strings.Join(strings.Fields(text), " ") // collapse whitespace left by stripping markers
-		if text == "" {
-			continue
+	for _, block := range segmentBlocks(answer) {
+		blockCited := blockCitations(block, valid)
+		for _, sentence := range block {
+			cited := citedChunks(sentence, valid)
+			text := strings.TrimSpace(claimCitationRE.ReplaceAllString(sentence, ""))
+			text = strings.Join(strings.Fields(text), " ") // collapse whitespace left by stripping markers
+			if !strings.ContainsFunc(text, unicode.IsLetter) {
+				continue
+			}
+			claim := Claim{Text: text, CitedChunks: cited}
+			if len(cited) == 0 {
+				if len(blockCited) > 0 {
+					claim.CitedChunks = blockCited
+				} else {
+					claim.Verdict = VerdictUncited
+				}
+			}
+			claims = append(claims, claim)
 		}
-		claim := Claim{Text: text, CitedChunks: cited}
-		if len(cited) == 0 {
-			claim.Verdict = VerdictUncited
-		}
-		claims = append(claims, claim)
 	}
 	return claims
+}
+
+// blockCitations is the union of the valid chunk IDs cited anywhere in the block,
+// in first-appearance order — what a marker-less sentence of the block inherits.
+func blockCitations(block []string, valid map[ChunkID]bool) []ChunkID {
+	var out []ChunkID
+	seen := make(map[ChunkID]bool)
+	for _, sentence := range block {
+		for _, id := range citedChunks(sentence, valid) {
+			if !seen[id] {
+				seen[id] = true
+				out = append(out, id)
+			}
+		}
+	}
+	return out
 }
 
 // citedChunks extracts the valid chunk IDs cited in a sentence, in first-appearance
