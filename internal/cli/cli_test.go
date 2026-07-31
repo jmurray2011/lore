@@ -1890,8 +1890,9 @@ func TestCLISynthesize(t *testing.T) {
 func TestCLISynthesizeParity(t *testing.T) {
 	c0 := domain.DeriveChunkID(domain.DeriveDocumentID("docs", "file:///a.md"), 0)
 	qvec := []float32{1, 0, 0}
-	// First sentence cites c0; the second is uncited (drives the strict gate).
-	gen := stubGenerator{text: "The sky is blue [" + string(c0) + "]. An uncited sentence."}
+	// First sentence cites c0; the second, in its own paragraph so it inherits
+	// nothing, is uncited (drives the strict gate).
+	gen := stubGenerator{text: "The sky is blue [" + string(c0) + "].\n\nAn uncited sentence."}
 	deps, _, docs, index := newDeps(stubEmbedder{space: testSpace(), vec: qvec}, gen)
 	if _, code := exec(deps, "init", "docs"); code != 0 {
 		t.Fatal("init failed")
@@ -2234,8 +2235,9 @@ func TestCLIRecency(t *testing.T) {
 func TestCLIAskVerify(t *testing.T) {
 	c0 := domain.DeriveChunkID(domain.DeriveDocumentID("docs", "file:///a.md"), 0)
 	qvec := []float32{1, 0, 0}
-	// The canned answer cites c0 in its first sentence and leaves the second uncited.
-	gen := stubGenerator{text: "The sky is blue [" + string(c0) + "]. An uncited sentence."}
+	// The canned answer cites c0 in its first sentence; the second, in its own
+	// paragraph so it inherits nothing, stays uncited.
+	gen := stubGenerator{text: "The sky is blue [" + string(c0) + "].\n\nAn uncited sentence."}
 	deps, _, docs, index := newDeps(stubEmbedder{space: testSpace(), vec: qvec}, gen)
 	if _, code := exec(deps, "init", "docs"); code != 0 {
 		t.Fatal("init failed")
