@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"strings"
 
 	"github.com/jmurray2011/lore/internal/domain"
 	_ "modernc.org/sqlite"
@@ -81,11 +82,35 @@ type Store struct {
 	db *sql.DB
 }
 
+// connectPragmas make concurrent access survivable. Capping the pool to one
+// connection (below) serializes writers inside this process, but lore runs as
+// several processes at once — an ingest, an interactive query, a resident `lore
+// mcp` server — and nothing coordinates them. SQLite installs no busy handler by
+// default, so without these a single reader fails every concurrent write
+// instantly with SQLITE_BUSY: an ingest loses documents for as long as the
+// reader lives, while its own walk keeps going. busy_timeout makes a contended
+// write wait instead of dying; WAL means a reader does not block it at all.
+const connectPragmas = "_pragma=busy_timeout(10000)&_pragma=journal_mode(WAL)"
+
+// dsn appends the connection pragmas to a database path, respecting a path that
+// already carries query parameters.
+func dsn(path string) string {
+	sep := "?"
+	if strings.Contains(path, "?") {
+		sep = "&"
+	}
+	return path + sep + connectPragmas
+}
+
 // Open opens (creating if needed) the database at path and applies the schema.
 // Pass ":memory:" for an ephemeral store. The pool is capped to one connection:
 // SQLite is single-writer, and an in-memory database lives on its connection.
+// Journal mode is persisted in the database file, so opening an existing one
+// migrates it to WAL for every later opener; an in-memory or network-hosted
+// database that cannot support WAL simply keeps its mode, still covered by the
+// busy timeout.
 func Open(path string) (*Store, error) {
-	db, err := sql.Open("sqlite", path)
+	db, err := sql.Open("sqlite", dsn(path))
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: open %s: %w", path, err)
 	}
